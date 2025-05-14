@@ -12,6 +12,14 @@
 
 参考来源：
 
+## 界面
+
+![screenshots](./doc/parentcontrol1.png)
+
+![screenshots](./doc/parentcontrol2.png)
+
+![screenshots](./doc/parentcontrol3.png)
+
 # My other project
 
 
