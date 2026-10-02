@@ -404,10 +404,27 @@ EOF
 cfg_apply
 FAKE_DATE_HM=13:00
 run_build
-t_eq '首次采样只取基线' 0 "$(sample_counters; pc_usage_get weburl_0)"
+t_eq '首次采样：无流量不计数' 0 "$(sample_counters; pc_usage_get weburl_0)"
 ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 40960   # +40KB ≥ 32KB
 sample_counters
 t_eq '增量 ≥ 阈值 → +1 分钟' 1 "$(pc_usage_get weburl_0)"
+
+echo '== 首次采样也该计入（不能丢开机后那一段）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_quota '30'
+EOF
+cfg_apply
+FAKE_DATE_HM=13:00
+run_build
+ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 40960
+t_eq '首次采样（无 base）即计入' 1 "$(sample_counters; pc_usage_get weburl_0)"
 ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 41984   # +1KB < 32KB
 sample_counters
 t_eq '增量 < 阈值 → 不计' 1 "$(pc_usage_get weburl_0)"

@@ -118,6 +118,11 @@ run_mut '计数装错表(filter)' "$INIT" \
 	'emit_entry_targets "$_m" "$_i" mangle "$TAGA" "$TAGA" "" "-j PCA_$_key" single' \
 	'emit_entry_targets "$_m" "$_i" filter "$TAGA" "$TAGA" "" "-j PCA_$_key" single' init_test.sh
 
+# 12d) 首次采样又变回「只写基线」（丢开机后那段用量）
+run_mut '首次采样不计数' "$INIT" \
+	'\t\t\t_d=$_v\n\t\tfi\n\t\t[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' \
+	'\t\t\t_d=0\n\t\tfi\n\t\t[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' init_test.sh
+
 # 12) 拆除时不清理 mangle 链
 run_mut '拆除残留 mangle 链' "$INIT" \
 	'		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
