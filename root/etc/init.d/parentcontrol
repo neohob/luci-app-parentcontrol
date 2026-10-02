@@ -30,18 +30,19 @@ USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
 HOLIDAY_LOCAL=${HOLIDAY_LOCAL:-/usr/share/parentcontrol/holiday}
 STATE_DIR=${STATE_DIR:-/tmp/parentcontrol}
+# 重置日志放 /etc（flash）是有意的：重置历史要跨重启保留，不能放 /tmp。
 RESET_LOG=${RESET_LOG:-/etc/parentcontrol/resets.log}
 CRON_TAG="#pc_tick"
 CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv stats_tsv reset_quota"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
 	refresh_holiday  Fetch statutory-holiday data for this year and next
-	usage_tsv        Print today's quota usage and 7-day history as TSV
+	stats_tsv [brief]  Print dashboard/list data as TSV (brief: meta+entry only)
 	stats_tsv        Print full stats for the dashboard as TSV
 	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log"
 
@@ -303,12 +304,44 @@ restore_offload() {
 # ============================================================================
 # 规则构建
 # ============================================================================
+
+# 在链顶插入「目标为局域网网段 → 直接放行」。路由器自身的管理地址就在局域网网段里，
+# 所以这是防自锁的关键：无设备条件的条目（= 对全部客户端生效）一旦生成无条件
+# DROP/REJECT，没有这条就会被管理员自己也一起封掉（实测踩过）。
+# 注意必须在所有封锁规则插完之后再调用——-I 是插到链首。
+# 本机没有 addrtype 模块，只能用「目标网段」放行，等价于放行到路由器自身的管理流量。
+allow_lan_in() { # $1=ipcmd $2=table $3=chain
+	local _n
+	for _n in $(pc_lan_nets); do
+		$1 -t $2 -I "$3" -d "$_n" -j RETURN 2>/dev/null
+	done
+	return 0
+}
+
 build_time_rules() { # $1=school|holiday
-	local _cm _ip _i
+	local _cm _ip _i _hookin
 	_cm=$(pc_uget "@basic[0].control_mode")
+	# 「强力管控」= 把时间链也挂进 INPUT，让受控机器连路由器管理页都进不去。
+	# 但无设备条件的条目（mac 和 ip 都空 = 对全部客户端生效）在 INPUT 里是无条件
+	# REJECT：受控窗口内管理员自己也上不了后台。这种条目存在时只保留 FORWARD 管控。
+	# （不能在 TAG 里加 allow_lan_in——受控机器访问管理页的目标就在局域网网段里，
+	#   一放行「强力管控」就永远不生效了，只能从挂载这一侧防。）
+	_hookin=1
+	for _i in $(pc_ids_on time); do
+		[ "$(pc_entry_eff_mode time "$_i" "$1")" = "time" ] || continue
+		if [ -z "$(pc_uget "@time[$_i].mac")" ] && [ -z "$(pc_uget "@time[$_i].ip")" ]; then
+			_hookin=0
+			elog "time[$_i] 无设备条件：为避免 INPUT 被无条件 REJECT 锁死，跳过「强力管控」的 INPUT 挂载"
+			break
+		fi
+	done
 	for _ip in "$ipt" "$ipt6"; do
 		hook_chain "$_ip" filter FORWARD "$TAG"
-		if [ "$_cm" = "1" ]; then hook_chain "$_ip" filter INPUT "$TAG"; else $_ip -D INPUT -j "$TAG" 2>/dev/null; fi
+		if [ "$_cm" = "1" ] && [ "$_hookin" = "1" ]; then
+			hook_chain "$_ip" filter INPUT "$TAG"
+		else
+			$_ip -D INPUT -j "$TAG" 2>/dev/null
+		fi
 	done
 	for _i in $(pc_ids_on time); do
 		[ "$(pc_entry_eff_mode time $_i "$1")" = "time" ] || continue
@@ -395,10 +428,15 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 }
 
 build_weburl_time_rules() { # $1=school|holiday
-	local _i
+	local _i _ip
 	for _i in $(pc_ids_on weburl); do
 		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
 		emit_entry_targets weburl "$_i" mangle "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" all
+	done
+	# 网址封锁列表万一填进了局域网网段，也不该把管理员挡在后台外
+	for _ip in "$ipt" "$ipt6"; do
+		allow_lan_in "$_ip" mangle "$TAGI"
+		allow_lan_in "$_ip" mangle "$TAGW"
 	done
 }
 
@@ -415,6 +453,9 @@ clean_pca_chains() {
 # 额度模式：常开计数规则（跳进空链 PCA_<key>，读跳转规则的字节计数）
 build_acct_rules() { # $1=school|holiday
 	local _key _m _i _ip
+	# 重建会清空计数器，所以「先采样再重建」必须在这里做：
+	# 不变量属于这个函数，调用方（build_all / rebuild_ip_rules）无从违反。
+	sample_counters
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
 	for _key in $(pc_quota_keys "$1"); do
@@ -424,7 +465,7 @@ build_acct_rules() { # $1=school|holiday
 		# 计数式：单一设备条件 + IP/字符串都计入
 		emit_entry_targets "$_m" "$_i" mangle "$TAGA" "$TAGA" "" "-j PCA_$_key" single
 	done
-	# 不删 base.*：重建前已采样，保留基线才能把重建后那一分钟也计入
+	# 不删 base.*：本函数开头已采样，保留基线才能把重建后那一分钟也计入
 }
 
 # 池内条目用量之和（只统计同样处于额度模式的成员）
@@ -451,10 +492,11 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 	_pool=$(pc_entry_pool "$1" "$2" "$3")
 	_pq=
 	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
+	# 输出「有效额度 已用 池名」——封锁链、看板、列表页共用同一份池优先解析
 	if [ -n "$_pq" ]; then
-		echo "$(pc_quota_positive "$_pq") $(pool_usage "$_pool" "$3")"
+		echo "$(pc_quota_positive "$_pq") $(pool_usage "$_pool" "$3") $_pool"
 	else
-		echo "$(pc_quota_positive "$(pc_entry_quota "$1" "$2" "$3")") $(pc_usage_get "$(entry_key "$1" "$2")")"
+		echo "$(pc_quota_positive "$(pc_entry_quota "$1" "$2" "$3")") $(pc_usage_get "$(entry_key "$1" "$2")") $_pool"
 	fi
 }
 
@@ -483,13 +525,10 @@ build_quota_blocks() {
 			block_entry "$_m" "$_i"
 		fi
 	done
-	# 最后插入「放行到局域网网段」的规则——里面含路由器自身 IP，所以 SSH/LuCI 不会被
+	# 最后插入「放行到局域网网段」的规则（含路由器自身 IP），SSH/LuCI 才不会被
 	# 自己的封锁断掉。必须排在所有封锁规则之前，而 -I 是插到最前，故放在最后插入。
-	# （实测本机没有 addrtype 模块，只能用目标网段放行。）
-	for _n in $_lan; do
-		for _ip in "$ipt" "$ipt6"; do
-			$_ip -t mangle -I "$TAGQ" -d "$_n" -j RETURN 2>/dev/null
-		done
+	for _ip in "$ipt" "$ipt6"; do
+		allow_lan_in "$_ip" mangle "$TAGQ"
 	done
 }
 
@@ -507,9 +546,9 @@ sample_counters() {
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac
 	_thr=$((_min_kb * 1024))
-	_dump=$($ipt -t mangle -nvx -L "$TAGA" 2>/dev/null; $ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null)
+	_dump="$STATE_DIR/acct.sample.$$"; dump_acct "$_dump"
 	for _key in $(active_acct_keys); do
-		_v=$(printf '%s\n' "$_dump" | awk -v t="PCA_$_key" '$3==t{s+=$2} END{printf "%d\n", s+0}')
+		_v=$(acct_bytes "$_key" "$_dump")
 		_bf="$STATE_DIR/base.$_key"
 		if [ -f "$_bf" ]; then
 			_b=$(cat "$_bf")
@@ -523,6 +562,7 @@ sample_counters() {
 		[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1
 		echo "$_v" > "$_bf"
 	done
+	rm -f "$_dump"
 	for _bf in "$STATE_DIR"/base.*; do
 		[ -e "$_bf" ] || continue
 		_k=${_bf##*/base.}
@@ -590,10 +630,15 @@ prune_usage() {
 	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
 	if [ "$_keep" -gt 0 ] 2>/dev/null; then
 		find "$USAGE_DIR" -type f -mtime +"$_keep" -delete 2>/dev/null
-		# 重置日志同样按保留天数裁剪（按行内日期过滤）
+		# 重置日志同样按保留天数裁剪（按行内日期过滤）；
+		# date -d @epoch 若不被 busybox 支持，退化为按行数保留最近 2000 条（绝不“永不裁剪”）。
 		if [ -f "$RESET_LOG" ]; then
-			_cut=$(date -d "@$(( $(date +%s) - _keep * 86400 ))" +%Y-%m-%d 2>/dev/null || echo 0000-00-00)
-			awk -F'\t' -v cut="$_cut" '$1 >= cut' "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+			_cut=$(date -d "@$(( $(date +%s) - _keep * 86400 ))" +%Y-%m-%d 2>/dev/null)
+			if [ -n "$_cut" ]; then
+				awk -F'\t' -v cut="$_cut" '$1 >= cut' "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+			else
+				tail -n 2000 "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+			fi
 		fi
 	fi
 	return 0
@@ -604,22 +649,6 @@ prune_usage() {
 #   day    <日期> <school|holiday> <重置> <0|1已发放>
 #   item   <条目> <已用分钟> <额度分钟,0=不限>
 #   history <YYYYMMDD> <当天总分钟>
-usage_tsv() {
-	local _tt _reset _issued _key _m _i _f _t
-	_tt=$(pc_today_type)
-	_reset=$(pc_reset_for "$_tt")
-	_issued=0; pc_allowance_issued "$_reset" && _issued=1
-	printf 'day\t%s\t%s\t%s\t%s\n' "$(pc_today)" "$_tt" "$_reset" "$_issued"
-	for _key in $(pc_quota_keys "$_tt"); do
-		_m=${_key%%_*}; _i=${_key#*_}
-		set -- $(entry_effective "$_m" "$_i" "$_tt")
-		printf 'item\t%s[%s]\t%s\t%s\n' "$_m" "$_i" "$2" "$1"
-	done
-	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -7); do
-		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
-		printf 'history\t%s\t%s\n' "$_f" "$_t"
-	done
-}
 
 # 池成员（"module[idx]" 列表）
 pool_members() { # $1=池名 $2=school|holiday
@@ -632,35 +661,42 @@ pool_members() { # $1=池名 $2=school|holiday
 }
 
 # 当前这一分钟内该条目产生的流量（KB）= 计数器当前值 - 上次采样基线
-quota_live_kb() { # $1=key
-	local _v _v6 _b _d
-	_v=$($ipt -t mangle -nvx -L "$TAGA" 2>/dev/null | awk -v t="PCA_$1" '$3==t{s+=$2} END{printf "%d", s+0}')
-	_v6=$($ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null | awk -v t="PCA_$1" '$3==t{s+=$2} END{printf "%d", s+0}')
+# 计数器 dump（v4+v6 一起），只让调用方 dump 一次再复用
+dump_acct() { # $1=输出文件
+	{
+		$ipt -t mangle -nvx -L "$TAGA" 2>/dev/null
+		$ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null
+	} > "$1"
+}
+
+# 从 dump 文件里取某条目的累计字节数（$2 为空则现场 dump 一次）
+acct_bytes() { # $1=key $2=dump文件
+	local _f _v
+	if [ -n "${2:-}" ]; then
+		_f=$2
+	else
+		mkdir -p "$STATE_DIR"; _f="$STATE_DIR/acct.$$"; dump_acct "$_f"
+	fi
+	_v=$(awk -v t="PCA_$1" '$3==t{s+=$2} END{printf "%d", s+0}' "$_f")
+	[ -n "${2:-}" ] || rm -f "$_f"
+	echo "$_v"
+}
+
+# 当前这一分钟内该条目产生的流量（KB）= 计数器当前值 - 上次采样基线
+quota_live_kb() { # $1=key $2=dump文件（空=现场 dump）
+	local _v _b _d
+	_v=$(acct_bytes "$1" "${2:-}")
 	_b=0; [ -f "$STATE_DIR/base.$1" ] && _b=$(cat "$STATE_DIR/base.$1")
-	_d=$(( _v + _v6 - _b )); [ "$_d" -lt 0 ] && _d=$(( _v + _v6 ))
+	_d=$(( _v - _b )); [ "$_d" -lt 0 ] && _d=$_v
 	echo $(( _d / 1024 ))
 }
 
-# 重置某条目今天的额度（可对池：pool:<名字>；会记进 $RESET_LOG）
-reset_quota() {
-	local _arg _key _f _used _m _i _name
-	_arg="$1"
-	[ -n "$_arg" ] || { elog "reset_quota: 缺参数"; return 1; }
+# 清零一个条目的今日用量并把事件写进 $RESET_LOG（纯数据处理，不碰 iptables）。
+# 回显重置前的已用分钟数。
+reset_one() { # $1=key
+	local _key _f _used
+	_key="$1"
 	_f=$(pc_usage_file)
-	case "$_arg" in
-	pool:*)
-		_name=${_arg#pool:}
-		case "$_name" in ''|*[!A-Za-z0-9_.-]*) elog "reset_quota: 非法池名"; return 1 ;; esac
-		for _m in time protocol weburl; do
-			for _i in $(pc_ids_on "$_m"); do
-				[ "$(pc_entry_pool "$_m" "$_i" "$(pc_today_type)")" = "$_name" ] && reset_quota "${_m}_${_i}"
-			done
-		done
-		return 0 ;;
-	esac
-	_key="$_arg"
-	# 严格白名单：只允许 module_index（防注入）
-	case "$_key" in ''|*[!a-z0-9_]*) elog "reset_quota: 非法 key $_key"; return 1 ;; esac
 	_used=$(pc_usage_get "$_key")
 	mkdir -p "$(dirname "$RESET_LOG")"
 	printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%d)" "$(date +%H:%M:%S)" "$_key" "$_used" >> "$RESET_LOG"
@@ -669,9 +705,41 @@ reset_quota() {
 		grep -v "^${_key} " "$_f" > "$_f.new" 2>/dev/null
 		mv "$_f.new" "$_f"
 	fi
-	# 若条目正被额度封锁，立刻重建封锁链让它马上可用
-	pc_uget "@basic[0].enabled" | grep -q '^1$' && build_quota_blocks
 	elog "reset_quota: $_key 重置（重置前已用 $_used 分钟）"
+	echo "$_used"
+}
+
+# 重置某条目今天的额度（可对池：pool:<名字>；会记进 $RESET_LOG）
+reset_quota() {
+	local _arg _m _i _n _pname
+	_arg="$1"
+	[ -n "$_arg" ] || { elog "reset_quota: 缺参数"; return 1; }
+	_n=0
+	case "$_arg" in
+	pool:*)
+		_pname=${_arg#pool:}
+		case "$_pname" in ''|*[!A-Za-z0-9_.-]*) elog "reset_quota: 非法池名"; return 1 ;; esac
+		# 池：逐成员清数据，但只在最后重建一次封锁链（原先每个成员重建一次 = O(N²) 条 iptables）
+		for _m in time protocol weburl; do
+			for _i in $(pc_ids_on "$_m"); do
+				[ "$(pc_entry_pool "$_m" "$_i" "$(pc_today_type)")" = "$_pname" ] || continue
+				reset_one "${_m}_${_i}" >/dev/null
+				_n=$((_n + 1))
+			done
+		done ;;
+	*)
+		# 严格白名单：只允许 module_index（防注入）
+		case "$_arg" in *[!a-z0-9_]*) elog "reset_quota: 非法 key $_arg"; return 1 ;; esac
+		reset_one "$_arg" >/dev/null
+		_n=1 ;;
+	esac
+	# 若条目正被额度封锁，立刻重建封锁链让它马上可用。
+	# 必须在 tick 锁内：否则可能与 tick 的 -F 交错，把「放行局域网」的规则整条冲掉，
+	# 正好制造出自锁事故（还会持续到下一分钟）。
+	[ "$_n" -gt 0 ] || return 0
+	if pc_uget "@basic[0].enabled" | grep -q '^1$'; then
+		with_tick_lock build_quota_blocks
+	fi
 	return 0
 }
 
@@ -681,8 +749,16 @@ reset_quota() {
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
+# 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）
+#   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
+#   meta     <日期> <school|holiday> <发放时刻> <0|1已发放> <阈值KB> <保留天> <当前HH:MM>
+#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
+#   pool     <池名> <额度> <已用> <成员,逗号分隔>
+#   hist     <YYYYMMDD> <当天总分钟>
+#   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
-	local _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _pq _live _f _t _n _cut
+	local _brief _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump
+	_brief="${1:-}"
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -692,48 +768,51 @@ stats_tsv() {
 	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
 	printf 'meta\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$(pc_today)" "$_tt" "$_reset" "$_issued" "$_min_kb" "$_keep" "$(date +%H:%M)"
+	# 计数器 dump 只做一次：逐条目各起 2 个 iptables 会让弱路由器打开页面卡几秒
+	if [ "$_brief" != "brief" ]; then
+		mkdir -p "$STATE_DIR"; _dump="$STATE_DIR/acct.stats.$$"; dump_acct "$_dump"
+	fi
 	# 所有「已启用」条目（含时段模式，看板需要完整信息）
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
 			_mode=$(pc_entry_eff_mode "$_m" "$_i" "$_tt")
 			_key="${_m}_${_i}"
-			_name=$(pc_uget "@$_m[$_i].remarks")
+			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
 			_mac=$(pc_uget "@$_m[$_i].mac")
 			_q=0; _u=0; _pool=""
 			if [ "$_mode" = "quota" ]; then
-				_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
-				_pq=""
-				[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$_tt")
-				if [ -n "$_pq" ]; then
-					_q=$(pc_quota_positive "$_pq"); _u=$(pool_usage "$_pool" "$_tt")
-				else
-					_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")"); _u=$(pc_usage_get "$_key")
-				fi
+				set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
+				_q=$1; _u=$2; _pool=${3:-}
 			fi
-			_live=$(quota_live_kb "$_key")
+			_live=0
+			[ -z "$_dump" ] || _live=$(quota_live_kb "$_key" "$_dump")
 			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_mode" "$_q" "$_u" "$_pool" "$_live"
 		done
 	done
-	# 共享池
-	for _i in $(pc_ids_all quota); do
-		_n=$(pc_uget "@quota[$_i].name"); [ -n "$_n" ] || continue
-		_q=$(pc_quota_positive "$(pc_pool_quota "$_n" "$_tt")")
-		_u=$(pool_usage "$_n" "$_tt")
-		printf 'pool\t%s\t%s\t%s\t%s\n' "$_n" "$_q" "$_u" \
-			"$(pool_members "$_n" "$_tt" | tr '\n' ',' | sed 's/,$//')"
-	done
-	# 历史（最近 30 天）
-	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -30); do
-		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
-		printf 'hist\t%s\t%s\n' "$_f" "$_t"
-		awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
-	done
-	# 重置记录（最近 30 天）：reset <YYYYMMDD> <HH:MM:SS> <key> <重置前已用分钟>
-	if [ -f "$RESET_LOG" ]; then
-		_cut=$(date -d "@$(( $(date +%s) - 30 * 86400 ))" +%Y-%m-%d 2>/dev/null || echo 0000-00-00)
-		tail -n 500 "$RESET_LOG" 2>/dev/null | awk -F'\t' -v cut="$_cut" '$1 >= cut && NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+	if [ "$_brief" != "brief" ]; then
+		# 共享池
+		for _i in $(pc_ids_all quota); do
+			_n=$(pc_uget "@quota[$_i].name"); [ -n "$_n" ] || continue
+			_q=$(pc_quota_positive "$(pc_pool_quota "$_n" "$_tt")")
+			_u=$(pool_usage "$_n" "$_tt")
+			printf 'pool\t%s\t%s\t%s\t%s\n' "$_n" "$_q" "$_u" \
+				"$(pool_members "$_n" "$_tt" | tr '\n' ',' | sed 's/,$//')"
+		done
+		# 历史（最近 30 天）
+		for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -30); do
+			_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
+			printf 'hist\t%s\t%s\n' "$_f" "$_t"
+			awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
+		done
+		# 重置记录：reset <YYYYMMDD> <HH:MM:SS> <key> <重置前已用分钟>
+		# 只取最近 200 条事件，30 天窗口由 Lua 侧按日期过滤（shell 不做日期算术）。
+		if [ -f "$RESET_LOG" ]; then
+			tail -n 200 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+		fi
+		[ -n "$_dump" ] && rm -f "$_dump"
 	fi
+	return 0
 }
 
 with_tick_lock() {
@@ -799,7 +878,6 @@ rebuild_ip_rules() {
 # 不重建 filter 表；refresh_holiday 自带节流（7 天/24h）、只写数据不建规则，
 # 必须保留——长假期间 holiday→holiday 不触发跨天重建，否则节假日数据永不联网刷新。
 refresh_ip_body() {
-	sample_counters
 	refresh_holiday
 	refresh_ips
 	rebuild_ip_rules

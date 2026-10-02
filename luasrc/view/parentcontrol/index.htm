@@ -9,7 +9,8 @@
 	function pcResetQuota(k) {
 		if (!k) return;
 		if (!confirm('<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>')) return;
-		XHR.get('<%=url("admin/control/parentcontrol/reset_quota")%>', { key: k },
+		XHR.post('<%=url("admin/control/parentcontrol/reset_quota")%>',
+			{ key: k, token: '<%=token%>' },
 			function() { location.reload(); });
 	}
 

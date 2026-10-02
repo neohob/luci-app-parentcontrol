@@ -77,8 +77,8 @@
 			<td class="num muted"><%=(u.live_kb or 0) > 0 and (u.live_kb .. " KB") or "-"%></td>
 			<td class="num muted"><% if (u.projected or 0) > 0 then %><%=u.projected%> <%=T("分")%><% else %>-<% end %></td>
 			<td><input type="button" class="btn cbi-button cbi-button-reset" style="padding:2px 8px"
-				value="<%=T("重置额度")%>"
-				onclick="pcResetQuota('<%=u.kind == "pool" and ("pool:" .. u.name) or (u.key or "")%>')" /></td>
+				value="<%=T("重置")%>" data-key="<%=u.kind == "pool" and ("pool:" .. u.name) or (u.key or "")%>"
+				onclick="pcResetQuota(this.getAttribute('data-key'))" /></td>
 		</tr>
 		<% end %>
 	</table>
@@ -149,7 +149,7 @@
 
 	<h3><%=T("重置记录")%></h3>
 	<% if #d.reset_rows == 0 then %>
-		<div class="muted"><%=T("还没有重置记录。在额度用完时点「重置额度」可以立刻清零，每次重置都会记在这里。")%></div>
+		<div class="muted"><%=T("还没有重置记录。在额度用完时点「重置」可以立刻清零，每次重置都会记在这里。")%></div>
 	<% else %>
 	<table>
 		<tr><th><%=T("时间")%></th><th><%=T("条目")%></th><th><%=T("设备")%></th>

@@ -4,24 +4,25 @@
 local i18n = require "luci.i18n"
 local sys = require "luci.sys"
 local util = require "luci.util"
+local devnames = require "luci.model.cbi.parentcontrol.devnames"
 
 local M = {}
 
--- 每请求缓存一次 usage_tsv 的结果
+-- 每请求缓存一次 stats_tsv brief 的结果（列表页只要 meta + entry 两行，不跑历史/计数器）
 local _usage
 function M.usage_map()
 	if _usage then return _usage end
 	_usage = {}
-	local out = sys.exec("/etc/init.d/parentcontrol usage_tsv 2>/dev/null") or ""
+	local out = sys.exec("/etc/init.d/parentcontrol stats_tsv brief 2>/dev/null") or ""
 	for _, line in ipairs(util.split(out, "\n")) do
 		local f = util.split(line, "\t")
-		if f[1] == "day" then
+		if f[1] == "meta" then
 			_usage.day = { day = f[2], type = f[3], reset = f[4], issued = (f[5] == "1") }
-		elseif f[1] == "item" then
-			local mod, idx = (f[2] or ""):match("^([%a]+)%[(%d+)%]$")
-			if mod then
-				_usage[mod .. "_" .. idx] = { used = tonumber(f[3]) or 0, quota = tonumber(f[4]) or 0 }
-			end
+		elseif f[1] == "entry" then
+			-- entry: key module idx 备注 mac 模式 额度 已用 池 本分钟KB
+			_usage[f[2]] = {
+				mode = f[6] or "", quota = tonumber(f[7]) or 0, used = tonumber(f[8]) or 0,
+			}
 		end
 	end
 	return _usage
@@ -67,29 +68,13 @@ function M.profiles(self, section)
 	return one("sd", i18n.translate("平日")) .. "；" .. one("hd", i18n.translate("节假日"))
 end
 
--- MAC → 已知设备名（来自 DHCP 租约/ARP；只保留真正的名字，丢掉 IP 兜底值）
-local _macnames
-local function mac_names()
-	if _macnames then return _macnames end
-	_macnames = {}
-	local ok, sys = pcall(require, "luci.sys")
-	if ok and sys.net and sys.net.mac_hints then
-		sys.net.mac_hints(function(mac, name)
-			if mac and name and not name:match("^%d+%.%d+%.%d+%.%d+$") then
-				_macnames[mac:lower()] = (name:gsub("%.lan$", ""):gsub("%.local$", ""))
-			end
-		end)
-	end
-	return _macnames
-end
-
 -- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示
 function M.mac(self, section)
 	local mac = self.map:get(section, "mac") or ""
 	local ip = self.map:get(section, "ip") or ""
 	local out = {}
 	if mac ~= "" then
-		local n = mac_names()[mac:lower()]
+		local n = devnames.name(mac)
 		out[#out + 1] = n and (mac .. " （" .. n .. "）") or mac
 	end
 	if ip ~= "" then out[#out + 1] = ip end
@@ -112,7 +97,7 @@ function M.used(self, section, typ)
 	local u = M.usage_map()
 	local i = M.section_indexes(self.map, typ)[section]
 	local rec = i and u[typ .. "_" .. i]
-	if not rec then return "-" end
+	if not rec or rec.mode ~= "quota" then return "-" end
 	if rec.quota > 0 then
 		return string.format("%d / %d %s", rec.used, rec.quota, i18n.translate("分钟"))
 	end

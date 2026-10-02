@@ -44,7 +44,7 @@ e.rmempty = true
 
 e = t:option(Value, "usage_min_kb", translate("用量判定阈值(KB/分钟)"),
 	translate("一分钟内至少这么多流量才算“在用”，滤掉后台心跳；0=任何流量都算。"))
-e.default = "32"
+e.default = "8"
 e.datatype = "uinteger"
 e.rmempty = true
 
