@@ -93,7 +93,7 @@ run_mut '重建自愈能力丢失' "$INIT" \
 
 # 8) 额度发放时刻被忽略（永远算已发放）
 run_mut '额度发放时刻被忽略' "$COMMON" \
-	'	[ "$_now" -ge $((10#$_rh * 60 + 10#$_rm)) ]' '	true' common_test.sh
+	'	[ "$(pc_hhmm_to_min "$(date +%H:%M)")" -ge "$(pc_hhmm_to_min "$1")" ]' '	true' common_test.sh
 
 # 9) 节假日解析把 isOffDay 判反
 run_mut 'isOffDay 判反' "$COMMON" \

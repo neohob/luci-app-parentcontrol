@@ -8,6 +8,8 @@ case "$1" in
 +%Y%m%d)   echo "$ymd" | tr -d '-' ;;
 +%Y)       echo "$ymd" | cut -c1-4 ;;
 +%H)       echo "${hm%%:*}" ;;
++%H:%M)    echo "$hm" ;;
++%H:%M:%S) echo "$hm:00" ;;
 +%M)       echo "${hm##*:}" ;;
 *)         echo "$ymd ${hm}:00" ;;
 esac

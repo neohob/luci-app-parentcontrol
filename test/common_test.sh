@@ -122,6 +122,14 @@ FAKE_DATE_HM=07:29; t_eq '07:29 未发放' 1 "$(pc_allowance_issued 07:30 && ech
 FAKE_DATE_HM=07:30; t_eq '07:30 恰好发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
 FAKE_DATE_HM=07:31; t_eq '07:31 已发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
 FAKE_DATE_HM=00:00; t_eq 'reset=00:00 恒已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
+t_eq 'HH:MM→分钟 08:05' 485 "$(pc_hhmm_to_min 08:05)"
+t_eq 'HH:MM→分钟 09:30' 570 "$(pc_hhmm_to_min 09:30)"
+t_eq 'HH:MM→分钟 00:00' 0 "$(pc_hhmm_to_min 00:00)"
+t_eq 'HH:MM→分钟 23:59' 1439 "$(pc_hhmm_to_min 23:59)"
+t_eq 'HH+MM 参数形式' 485 "$(pc_hhmm_to_min 08 05)"
+t_eq '空输入→0' 0 "$(pc_hhmm_to_min '')"
+FAKE_DATE_HM=08:05; t_eq '08:05 == 08:05 → 已发放' 0 "$(pc_allowance_issued 08:05 && echo 0 || echo 1)"
+FAKE_DATE_HM=08:04; t_eq '08:04 < 08:05 → 未发放' 1 "$(pc_allowance_issued 08:05 && echo 0 || echo 1)"
 FAKE_DATE_HM=23:59; t_eq '23:59 已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
 
 # ============================================================
