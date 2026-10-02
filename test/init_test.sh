@@ -578,6 +578,53 @@ t_has 'histkey 行' "$S" 'histkey	20260608	weburl_0	7'
 t_eq '无额度条目时不产生 entry 行' 0 "$(cfg_reset; cfg_load parentcontrol "$T_TMP/empty.uci" 2>/dev/null; stats_tsv 2>/dev/null | grep -c '^entry')"
 
 # ============================================================
+echo '== reset_quota：清零今天用量 + 记重置日志 + 立刻解封 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_quota '30'
+EOF
+cfg_apply
+FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1 FAKE_DATE_HM=13:00
+run_build
+pc_usage_add weburl_0 20
+t_eq '重置前已用 20' 20 "$(pc_usage_get weburl_0)"
+reset_quota weburl_0
+t_eq '重置后已用 0' 0 "$(pc_usage_get weburl_0)"
+t_eq '重置日志 1 行' 1 "$(wc -l < "$RESET_LOG" | tr -d ' ')"
+t_has '日志含 key 与重置前用量' "$(cat "$RESET_LOG")" 'weburl_0	20'
+t_eq '非法 key 被拒（不写日志）' 1 "$(reset_quota 'x;rm -rf /' >/dev/null 2>&1; wc -l < "$RESET_LOG" | tr -d ' ')"
+# 耗尽 → 封锁；重置后应立刻解封
+pc_usage_add weburl_0 30
+build_quota_blocks
+t_has '耗尽 → QUOTA 有 DROP' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-j DROP'
+reset_quota weburl_0
+t_eq '重置后立刻解封（QUOTA 空）' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+# 池重置
+cfg_section <<'EOF'
+config quota
+	option name 'kid1'
+	option sd_quota '60'
+config weburl
+	option enable '1'
+	option remarks 'B'
+	option mac '00:00:5e:00:53:02'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_pool 'kid1'
+EOF
+cfg_apply
+run_build
+pc_usage_add weburl_1 5
+reset_quota pool:kid1
+t_eq '池重置：成员用量清零' 0 "$(pc_usage_get weburl_1)"
+
+# ============================================================
 echo '== 节假日抓取 =='
 fresh
 : > "$HOLIDAY_LOCAL/2026.json"

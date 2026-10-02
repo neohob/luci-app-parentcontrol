@@ -64,6 +64,7 @@ function M.collect()
 	local raw = sys.exec("/etc/init.d/parentcontrol stats_tsv 2>/dev/null") or ""
 	local d = {
 		meta = {}, entries = {}, pools = {}, hist = {}, hist_key = {},
+		resets = {}, reset_by_day = {}, reset_by_key = {},
 		units = {}, key_totals = {}, dev_totals = {}, days = {},
 	}
 	for _, line in ipairs(util.split(raw, "\n")) do
@@ -87,6 +88,11 @@ function M.collect()
 				}
 			elseif k == "hist" then
 				d.hist[f[2]] = num(f[3])
+			elseif k == "reset" then
+				local dt, tm, key, before = f[2], f[3], f[4], num(f[5])
+				d.resets[#d.resets + 1] = { date = dt, time = tm, key = key, before = before }
+				d.reset_by_day[dt] = (d.reset_by_day[dt] or 0) + before
+				d.reset_by_key[key] = (d.reset_by_key[key] or 0) + before
 			elseif k == "histkey" then
 				local dt, key = f[2], f[3]
 				d.hist_key[dt] = d.hist_key[dt] or {}
@@ -163,6 +169,8 @@ function M.collect()
 	end
 	d.today_total = today_total
 	d.today_quota = today_quota
+	d.today_reset = (meta.date and d.reset_by_day[meta.date:gsub("-", "")]) or 0
+	d.today_actual = today_total + d.today_reset
 
 	-- 3) 最近 30 天序列（补零），基于 meta.date 往前推
 	local dates = {}
@@ -176,10 +184,12 @@ function M.collect()
 	table.sort(dates)
 	local maxmin = 0
 	for _, dt in ipairs(dates) do
-		local v = d.hist[dt] or 0
+		local v = (d.hist[dt] or 0) + (d.reset_by_day[dt] or 0)
 		if v > maxmin then maxmin = v end
 		d.days[#d.days + 1] = {
 			date = dt, minutes = v, weekday = weekday_cn(dt),
+			actual = v + (d.reset_by_day[dt] or 0),
+			reset = (d.reset_by_day[dt] or 0),
 			has = (d.hist[dt] ~= nil),
 		}
 	end
@@ -188,10 +198,10 @@ function M.collect()
 	-- 4) 历史汇总
 	local sum, cnt, mx = 0, 0, 0
 	for _, day in ipairs(d.days) do
-		if day.has then
-			sum = sum + day.minutes
+		if day.has or (day.reset or 0) > 0 then
+			sum = sum + (day.actual or day.minutes)
 			cnt = cnt + 1
-			if day.minutes > mx then mx = day.minutes end
+			if (day.actual or day.minutes) > mx then mx = day.actual or day.minutes end
 		end
 	end
 	d.hist_sum = sum
@@ -209,6 +219,9 @@ function M.collect()
 				d.key_totals[key] = (d.key_totals[key] or 0) + v
 			end
 		end
+	end
+	for key, v in pairs(d.reset_by_key) do
+		d.key_totals[key] = (d.key_totals[key] or 0) + v
 	end
 	local rows = {}
 	for key, v in pairs(d.key_totals) do
@@ -238,6 +251,24 @@ function M.collect()
 	end
 	table.sort(drows, function(a, b) return a.minutes > b.minutes end)
 	d.dev_rows = drows
+
+	-- 7) 重置记录（倒序，带条目名与设备名）
+	local rr = {}
+	for _, r in ipairs(d.resets) do
+		local e = labels[r.key]
+		rr[#rr + 1] = {
+			date = r.date, time = r.time, key = r.key,
+			name = e and e.label or r.key,
+			device = e and e.device or "",
+			before = r.before,
+		}
+	end
+	table.sort(rr, function(a, b)
+		if a.date ~= b.date then return a.date > b.date end
+		return a.time > b.time
+	end)
+	while #rr > 60 do table.remove(rr) end
+	d.reset_rows = rr
 
 	return d
 end

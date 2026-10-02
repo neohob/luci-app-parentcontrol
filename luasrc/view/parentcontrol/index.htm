@@ -6,6 +6,13 @@
 	.cbi-section-table-row .cbi-value-field input[id$=".domains"] { width: 13em !important; }
 </style>
 <script type="text/javascript">//<![CDATA[
+	function pcResetQuota(k) {
+		if (!k) return;
+		if (!confirm('<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>')) return;
+		XHR.get('<%=url("admin/control/parentcontrol/reset_quota")%>', { key: k },
+			function() { location.reload(); });
+	}
+
 	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "control", "parentcontrol", "status")%>', null,
 		function (x, result) {
 			var status = document.getElementsByClassName('parentcontrol_status')[0];

@@ -57,8 +57,9 @@ t_setup() {
 	LOG_FILE="$T_TMP/log"
 	LOCK="$T_TMP/lock"
 	TICK_LOCK="$T_TMP/tlock"
+	RESET_LOG="$T_TMP/resets.log"
 	export IPDIR USAGE_DIR HOLIDAY_CACHE HOLIDAY_LOCAL STATE_DIR \
-		LOG_FILE LOCK TICK_LOCK
+		LOG_FILE LOCK TICK_LOCK RESET_LOG
 	mkdir -p "$IPDIR" "$USAGE_DIR" "$HOLIDAY_CACHE" "$HOLIDAY_LOCAL" "$STATE_DIR"
 
 	PC_LIB="$REPO/root/usr/lib/parentcontrol/common.sh"

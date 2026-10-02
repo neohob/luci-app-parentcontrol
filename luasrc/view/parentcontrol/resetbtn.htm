@@ -1,0 +1,11 @@
+<%+cbi/valueheader%>
+<%
+	local key = self:cfgvalue(section) or ""
+%>
+<% if key ~= "" then %>
+	<input type="button" class="btn cbi-button cbi-button-reset" style="padding:2px 8px"
+		value="<%=translate("重置额度")%>" onclick="pcResetQuota('<%=key%>')" />
+<% else %>
+	<span class="muted">-</span>
+<% end %>
+<%+cbi/valuefooter%>

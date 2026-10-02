@@ -57,7 +57,7 @@
 		<tr>
 			<th><%=T("名称")%></th><th><%=T("设备")%></th><th><%=T("进度")%></th>
 			<th class="num"><%=T("已用")%></th><th class="num"><%=T("额度")%></th><th class="num"><%=T("剩余")%></th>
-			<th><%=T("状态")%></th><th class="num"><%=T("本分钟")%></th><th class="num"><%=T("预测今日")%></th>
+			<th><%=T("状态")%></th><th class="num"><%=T("本分钟")%></th><th class="num"><%=T("预测今日")%></th><th><%=T("操作")%></th>
 		</tr>
 		<% for _, u in ipairs(d.units) do
 			local cls = (u.quota > 0 and u.used >= u.quota) and "full" or ((u.pct or 0) >= 80 and "warn" or "")
@@ -76,6 +76,9 @@
 			</td>
 			<td class="num muted"><%=(u.live_kb or 0) > 0 and (u.live_kb .. " KB") or "-"%></td>
 			<td class="num muted"><% if (u.projected or 0) > 0 then %><%=u.projected%> <%=T("分")%><% else %>-<% end %></td>
+			<td><input type="button" class="btn cbi-button cbi-button-reset" style="padding:2px 8px"
+				value="<%=T("重置额度")%>"
+				onclick="pcResetQuota('<%=u.kind == "pool" and ("pool:" .. u.name) or (u.key or "")%>')" /></td>
 		</tr>
 		<% end %>
 	</table>
@@ -84,6 +87,9 @@
 		<% if d.today_quota > 0 then %> / <%=T("额度合计")%> <b><%=d.today_quota%></b> <%=T("分钟")%><% end %>
 		<span class="muted">·</span>
 		<%=T("「本分钟」是该条目这一分钟内已产生的流量（采样前）")%>
+		<% if (d.today_reset or 0) > 0 then %>
+		<br/><%=T("今天含重置在内的实际用量：")%><b><%=d.today_actual%></b> <%=T("分钟")%>
+		（<%=T("其中已重置掉")%> <b><%=d.today_reset%></b> <%=T("分钟")%>，重置后重新计）<% end %>
 	</div>
 	<% end %>
 
@@ -141,6 +147,28 @@
 		<% end %>
 	<% end %>
 
+	<h3><%=T("重置记录")%></h3>
+	<% if #d.reset_rows == 0 then %>
+		<div class="muted"><%=T("还没有重置记录。在额度用完时点「重置额度」可以立刻清零，每次重置都会记在这里。")%></div>
+	<% else %>
+	<table>
+		<tr><th><%=T("时间")%></th><th><%=T("条目")%></th><th><%=T("设备")%></th>
+			<th class="num"><%=T("重置前已用")%></th><th><%=T("操作者")%></th></tr>
+		<% for _, r in ipairs(d.reset_rows) do %>
+		<tr>
+			<td class="muted"><%=pcdata(r.date:sub(1,4).."-"..r.date:sub(5,6).."-"..r.date:sub(7,8).." "..r.time)%></td>
+			<td><%=pcdata(r.name)%></td>
+			<td class="muted"><%=pcdata(r.device)%></td>
+			<td class="num"><%=r.before%> <%=T("分")%></td>
+			<td class="muted"><%=T("手动重置")%></td>
+		</tr>
+		<% end %>
+	</table>
+	<div class="muted" style="margin-top:6px">
+		<%=T("重置只清零该条目「今天」的额度计数；重置前的用量已记入本表，并计入上面的「实际用量」统计。")%>
+	</div>
+	<% end %>
+
 	<h3><%=T("口径与参数")%></h3>
 	<table>
 		<tr><td><%=T("用量判定阈值")%></td><td class="muted"><%=m.min_kb or 8%> KB/<%=T("分钟")%>
@@ -151,6 +179,9 @@
 		</td></tr>
 		<tr><td><%=T("三态")%></td><td class="muted">
 			<%=T("① 发放时刻前 未发放→封 ② 已发放未用完→放行 ③ 用完→封到当天 24:00。额度按自然日结算、不结转。")%>
+		</td></tr>
+		<tr><td><%=T("重置")%></td><td class="muted">
+			<%=T("额度模式的条目可点「重置额度」立刻清零今天的用量（并写入重置记录）。重置不影响已累计的历史与实际用量。")%>
 		</td></tr>
 		<tr><td><%=T("可能少计的情况")%></td><td class="muted">
 			<%=T("网址条目在 IPv4 上只能按解析出的目标 IP 计时，CDN 换到全新段时会短暂漏计；QUIC/HTTP3 的 SNI 加密，任何方案都拦不到。")%>
