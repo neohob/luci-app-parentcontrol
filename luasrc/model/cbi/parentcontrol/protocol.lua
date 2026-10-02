@@ -82,7 +82,7 @@ e:value("53", "UDP-DNS53")
 e:value("161", "UDP-SNMP")
 e.rmempty = true
 
-parts.add_profile(t, "sd", translate("平日"))
-parts.add_profile(t, "hd", translate("节假日"))
+parts.add_profile(t, "sd", translate("平日"), translate("平日模式"))
+parts.add_profile(t, "hd", translate("节假日"), translate("节假日模式"))
 
 return a
