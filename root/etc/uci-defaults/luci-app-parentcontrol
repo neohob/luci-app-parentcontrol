@@ -25,68 +25,11 @@ for _b in /usr/share/parentcontrol/holiday/*.json; do
 	[ -f "$_n" ] || cp "$_b" "$_n"
 done
 
+# 配置迁移（补默认值 / word→domains / week→平日-节假日双档案）。
+# 逻辑在 common.sh 的 pc_migrate_config 里，便于白盒测试。
 [ -e "/etc/config/parentcontrol" ] && {
-	# 默认值（老配置里没有这些项时补上）
-	for _k in reset_school reset_holiday usage_keep usage_min_kb; do
-		[ -n "$(uci -q get parentcontrol.@basic[0].$_k)" ] || {
-			case "$_k" in
-			reset_school|reset_holiday) uci -q set parentcontrol.@basic[0].$_k='12:00' ;;
-			usage_keep)                uci -q set parentcontrol.@basic[0].$_k='90' ;;
-			usage_min_kb)              uci -q set parentcontrol.@basic[0].$_k='32' ;;
-			esac
-		}
-	done
-
-	i=0
-	while uci -q get parentcontrol.@weburl[$i] >/dev/null 2>&1; do
-		# 兼容搬迁：早期版本用单独的 word(关键词) 做匹配，现在匹配串由 domains 生成
-		w=$(uci -q get parentcontrol.@weburl[$i].word)
-		d=$(uci -q get parentcontrol.@weburl[$i].domains)
-		if [ -n "$w" ] && [ -z "$d" ]; then
-			uci -q set parentcontrol.@weburl[$i].domains="$w"
-		fi
-		i=$((i+1))
-	done
-
-	# 老配置 → 平日/节假日双档案：
-	#   week 只含 1-5 → 平日=时段；只含 6,7 → 节假日=时段；* 或混合 → 两者都=时段。
-	#   起控/停控 原样带过去（00:00~00:00 的“全天封”语义保留）。
-	for _m in time protocol weburl; do
-		i=0
-		while uci -q get parentcontrol.@$_m[$i] >/dev/null 2>&1; do
-			sd=$(uci -q get parentcontrol.@$_m[$i].sd_mode)
-			hd=$(uci -q get parentcontrol.@$_m[$i].hd_mode)
-			if [ -z "$sd" ] && [ -z "$hd" ]; then
-				w=$(uci -q get parentcontrol.@$_m[$i].week); [ -z "$w" ] && w='*'
-				ts=$(uci -q get parentcontrol.@$_m[$i].timestart); [ -z "$ts" ] && ts='00:00'
-				te=$(uci -q get parentcontrol.@$_m[$i].timeend); [ -z "$te" ] && te='00:00'
-				has_sd=0; has_hd=0
-				case "$w" in
-				*'*'*) has_sd=1; has_hd=1 ;;
-				*)
-					for _d in $(echo "$w" | tr ',' ' '); do
-						case "$_d" in 6|7) has_hd=1 ;; *) has_sd=1 ;; esac
-					done ;;
-				esac
-				if [ "$has_sd" = 1 ]; then
-					uci -q set parentcontrol.@$_m[$i].sd_mode='time'
-					uci -q set parentcontrol.@$_m[$i].sd_start="$ts"
-					uci -q set parentcontrol.@$_m[$i].sd_end="$te"
-				else
-					uci -q set parentcontrol.@$_m[$i].sd_mode='off'
-				fi
-				if [ "$has_hd" = 1 ]; then
-					uci -q set parentcontrol.@$_m[$i].hd_mode='time'
-					uci -q set parentcontrol.@$_m[$i].hd_start="$ts"
-					uci -q set parentcontrol.@$_m[$i].hd_end="$te"
-				else
-					uci -q set parentcontrol.@$_m[$i].hd_mode='off'
-				fi
-			fi
-			i=$((i+1))
-		done
-	done
-
+	. /usr/lib/parentcontrol/common.sh
+	pc_migrate_config
 	uci -q commit parentcontrol
 	rm -f /tmp/luci-indexcache
 }
