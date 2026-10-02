@@ -15,7 +15,7 @@ uci -q set firewall.parentcontrol.type=script
 uci -q set firewall.parentcontrol.path=/etc/parentcontrol.include
 uci -q set firewall.parentcontrol.reload=1
 uci commit firewall
-rm -f /tmp/luci-indexcache
+rm -f /tmp/luci-indexcache*
 
 # 离线兜底：把包内的节假日数据复制到运行目录（在线拉取失败时仍可用）
 mkdir -p /etc/parentcontrol/holiday
@@ -31,6 +31,6 @@ done
 	. /usr/lib/parentcontrol/common.sh
 	pc_migrate_config
 	uci -q commit parentcontrol
-	rm -f /tmp/luci-indexcache
+	rm -f /tmp/luci-indexcache*
 }
 exit 0
