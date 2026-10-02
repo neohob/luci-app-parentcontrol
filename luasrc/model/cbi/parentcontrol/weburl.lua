@@ -30,6 +30,17 @@ e.rmempty = false
 e:value("0", "普通管控")
 e.default = "0"
 
+e = t:option(Value, "ip_refresh", translate("IP封锁自动更新间隔(分钟)"), translate("定时重新解析域名并刷新 IP 封锁规则，0=关闭。域名解析到的 IPv4 会按 MAC 封掉。"))
+e.default = "30"
+e.datatype = "uinteger"
+e.rmempty = true
+
+e = t:option(ListValue, "ip_mask", translate("IP封锁粒度"), translate("/24 能兜住 CDN 换节点和客户端 DNS 缓存里的旧节点，推荐。"))
+e:value("24", "整个 /24 网段（推荐）")
+e:value("32", "仅精确 IP")
+e.default = "24"
+e.rmempty = true
+
 t = a:section(TypedSection, "weburl", translate("网址过滤列表"))
 t.template = "cbi/tblsection"
 t.anonymous = true
@@ -46,6 +57,9 @@ e.rmempty = true
 o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
 
 e = t:option( Value, "word", translate("关键词/URL<font color=\"green\">(可留空)</font>"))
+e.rmempty = true
+
+e = t:option( Value, "domains", translate("要解析封锁的域名<font color=\"green\">(逗号分隔，可留空)</font>"), translate("IPv4 只能按 IP 封（本机内核看不到转发报文的负载）。这里填要解析成 IP 并封锁的域名；留空则用关键词猜（关键词→关键词.com / www.关键词.com / 关键词.cn）。"))
 e.rmempty = true
     function validate_time(self, value, section)
         local hh, mm, ss

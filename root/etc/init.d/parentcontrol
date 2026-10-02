@@ -15,7 +15,13 @@ ipt6=$(command -v ip6tables-legacy || command -v ip6tables)
 TAG="PARENTCONTROL_TIME" 
 TAGP="PARENTCONTROL_PROTOCOL" 
 TAGW="PARENTCONTROL_WEBURL" 
+TAGI="PARENTCONTROL_IP" 
 FWI="/var/etc/$CONFIG.include"
+IPLIST="/etc/parentcontrol/ip.list"
+CRON_TAG="#pc_ip_refresh"
+
+EXTRA_COMMANDS="refresh_ip"
+EXTRA_HELP="        refresh_ip      Re-resolve domains and rebuild IP block rules (cron)"
 elog() {
 	local d="$(date "+%Y-%m-%d %H:%M:%S")"
 	echo -e "$d: $*" >>$LOG_FILE
@@ -89,6 +95,101 @@ restore_offload() {
 	elog "offload: restored"
 }
 
+# ============================================================================
+# IPv4 IP 封锁 + 自动更新
+# ----------------------------------------------------------------------------
+# 为什么必须有它：在这台（虚拟化）路由器上，网卡直接收发的 IPv4 报文负载落在 skb
+# 的 page frags 里，xt_string 的 -m string 看不到它 —— 实测一个带唯一标记的明文
+# HTTP GET，转发路径上数到 18 个包经过 PREROUTING，标记匹配 0 个（关掉 GRO 也一样）。
+# 所以「按关键字匹配 TLS SNI」对 IPv4 转发流量完全无效。
+# 而 IPv6 走隧道，解封装会把负载线性化，所以 IPv6 那边 SNI 是能匹配到的。
+#
+# 结论：IPv4 只能按目标 IP（报文头）来封 —— 头信息永远可见。
+# 域名用 resolveip 解析；同时封 /32 和它的 /24，/24 用来兜住 CDN 邻居节点以及
+# 客户端 DNS 缓存里可能残留的旧节点。解析结果累积在 $IPLIST（只增不减），由 cron
+# 定期刷新，这样 CDN 换节点后老节点依然被挡住。
+# ============================================================================
+weburl_on() {
+	uci show $CONFIG 2>/dev/null | grep "enable='1'" | grep 'weburl' \
+		| grep -oE '\[[0-9]+\]' | grep -o '[0-9]'
+}
+
+# 输出 "MAC<空格>域名"
+ip_domains() {
+	for i in $(weburl_on); do
+		m=$(uci -q get $CONFIG.@weburl[$i].mac)
+		[ -z "$m" ] && continue
+		d=$(uci -q get $CONFIG.@weburl[$i].domains)
+		if [ -z "$d" ]; then
+			w=$(uci -q get $CONFIG.@weburl[$i].word)
+			[ -z "$w" ] && continue
+			d="$w,$w.com,www.$w.com,$w.cn"
+		fi
+		for h in $(echo "$d" | tr ',' ' '); do
+			echo "$m $h"
+		done
+	done
+}
+
+apply_ip_rules() {
+	command -v resolveip >/dev/null 2>&1 || return 0
+	mask=$(uci -q get $CONFIG.@basic[0].ip_mask)
+	[ -z "$mask" ] && mask=24
+	fresh=/tmp/pc_ipfresh.$$
+	: > $fresh
+	ip_domains | while read m h; do
+		for a in $(resolveip -4 -t 2 "$h" 2>/dev/null); do
+			echo "$a" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
+			if [ "$mask" = "32" ]; then
+				echo "$m $a/32" >> $fresh
+			else
+				echo "$m $(echo $a | cut -d. -f1-3).0/$mask" >> $fresh
+			fi
+		done
+	done
+	# 合并（只增不减），并清掉配置里已经删掉的 MAC
+	touch $IPLIST
+	cat $fresh $IPLIST 2>/dev/null | sort -u | while read m p; do
+		[ -z "$p" ] && continue
+		for i in $(weburl_on); do
+			if [ "$(uci -q get $CONFIG.@weburl[$i].mac)" = "$m" ]; then
+				echo "$m $p"
+				break
+			fi
+		done
+	done | sort -u > ${IPLIST}.new
+	mv ${IPLIST}.new $IPLIST
+	rm -f $fresh
+	# 重建规则
+	$ipt -t mangle -N $TAGI 2>/dev/null || $ipt -t mangle -F $TAGI 2>/dev/null
+	$ipt -t mangle -C PREROUTING -j $TAGI 2>/dev/null || $ipt -t mangle -I PREROUTING -j $TAGI 2>/dev/null
+	$ipt -t mangle -F $TAGI 2>/dev/null
+	while read m p; do
+		[ -z "$m" ] && continue
+		$ipt -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null
+	done < $IPLIST
+	elog "iprules: $(wc -l < $IPLIST) 个网段 | mask=$mask"
+}
+
+# 由 cron 调用：只刷新 IP 规则，不重建其它规则
+refresh_ip() {
+	[ "$(uci -q get $CONFIG.@basic[0].enabled)" = "1" ] || return 0
+	apply_ip_rules
+}
+
+# 让 crontab 里始终只有一条本插件的刷新任务；$1=1 写入，$1=0 移除
+cron_sync() {
+	mins=$(uci -q get $CONFIG.@basic[0].ip_refresh)
+	[ -z "$mins" ] && mins=30
+	new=$(crontab -l 2>/dev/null | grep -v "$CRON_TAG")
+	if [ "$1" = "1" ] && [ "$mins" -gt 0 ] 2>/dev/null; then
+		new="$new
+*/$mins * * * * /etc/init.d/parentcontrol refresh_ip >/dev/null 2>&1 $CRON_TAG"
+	fi
+	printf '%s\n' "$new" | grep -v '^$' | crontab -
+	/etc/init.d/cron reload >/dev/null 2>&1
+}
+
 set_rules() {
 mmode=$1
    case $mmode in
@@ -126,6 +227,7 @@ mmode=$1
                   $ip -t mangle -C PREROUTING -j $TAGW 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGW 2>/dev/null
       done
       apply_offload
+      apply_ip_rules
     
     ;;
 esac  
@@ -208,6 +310,9 @@ del_rule() {
       $ip -t mangle -D PREROUTING -j $TAGW 2>/dev/null
       $ip -t mangle -F $TAGW 2>/dev/null
       $ip -t mangle -X $TAGW 2>/dev/null
+      $ip -t mangle -D PREROUTING -j $TAGI 2>/dev/null
+      $ip -t mangle -F $TAGI 2>/dev/null
+      $ip -t mangle -X $TAGI 2>/dev/null
   done
   restore_offload
 }
@@ -229,12 +334,14 @@ start(){
 	set_rules protocol
 	set_rules weburl
     }
+     cron_sync 1
      clean_log 
      rm -f $LOCK  2>/dev/null
 }
 
 stop(){
      del_rule
+     cron_sync 0
      rm -f $LOCK  2>/dev/null
 }
 
