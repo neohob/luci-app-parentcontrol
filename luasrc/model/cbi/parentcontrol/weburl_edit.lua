@@ -1,6 +1,5 @@
 -- 网址条目的详细设置页（从列表页的「编辑」按钮进入，section id 在 arg[1]）
 local o = require "luci.sys"
-local net = require "luci.model.network".init()
 local disp = require "luci.dispatcher"
 local parts = require "luci.model.cbi.parentcontrol.parts"
 

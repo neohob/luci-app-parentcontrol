@@ -72,7 +72,7 @@ cfg_apply
 run_build
 R=$(ipt_rules v4 filter PARENTCONTROL_TIME | flat)
 t_has '时段规则带 -m time 窗口与 REJECT' "$R" \
-	'-m mac --mac-source 00:00:5e:00:53:01 -m time --kerneltz --timestart 08:00 --timestop 18:00 -j REJECT'
+	'-m mac --mac-source 00:00:5e:00:53:01 -m time --timestart 00:00 --timestop 10:00 -j REJECT'
 t_eq '普通管控只挂 FORWARD' '' "$(ipt_rules v4 filter INPUT | flat)"
 t_eq '模式=off 的档案不生成规则（TAGP 空）' '' "$(ipt_rules v4 filter PARENTCONTROL_PROTOCOL | flat)"
 
@@ -156,7 +156,7 @@ cfg_apply
 run_build
 V4I=$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)
 V6I=$(ipt_rules v6 mangle PARENTCONTROL_IP | flat)
-t_has 'IPv4 封 /24' "$V4I" '-m mac --mac-source 00:00:5e:00:53:01 -m time --kerneltz --timestart 08:00 --timestop 18:00 -d 1.2.3.0/24 -j DROP'
+t_has 'IPv4 封 /24' "$V4I" '-m mac --mac-source 00:00:5e:00:53:01 -m time --timestart 00:00 --timestop 10:00 -d 1.2.3.0/24 -j DROP'
 t_has 'IPv6 封 /64' "$V6I" '-d 2402:4e00:1410:0::/64 -j DROP'
 t_has '字符串串在 WEBURL 链' "$(ipt_rules v4 mangle PARENTCONTROL_WEBURL | flat)" '--string example.com'
 t_has 'DNS(udp53) 规则' "$(ipt_rules v4 mangle PARENTCONTROL_WEBURL | flat)" '-p UDP --dport 53'
@@ -185,7 +185,6 @@ t_has 'DNS(53) 字符串命中也计入额度' "$A4" '-p UDP --dport 53 -m strin
 t_has 'SNI(80,443) 字符串命中也计入额度' "$A4" '-p TCP -m multiport --dports 80,443 -m string --algo kmp --string example.com -j PCA_weburl_0'
 t_eq '计数链同一目标只出一条（single 不双计）' 1 \
 	"$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -c -- '-d 1.2.3.0/24 -j PCA_weburl_0')"
-	"$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -c -- '${A4_SENTINEL:-^}')" 2>/dev/null || true
 t_eq 'PCA 空链已建' ok "$(ipt_exists v4 mangle PCA_weburl_0 && echo ok)"
 t_eq '未耗尽 → QUOTA 链为空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 t_eq '额度模式不再产生时段封规则' '' "$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)"

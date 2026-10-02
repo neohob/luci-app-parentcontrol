@@ -1,4 +1,3 @@
-local o = require "luci.sys"
 local disp = require "luci.dispatcher"
 local ui = require "luci.model.cbi.parentcontrol.ui"
 

@@ -1,3 +1,5 @@
+local parts = require "luci.model.cbi.parentcontrol.parts"
+
 local a, t, e
 
 a = Map("parentcontrol", translate("使用限额"),
@@ -16,12 +18,14 @@ e = t:option(Value, "reset_school", translate("平日额度发放时刻"),
 	translate("HH:MM（北京时间）。之前当天额度未发放，按“没额度”封住。"))
 e.placeholder = '12:00'
 e.default = '12:00'
+e.validate = parts.validate_time
 e.rmempty = true
 
 e = t:option(Value, "reset_holiday", translate("节假日额度发放时刻"),
 	translate("HH:MM（北京时间）。"))
 e.placeholder = '12:00'
 e.default = '12:00'
+e.validate = parts.validate_time
 e.rmempty = true
 
 e = t:option(Value, "usage_keep", translate("用量历史保留天数"))

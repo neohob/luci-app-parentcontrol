@@ -49,6 +49,7 @@ t_eq 'usage_min_kb 补默认' '32' "$(cfg_get parentcontrol.@basic[0].usage_min_
 echo '== word → domains =='
 t_eq '只有 word 时搬到 domains' 'xhs' "$(cfg_get parentcontrol.@weburl[0].domains)"
 t_eq '已有 domains 时不覆盖' 'keep.com' "$(cfg_get parentcontrol.@weburl[1].domains)"
+t_eq 'word 已删除（铲除幽灵匹配源）' '' "$(cfg_get parentcontrol.@weburl[0].word)"
 
 echo '== week=1,2,3,4,5 → 平日=时段；节假日=关闭 =='
 t_eq 'sd_mode' time "$(cfg_get parentcontrol.@weburl[0].sd_mode)"
