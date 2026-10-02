@@ -30,12 +30,12 @@ e.rmempty = false
 e:value("0", "普通管控")
 e.default = "0"
 
-e = t:option(Value, "ip_refresh", translate("IP封锁自动更新间隔(分钟)"), translate("定时重新解析域名并刷新 IP 封锁规则，0=关闭。域名解析到的 IPv4 会按 MAC 封掉。"))
+e = t:option(Value, "ip_refresh", translate("IP封锁自动更新间隔(分钟)"), translate("定时重新解析域名刷新 IP 封锁，0=关闭。"))
 e.default = "30"
 e.datatype = "uinteger"
 e.rmempty = true
 
-e = t:option(ListValue, "ip_mask", translate("IP封锁粒度"), translate("/24 能兜住 CDN 换节点和客户端 DNS 缓存里的旧节点，推荐。"))
+e = t:option(ListValue, "ip_mask", translate("IP封锁粒度"), translate("/24 可兜住 CDN 换节点，推荐。"))
 e:value("24", "整个 /24 网段（推荐）")
 e:value("32", "仅精确 IP")
 e.default = "24"
@@ -56,7 +56,7 @@ e = t:option(Value, "mac", translate("MAC地址<font color=\"green\">(必指定�
 e.rmempty = true
 o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
 
-e = t:option( Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"), translate("每一项都会当子串去匹配明文 DNS 查询和 TLS SNI（apex 域名即可覆盖子域），同时也会被解析成 IPv4 按 IP 封锁（IPv4 转发报文的负载内核看不到，只能按 IP 封）。填域名最省事；只填关键词也行（会尝试 关键词.com / www.关键词.com / 关键词.cn）。"))
+e = t:option( Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"), translate("会按明文 DNS/SNI 匹配，并解析成 IP 一起封。apex 域名即可覆盖子域。"))
 e.rmempty = true
     function validate_time(self, value, section)
         local hh, mm, ss
