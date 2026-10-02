@@ -56,7 +56,7 @@ e = t:option(Value, "mac", translate("MAC地址<font color=\"green\">(必指定�
 e.rmempty = true
 o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
 
-e = t:option( Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"), translate("会按明文 DNS/SNI 匹配，并解析成 IP 一起封。apex 域名即可覆盖子域。"))
+e = t:option( Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"), translate("填域名；apex 覆盖子域。"))
 e.rmempty = true
     function validate_time(self, value, section)
         local hh, mm, ss
