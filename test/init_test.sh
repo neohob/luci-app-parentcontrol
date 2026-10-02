@@ -554,6 +554,30 @@ t_eq 'PREROUTING 无残留跳转' '' "$(ipt_jump v4 mangle PREROUTING | grep PAR
 t_eq 'v6 同样干净' '' "$(ipt_all v6 | grep PARENTCONTROL || true)"
 
 # ============================================================
+echo '== stats_tsv（看板数据源）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option remarks '测试设备'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_quota '30'
+EOF
+cfg_apply
+FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1 FAKE_DATE_HM=13:00
+run_build
+pc_usage_add weburl_0 7
+S=$(stats_tsv)
+t_has 'meta 行' "$S" 'meta	2026-06-08	school	12:00	1'
+t_has 'entry 行（key/备注/mac/模式/额度/已用）' "$S" 'entry	weburl_0	weburl	0	测试设备	00:00:5e:00:53:01	quota	30	7'
+t_has 'hist 行' "$S" 'hist	20260608	7'
+t_has 'histkey 行' "$S" 'histkey	20260608	weburl_0	7'
+t_eq '无额度条目时不产生 entry 行' 0 "$(cfg_reset; cfg_load parentcontrol "$T_TMP/empty.uci" 2>/dev/null; stats_tsv 2>/dev/null | grep -c '^entry')"
+
+# ============================================================
 echo '== 节假日抓取 =='
 fresh
 : > "$HOLIDAY_LOCAL/2026.json"

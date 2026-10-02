@@ -1,0 +1,160 @@
+<%+cbi/valueheader%>
+<%
+	local stats = require "luci.model.cbi.parentcontrol.statsdata"
+	local d = stats.collect()
+	local m = d.meta or {}
+	local T = translate
+	local function pct(v) return math.max(0, math.min(100, v or 0)) end
+	local function bar(v, cls)
+		return '<div class="pcbar '..(cls or '')..'"><div style="width:'..pct(v)..'%"></div></div>'
+	end
+%>
+<style type="text/css">
+	.pc-dash { font-size: 13px; }
+	.pc-dash h3 { margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #3c3c3c; }
+	.pc-dash table { width: 100%; border-collapse: collapse; }
+	.pc-dash th, .pc-dash td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #2b2b2b; white-space: nowrap; }
+	.pc-dash th { color: #9a9a9a; font-weight: normal; }
+	.pc-dash td.num { text-align: right; }
+	.pc-dash .muted { color: #8a8a8a; }
+	.pcbar { display: inline-block; width: 140px; height: 10px; background: #333; border-radius: 5px; overflow: hidden; vertical-align: middle; }
+	.pcbar > div { height: 100%; background: #4a7f4a; }
+	.pcbar.warn > div { background: #b8860b; }
+	.pcbar.full > div { background: #b04a4a; }
+	.pc-badge { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; }
+	.pc-badge.ok { background: #2f5f2f; }
+	.pc-badge.bad { background: #6f2f2f; }
+	.pc-badge.off { background: #444; }
+	.pc-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; margin: 8px 0 2px; }
+	.pc-chart > div { flex: 1; background: #4a7f4a; min-height: 2px; position: relative; }
+	.pc-chart > div.nodata { background: #333; }
+	.pc-chart-x { display: flex; gap: 3px; font-size: 10px; color: #8a8a8a; }
+	.pc-chart-x > div { flex: 1; text-align: center; overflow: hidden; }
+	.pc-kv { margin: 4px 0; }
+	.pc-kv b { color: #ccc; }
+</style>
+
+<div class="pc-dash">
+	<div class="pc-kv">
+		<b><%=pcdata(m.date or "-")%></b>
+		（<%=pcdata(m.daytype == "holiday" and T("节假日") or T("平日"))%>）
+		<span class="muted">·</span>
+		<%=T("额度发放时刻")%> <b><%=pcdata(m.reset or "-")%></b>
+		<% if m.issued then %>
+			<span class="pc-badge ok"><%=T("已发放")%></span>
+		<% else %>
+			<span class="pc-badge bad"><%=T("未发放（当前封住）")%></span>
+		<% end %>
+		<span class="muted">·</span>
+		<%=T("现在")%> <b><%=pcdata(m.now or "-")%></b>
+	</div>
+
+	<h3><%=T("今天：额度使用情况")%></h3>
+	<% if #d.units == 0 then %>
+		<div class="muted"><%=T("当前没有处于「每日额度」模式的条目。可在各模块列表里把档案设为「每日额度」。")%></div>
+	<% else %>
+	<table>
+		<tr>
+			<th><%=T("名称")%></th><th><%=T("设备")%></th><th><%=T("进度")%></th>
+			<th class="num"><%=T("已用")%></th><th class="num"><%=T("额度")%></th><th class="num"><%=T("剩余")%></th>
+			<th><%=T("状态")%></th><th class="num"><%=T("本分钟")%></th><th class="num"><%=T("预测今日")%></th>
+		</tr>
+		<% for _, u in ipairs(d.units) do
+			local cls = (u.quota > 0 and u.used >= u.quota) and "full" or ((u.pct or 0) >= 80 and "warn" or "")
+		%>
+		<tr>
+			<td><%=pcdata(u.name or "")%><% if u.kind == "pool" then %> <span class="muted">(<%=T("共享池")%>)</span><% end %></td>
+			<td class="muted"><%=pcdata(u.device or "")%></td>
+			<td><%=bar(u.pct, cls)%></td>
+			<td class="num"><%=u.used or 0%></td>
+			<td class="num"><%=(u.quota or 0) > 0 and u.quota or T("不限")%></td>
+			<td class="num"><%=(u.quota or 0) > 0 and (u.remain or 0) or "-"%></td>
+			<td>
+				<% if u.status == T("已耗尽") then %><span class="pc-badge bad"><%=pcdata(u.status)%></span>
+				<% elseif u.status == T("未发放") then %><span class="pc-badge off"><%=pcdata(u.status)%></span>
+				<% else %><span class="pc-badge ok"><%=pcdata(u.status)%></span><% end %>
+			</td>
+			<td class="num muted"><%=(u.live_kb or 0) > 0 and (u.live_kb .. " KB") or "-"%></td>
+			<td class="num muted"><% if (u.projected or 0) > 0 then %><%=u.projected%> <%=T("分")%><% else %>-<% end %></td>
+		</tr>
+		<% end %>
+	</table>
+	<div class="muted" style="margin-top:6px">
+		<%=T("合计：")%><b><%=d.today_total%></b> <%=T("分钟")%>
+		<% if d.today_quota > 0 then %> / <%=T("额度合计")%> <b><%=d.today_quota%></b> <%=T("分钟")%><% end %>
+		<span class="muted">·</span>
+		<%=T("「本分钟」是该条目这一分钟内已产生的流量（采样前）")%>
+	</div>
+	<% end %>
+
+	<h3><%=T("最近 30 天总用量")%></h3>
+	<% if d.hist_days == 0 then %>
+		<div class="muted"><%=T("还没有历史数据。")%></div>
+	<% else %>
+		<div class="pc-chart">
+			<% for _, day in ipairs(d.days) do
+				local h = (d.days_max > 0) and math.floor(day.minutes * 100 / d.days_max) or 0
+			%>
+			<div class="<%=day.has and '' or 'nodata'%>" style="height:<%=h%>%"
+				title="<%=pcdata(day.date)%><%=day.has and ('  '..day.minutes..' 分钟') or '  无数据'%>"></div>
+			<% end %>
+		</div>
+		<div class="pc-chart-x">
+			<% for i, day in ipairs(d.days) do %>
+			<div><% if i % 5 == 1 then %><%=day.date:sub(7,8)%><% end %></div>
+			<% end %>
+		</div>
+		<div class="pc-kv">
+			<%=T("总计")%> <b><%=d.hist_sum%></b> <%=T("分钟")%>
+			<span class="muted">·</span>
+			<%=T("有数据天数")%> <b><%=d.hist_days%></b>
+			<span class="muted">·</span>
+			<%=T("日均")%> <b><%=d.hist_avg%></b> <%=T("分钟")%>
+			<span class="muted">·</span>
+			<%=T("最高一天")%> <b><%=d.hist_max%></b> <%=T("分钟")%>
+		</div>
+		<% if #d.key_rows > 0 then %>
+		<h3><%=T("按条目分析（最近 30 天）")%></h3>
+		<table>
+			<tr><th><%=T("名称")%></th><th><%=T("设备")%></th><th class="num"><%=T("合计")%></th>
+				<th class="num"><%=T("日均")%></th><th><%=T("占比")%></th></tr>
+			<% for _, r in ipairs(d.key_rows) do %>
+			<tr>
+				<td><%=pcdata(r.name)%></td>
+				<td class="muted"><%=pcdata(r.device or "")%></td>
+				<td class="num"><%=r.minutes%> <%=T("分")%></td>
+				<td class="num"><%=math.floor(r.minutes / (d.hist_days > 0 and d.hist_days or 1) + 0.5)%> <%=T("分")%></td>
+				<td><%=bar(r.share)%> <span class="muted"><%=r.share%>%</span></td>
+			</tr>
+			<% end %>
+		</table>
+		<% end %>
+		<% if #d.dev_rows > 0 then %>
+		<h3><%=T("按设备分析（最近 30 天）")%></h3>
+		<table>
+			<tr><th><%=T("设备")%></th><th class="num"><%=T("合计")%></th><th><%=T("占比")%></th></tr>
+			<% for _, r in ipairs(d.dev_rows) do %>
+			<tr><td><%=pcdata(r.device)%></td><td class="num"><%=r.minutes%> <%=T("分")%></td>
+				<td><%=bar(r.share)%> <span class="muted"><%=r.share%>%</span></td></tr>
+			<% end %>
+		</table>
+		<% end %>
+	<% end %>
+
+	<h3><%=T("口径与参数")%></h3>
+	<table>
+		<tr><td><%=T("用量判定阈值")%></td><td class="muted"><%=m.min_kb or 8%> KB/<%=T("分钟")%>
+			（<%=T("一分钟内目标流量低于此值不计；心跳/通知通常 < 5KB，真实访问 200KB 起")%>）</td></tr>
+		<tr><td><%=T("历史保留")%></td><td class="muted"><%=m.keep or 90%> <%=T("天")%></td></tr>
+		<tr><td><%=T("计时口径")%></td><td class="muted">
+			<%=T("每个条目只算「它自己规则命中的流量」：机器条目=该设备全部流量；协议条目=该端口的流量；网址条目=目标 IP + 明文 DNS/SNI 命中的流量。")%>
+		</td></tr>
+		<tr><td><%=T("三态")%></td><td class="muted">
+			<%=T("① 发放时刻前 未发放→封 ② 已发放未用完→放行 ③ 用完→封到当天 24:00。额度按自然日结算、不结转。")%>
+		</td></tr>
+		<tr><td><%=T("可能少计的情况")%></td><td class="muted">
+			<%=T("网址条目在 IPv4 上只能按解析出的目标 IP 计时，CDN 换到全新段时会短暂漏计；QUIC/HTTP3 的 SNI 加密，任何方案都拦不到。")%>
+		</td></tr>
+	</table>
+</div>
+<%+cbi/valuefooter%>
