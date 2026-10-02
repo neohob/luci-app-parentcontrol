@@ -1,7 +1,11 @@
 #!/bin/sh
 CONFIG=parentcontrol
 
-[ "$ACTION" = ifup ] || exit 0
-[ "$(`uci -q get $CONFIG.@basic[0].enabled`)" == 1 ] || exit 0
-/etc/init.d/parentcontrol start
+# [改] 原版这一行是 [ "$(`uci -q get $CONFIG.@basic[0].enabled`)" == 1 ] ——
+# `$( ... )` 里又套了反引号，外层会把内层命令的**输出**（也就是 "1"）当成命令去执行，
+# 报 "1: not found"，条件恒为假，脚本直接 exit 0。
+# 后果：接口事件（含 fw4 重载）后插件从来不会重装规则，规则只在手动点应用时才生效。
+[ "$(uci -q get $CONFIG.@basic[0].enabled)" = "1" ] || exit 0
 
+[ "$ACTION" = ifup -o "$ACTION" = ifupdate ] || exit 0
+/etc/init.d/parentcontrol start
