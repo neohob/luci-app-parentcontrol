@@ -309,7 +309,7 @@ build_time_rules() { # $1=school|holiday
 	done
 	for _i in $(pc_ids_on time); do
 		[ "$(pc_entry_eff_mode time $_i "$1")" = "time" ] || continue
-		emit_entry_targets time "$_i" "$TAG" "$TAG" "$(time_gate time $_i "$1")" "-j REJECT" all
+		emit_entry_targets time "$_i" filter "$TAG" "$TAG" "$(time_gate time $_i "$1")" "-j REJECT" all
 	done
 }
 
@@ -318,7 +318,7 @@ build_protocol_rules() { # $1=school|holiday
 	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
 	for _i in $(pc_ids_on protocol); do
 		[ "$(pc_entry_eff_mode protocol $_i "$1")" = "time" ] || continue
-		emit_entry_targets protocol "$_i" "$TAGP" "$TAGP" "$(time_gate protocol $_i "$1")" "-j REJECT" all
+		emit_entry_targets protocol "$_i" filter "$TAGP" "$TAGP" "$(time_gate protocol $_i "$1")" "-j REJECT" all
 	done
 }
 
@@ -352,41 +352,41 @@ emit_dev_rule() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=acti
 
 # 一个条目的全部目标规则——time / protocol / weburl 三类统一入口（封锁与计数共用）。
 # $1=module $2=idx $3=IP链 $4=字符串链 $5=gate $6=动作 $7=devmode
-emit_entry_targets() {
+emit_entry_targets() { # $1=module $2=idx $3=table $4=IP链 $5=字符串链 $6=gate $7=动作 $8=devmode
 	local _pc
 	case "$1" in
 	time)
-		emit_dev_rule "$ipt"  filter "$3" time "$2" "$5" "$6" "$7"
-		emit_dev_rule "$ipt6" filter "$3" time "$2" "$5" "$6" "$7" ;;
+		emit_dev_rule "$ipt"  "$3" "$4" time "$2" "$6" "$7" "$8"
+		emit_dev_rule "$ipt6" "$3" "$4" time "$2" "$6" "$7" "$8" ;;
 	protocol)
 		_pc=$(proto_cond "$2")
-		emit_dev_rule "$ipt"  filter "$3" protocol "$2" "$5 $_pc" "$6" "$7"
-		emit_dev_rule "$ipt6" filter "$3" protocol "$2" "$5 $_pc" "$6" "$7" ;;
+		emit_dev_rule "$ipt"  "$3" "$4" protocol "$2" "$6 $_pc" "$7" "$8"
+		emit_dev_rule "$ipt6" "$3" "$4" protocol "$2" "$6 $_pc" "$7" "$8" ;;
 	weburl)
-		emit_weburl_targets "$3" "$4" "$5" "$6" "$2" "$7" ;;
+		emit_weburl_targets "$3" "$4" "$5" "$6" "$7" "$2" "$8" ;;
 	esac
 }
 
 # 一个 weburl 条目的全部目标规则（目标 IP + 明文 DNS/SNI 匹配串）。
 # 时段封锁 / 额度封锁 / 额度计数 共用同一个生成器，保证三者枚举的目标集合永远一致。
 # $6=devmode：all（默认，mac 与静态IP 各出一条，用于封锁）| single（ip 优先单条，用于计数）
-emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=gate $4=动作 $5=idx [$6=devmode]
+emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6=idx [$7=devmode]
 	local _algos _f _p _pat _c _dev
-	_dev=${6:-all}
+	_dev=${7:-all}
 	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
-	_f="$IPDIR/weburl_$5"
+	_f="$IPDIR/weburl_$6"
 	[ -f "$_f" ] && while read -r _p; do
 		[ -z "$_p" ] && continue
 		case "$_p" in
 		*:*) _c=$ipt6 ;;
 		*)   _c=$ipt ;;
 		esac
-		emit_dev_rule "$_c" mangle "$1" weburl "$5" "$3 -d $_p" "$4" "$_dev"
+		emit_dev_rule "$_c" "$1" "$2" weburl "$6" "$4 -d $_p" "$5" "$_dev"
 	done < "$_f"
-	for _pat in $(weburl_patterns "$5"); do
+	for _pat in $(weburl_patterns "$6"); do
 		for _c in "$ipt" "$ipt6"; do
-			emit_dev_rule "$_c" mangle "$2" weburl "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4" "$_dev"
-			emit_dev_rule "$_c" mangle "$2" weburl "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"
+			emit_dev_rule "$_c" "$1" "$3" weburl "$6" "$4 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$5" "$_dev"
+			emit_dev_rule "$_c" "$1" "$3" weburl "$6" "$4 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$5" "$_dev"
 		done
 	done
 }
@@ -395,7 +395,7 @@ build_weburl_time_rules() { # $1=school|holiday
 	local _i
 	for _i in $(pc_ids_on weburl); do
 		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
-		emit_entry_targets weburl "$_i" "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" all
+		emit_entry_targets weburl "$_i" mangle "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" all
 	done
 }
 
@@ -419,7 +419,7 @@ build_acct_rules() { # $1=school|holiday
 		ensure_chain "$ipt" mangle "PCA_$_key"
 		ensure_chain "$ipt6" mangle "PCA_$_key"
 		# 计数式：单一设备条件 + IP/字符串都计入
-		emit_entry_targets "$_m" "$_i" "$TAGA" "$TAGA" "" "-j PCA_$_key" single
+		emit_entry_targets "$_m" "$_i" mangle "$TAGA" "$TAGA" "" "-j PCA_$_key" single
 	done
 	# 不删 base.*：重建前已采样，保留基线才能把重建后那一分钟也计入
 }
@@ -438,7 +438,7 @@ pool_usage() { # $1=池名 $2=school|holiday
 
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
-	emit_entry_targets "$1" "$2" "$TAGQ" "$TAGQ" "" "-j DROP" all
+	emit_entry_targets "$1" "$2" mangle "$TAGQ" "$TAGQ" "" "-j DROP" all
 }
 
 # 条目生效的额度/已用：池优先；池不存在或没额度则用条目自己的。
@@ -457,7 +457,7 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 
 # 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
 build_quota_blocks() {
-	local _tt _reset _issued _key _m _i _ip
+	local _tt _reset _issued _key _m _i _ip _n _lan
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -465,13 +465,28 @@ build_quota_blocks() {
 		ensure_chain "$_ip" mangle "$TAGQ"
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
+	_lan=$(pc_lan_nets)
 	for _key in $(pc_quota_keys "$_tt"); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		set -- $(entry_effective "$_m" "$_i" "$_tt")
 		[ "$1" -gt 0 ] 2>/dev/null || continue
 		if [ "$_issued" = "0" ] || [ "$2" -ge "$1" ]; then
+			# 无设备条件（= 全部客户端）时，若拿不到局域网网段就不封锁：
+			# 无差别 PREROUTING DROP 会把路由器自己也封掉，宁可只记录不封锁。
+			if [ -z "$(pc_uget "@$_m[$_i].mac")" ] && [ -z "$(pc_uget "@$_m[$_i].ip")" ] && [ -z "$_lan" ]; then
+				elog "quota: $_m[$_i] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
+				continue
+			fi
 			block_entry "$_m" "$_i"
 		fi
+	done
+	# 最后插入「放行到局域网网段」的规则——里面含路由器自身 IP，所以 SSH/LuCI 不会被
+	# 自己的封锁断掉。必须排在所有封锁规则之前，而 -I 是插到最前，故放在最后插入。
+	# （实测本机没有 addrtype 模块，只能用目标网段放行。）
+	for _n in $_lan; do
+		for _ip in "$ipt" "$ipt6"; do
+			$_ip -t mangle -I "$TAGQ" -d "$_n" -j RETURN 2>/dev/null
+		done
 	done
 }
 
