@@ -33,16 +33,18 @@ mmode=$1
    case $mmode in
     time)
 	  controlmode=`uci -q get $CONFIG.@basic[0].control_mode`
-	  [ "x$controlmode" == 'x1' ] && chain=INPUT || chain=FORWARD
+	  [ "x$controlmode" == 'x1' ] && chains="INPUT FORWARD" || chains="FORWARD"
           for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAG 2>/dev/null || $i -F $TAG 2>/dev/null 
-                  $ip -C $chain -j  $TAG 2>/dev/null ||  $ip -I $chain -j  $TAG 2>/dev/null
+                  $ip -N $TAG 2>/dev/null || $ip -F $TAG 2>/dev/null 
+                  for chain in $chains; do
+                    $ip -C $chain -j  $TAG 2>/dev/null ||  $ip -I $chain -j  $TAG 2>/dev/null
+                  done
 	  done
     ;;
     protocol)
        chain=FORWARD
        for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAGP 2>/dev/null || $i -F $TAGP 2>/dev/null 
+                  $ip -N $TAGP 2>/dev/null || $ip -F $TAGP 2>/dev/null 
                   $ip -C $chain -j  $TAGP 2>/dev/null ||  $ip -I $chain -j  $TAGP 2>/dev/null
       done
     
@@ -51,7 +53,7 @@ mmode=$1
       chain=OUTPUT
       algos=`uci -q get $CONFIG.@basic[0].algos` 
       for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAGW 2>/dev/null || $i -F $TAGW 2>/dev/null 
+                  $ip -N $TAGW 2>/dev/null || $ip -F $TAGW 2>/dev/null 
                   $ip -C $chain -j  $TAGW 2>/dev/null ||  $ip -I $chain -j  $TAGW 2>/dev/null
       done
     
@@ -63,7 +65,9 @@ for i in $idlist ;do
     timestart=$(uci -q get $CONFIG.@$mmode[$i].timestart ) || timestart="00:00"
     timeend=$(uci -q get $CONFIG.@$mmode[$i].timeend) ||  timeend="00:00"
     wweek=$(uci -q get $CONFIG.@$mmode[$i].week )  || wweek='*'
-    local Z1,Z2,Z3,Z4,Z5,Z6,Z7=0,0,0,0,0,0,0
+    # ash 不支持 `local a=1,b=2` 这种写法，会报 "bad variable name" 并中止整个脚本，
+    # 导致 time 之后再也没设置 protocol/weburl 两组规则，还留下一个锁文件。
+    local Z1 Z2 Z3 Z4 Z5 Z6 Z7
     for ww in `echo $wweek | sed 's/,/ /g' `; do 
         [ "$ww" == "1" ] && Z1="Mon,"
         [ "$ww" == "2" ] && Z2="Tue,"
@@ -131,7 +135,12 @@ del_rule() {
 }
 
 start(){
-     [ -f $LOCK ] && exit 1
+     # 脚本被中断时锁文件会残留，之后每次 start() 都直接 exit 1（界面显示未运行、
+     # 也不报任何错）。超过一分钟的锁视为陈旧锁，清掉继续。
+     [ -f $LOCK ] && {
+        [ -n "$(find $LOCK -mmin +1 2>/dev/null)" ] || exit 1
+        elog "removing stale lock $LOCK"
+     }
      del_rule
      enabled=`uci -q get $CONFIG.@basic[0].enabled`
      [ "x$enabled" == "x1" ] || exit 1
