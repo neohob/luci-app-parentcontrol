@@ -14,8 +14,10 @@ function index()
 end
 
 function status()
-    local e = {} 
-    e.status = luci.sys.call("iptables -L FORWARD | grep PARENTCONTROL >/dev/null || iptables -L INPUT | grep PARENTCONTROL >/dev/null || iptables -L OUTPUT | grep PARENTCONTROL >/dev/null") == 0
+    local e = {}
+    -- 网址过滤链在 mangle 表，时间/端口链在 filter 表，两个表都要查。
+    -- 只判断「链是否存在」，不要求有匹配规则：开启状态下即使列表全空也应显示运行中。
+    e.status = luci.sys.call("iptables -t mangle -S 2>/dev/null | grep -q PARENTCONTROL || iptables -S 2>/dev/null | grep -q PARENTCONTROL") == 0
     luci.http.prepare_content("application/json")
     luci.http.write_json(e)
 end
