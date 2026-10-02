@@ -2,6 +2,8 @@ config basic
 	option algos 'kmp'
 	option control_mode '0'
 	option enabled '0'
+	option ip_refresh '30'
+	option ip_mask '24'
 
 config weburl
 	option word 'baidu'
