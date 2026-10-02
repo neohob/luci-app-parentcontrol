@@ -55,8 +55,7 @@ run_mut 'SNI 端口 80,443→80,8443' "$INIT" \
 
 # 2) 网址 TCP/SNI 那条规则整条不装（就是本次修掉的真 bug 的形态）
 run_mut 'SNI 规则整条删除' "$INIT" \
-	'			add_dev_rules "$_ip" mangle "$2" weburl "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4"
-' '' init_test.sh
+	'emit_dev_rule "$_c" "$2" "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"' '' init_test.sh
 
 # 3) PREROUTING 挂载顺序被改（TAGQ 不再最先）
 run_mut 'PREROUTING 顺序被改' "$INIT" \
@@ -108,6 +107,11 @@ run_mut '迁移 hd_mode 恒为 time' "$COMMON" \
 run_mut '额度遍历不再过滤模式' "$COMMON" \
 	'			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"' \
 	'			echo "${_m}_${_i}"' common_test.sh
+
+# 12b) 额度计数不再计入字符串（DNS/SNI）命中
+run_mut '计数不计字符串命中' "$INIT" \
+	'emit_weburl_targets "$TAGA" "$TAGA" "" "-j PCA_$_key" "$_i" single ;;' \
+	':' init_test.sh
 
 # 12) 拆除时不清理 mangle 链
 run_mut '拆除残留 mangle 链' "$INIT" \

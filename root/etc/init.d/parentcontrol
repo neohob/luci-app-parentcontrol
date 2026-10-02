@@ -338,23 +338,43 @@ weburl_patterns() {
 		| grep -E '^[A-Za-z0-9._/-]+$' | sort -u
 }
 
+# 计数用：单一设备条件（ip 优先）加一条规则——避免 mac+ip 两条都被命中而双计
+add_dev_rule_single() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
+	local _c
+	_c=$(devcount "$4" "$5")
+	$1 -t $2 -I $3 $_c $6 $7 2>/dev/null
+	return 0
+}
+
+# 按 devmode 选“封锁式（mac/ip 各一条）”还是“计数式（ip 优先单条）”
+emit_dev_rule() { # $1=ipcmd $2=chain $3=idx $4=extra $5=action $6=devmode
+	if [ "$6" = "single" ]; then
+		add_dev_rule_single "$1" mangle "$2" weburl "$3" "$4" "$5"
+	else
+		add_dev_rules "$1" mangle "$2" weburl "$3" "$4" "$5"
+	fi
+}
+
 # 一个 weburl 条目的全部目标规则（目标 IP + 明文 DNS/SNI 匹配串）。
-# 时段模式与额度封锁共用同一个生成器，保证“允许集合”与“封锁集合”永远一致。
-emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=动作 $5=idx
-	local _algos _f _p _pat _ip
+# 时段封锁 / 额度封锁 / 额度计数 共用同一个生成器，保证三者枚举的目标集合永远一致。
+# $6=devmode：all（默认，mac 与静态IP 各出一条，用于封锁）| single（ip 优先单条，用于计数）
+emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=动作 $5=idx [$6=devmode]
+	local _algos _f _p _pat _c _dev
+	_dev=${6:-all}
 	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
 	_f="$IPDIR/weburl_$5"
 	[ -f "$_f" ] && while read -r _p; do
 		[ -z "$_p" ] && continue
 		case "$_p" in
-		*:*) add_dev_rules "$ipt6" mangle "$1" weburl "$5" "$3 -d $_p" "$4" ;;
-		*)   add_dev_rules "$ipt"  mangle "$1" weburl "$5" "$3 -d $_p" "$4" ;;
+		*:*) _c=$ipt6 ;;
+		*)   _c=$ipt ;;
 		esac
+		emit_dev_rule "$_c" "$1" "$5" "$3 -d $_p" "$4" "$_dev"
 	done < "$_f"
 	for _pat in $(weburl_patterns "$5"); do
-		for _ip in "$ipt" "$ipt6"; do
-			add_dev_rules "$_ip" mangle "$2" weburl "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4"
-			add_dev_rules "$_ip" mangle "$2" weburl "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4"
+		for _c in "$ipt" "$ipt6"; do
+			emit_dev_rule "$_c" "$2" "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4" "$_dev"
+			emit_dev_rule "$_c" "$2" "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"
 		done
 	done
 }
@@ -398,14 +418,8 @@ build_acct_rules() { # $1=school|holiday
 				$_ip -t mangle -A "$TAGA" $DC $PT -j "PCA_$_key" 2>/dev/null
 			done ;;
 		weburl)
-			_f="$IPDIR/weburl_$_i"
-			[ -f "$_f" ] && while read -r _p; do
-				[ -z "$_p" ] && continue
-				case "$_p" in
-				*:*) $ipt6 -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
-				*)   $ipt  -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
-				esac
-			done < "$_f" ;;
+			# 计数式：目标 IP + 字符串（DNS/SNI）都计入，全用单一设备条件
+			emit_weburl_targets "$TAGA" "$TAGA" "" "-j PCA_$_key" "$_i" single ;;
 		esac
 	done
 	rm -f "$STATE_DIR"/base.* 2>/dev/null

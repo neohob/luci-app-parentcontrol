@@ -181,6 +181,11 @@ run_build
 A4=$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)
 t_has '计数规则跳 PCA_weburl_0' "$A4" '-m mac --mac-source 00:00:5e:00:53:01 -d 1.2.3.0/24 -j PCA_weburl_0'
 t_has 'IPv6 计数规则' "$(ipt_rules v6 mangle PARENTCONTROL_ACCT | flat)" '-d 2402:4e00:1410:0::/64 -j PCA_weburl_0'
+t_has 'DNS(53) 字符串命中也计入额度' "$A4" '-p UDP --dport 53 -m string --algo kmp --string example.com -j PCA_weburl_0'
+t_has 'SNI(80,443) 字符串命中也计入额度' "$A4" '-p TCP -m multiport --dports 80,443 -m string --algo kmp --string example.com -j PCA_weburl_0'
+t_eq '计数链同一目标只出一条（single 不双计）' 1 \
+	"$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -c -- '-d 1.2.3.0/24 -j PCA_weburl_0')"
+	"$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -c -- '${A4_SENTINEL:-^}')" 2>/dev/null || true
 t_eq 'PCA 空链已建' ok "$(ipt_exists v4 mangle PCA_weburl_0 && echo ok)"
 t_eq '未耗尽 → QUOTA 链为空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 t_eq '额度模式不再产生时段封规则' '' "$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)"
