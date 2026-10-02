@@ -50,11 +50,19 @@ mmode=$1
     
     ;;
     weburl)
-      chain=OUTPUT
+      # 原版把网址过滤挂在 OUTPUT 链上，但 `-m mac --mac-source` 在 OUTPUT 里永远不成立
+      # （路由器本机发出的报文没有源 MAC），所以「按 MAC 限制某台设备访问某个网址」
+      # 从来就没生效过 —— 界面显示正常、iptables 也不报错，纯粹静默失效。
+      #
+      # 改挂 mangle 表的 PREROUTING：只有这个位置同时满足三个条件 ——
+      #   1. 还看得到客户端的源 MAC；
+      #   2. 报文负载还是明文（TLS ClientHello 里的 SNI、明文 DNS 查询里的域名）；
+      #   3. 位于 flowtable 快转决策之前、也位于其它组件改写目的地址之前。
+      # 挂在 filter 的 INPUT/FORWARD 上时，连接一建立就被卸载，后续报文根本到不了规则。
       algos=`uci -q get $CONFIG.@basic[0].algos` 
       for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAGW 2>/dev/null || $ip -F $TAGW 2>/dev/null 
-                  $ip -C $chain -j  $TAGW 2>/dev/null ||  $ip -I $chain -j  $TAGW 2>/dev/null
+                  $ip -t mangle -N $TAGW 2>/dev/null || $ip -t mangle -F $TAGW 2>/dev/null
+                  $ip -t mangle -C PREROUTING -j $TAGW 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGW 2>/dev/null
       done
     
     ;;
@@ -100,13 +108,15 @@ for i in $idlist ;do
 	done
     ;;
     weburl)
+	# 原版只封了 UDP 53(DNS) 和 TCP 853(DoT)，且 853 那两条带着永远非法的
+	# `--hex-string`（word 是明文关键词、不是十六进制），等于实际只挡了 DNS —— 而
+	# 浏览器/App 用缓存的 IP 走 443 就完全绕过去了。
+	# 现在按明文关键词同时封 UDP 和 TCP：UDP 命中明文 DNS 查询，TCP 命中 TLS
+	# ClientHello 的 SNI。mangle 表不认 REJECT，只能用 DROP。
 	word=$(uci -q get $CONFIG.@$mmode[$i].word ) && STR="-m string --algo ${algos} --string ${word}" || STR=""
-	word2=$(uci -q get $CONFIG.@$mmode[$i].word ) && STR2="-m string --algo ${algos} --hex-string ${word2}" || STR2=""
           for pt in "$ipt" "$ipt6" ; do
-		$pt -I $TAGW -p UDP --dport 53 ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
-		$pt -I $TAGW -p UDP --dport 53 ${MAC} ${WT} ${STR2} -j DROP 2>/dev/null
-		$pt -I $TAGW -p TCP --dport 853 ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
-		$pt -I $TAGW -p TCP --dport 853 ${MAC} ${WT} ${STR2} -j DROP 2>/dev/null
+		$pt -t mangle -I $TAGW -p UDP ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
+		$pt -t mangle -I $TAGW -p TCP ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
 		elog "$mmode: $pt -- ${MAC} -- ${WT} -- ${STR}"
 	  done
     ;; 
@@ -131,6 +141,11 @@ del_rule() {
 	 $ip -F $ta 2>/dev/null
 	 $ip -X $ta 2>/dev/null
       done
+      # mangle 表里还有一条同名链（不同表），必须单独清，否则关掉功能后
+      # PREROUTING 上会残留一条永远匹配不上的跳转。
+      $ip -t mangle -D PREROUTING -j $TAGW 2>/dev/null
+      $ip -t mangle -F $TAGW 2>/dev/null
+      $ip -t mangle -X $TAGW 2>/dev/null
   done
 }
 
