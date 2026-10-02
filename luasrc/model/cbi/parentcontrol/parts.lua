@@ -12,9 +12,9 @@ function M.validate_time(self, value)
 end
 
 -- 模式三选一（关闭 / 时段 / 每日额度），按模式显隐参数。
--- 时段：起控/停控（起控=停控 或留空 = 全天封）；额度：每日分钟 + 可选共享组。
-function M.add_profile(t, sfx, label)
-	local m = t:option(ListValue, sfx .. "_mode", translate(label .. "模式"))
+-- lane 与 mode_label 都必须是字面量（翻译键要求字面量，不能拼接）。
+function M.add_profile(t, sfx, label, mode_label)
+	local m = t:option(ListValue, sfx .. "_mode", mode_label)
 	m:value("off", translate("关闭"))
 	m:value("time", translate("时段"))
 	m:value("quota", translate("每日额度"))

@@ -20,6 +20,11 @@ cat > "$HOLIDAY_CACHE/2025.json" <<'EOF'
 }
 EOF
 
+# 压缩（无空格）的 2026：上游把 JSON 压成一行时，解析不能因此失效（B1 回归）
+cat > "$HOLIDAY_CACHE/2026.json" <<'EOF'
+{"year":2026,"days":[{"name":"元旦","date":"2026-01-01","isOffDay":true},{"name":"春节","date":"2026-02-16","isOffDay":false}]}
+EOF
+
 # ---------- stubs ----------
 FAKE_YMD=2025-01-01
 FAKE_WD=3
@@ -82,9 +87,18 @@ eq() { # $1=desc $2=want $3=got
 }
 
 # 节假日
+echo '--- 空格 JSON ---'
 eq 'holiday offday'     1  "$(pc_holiday_flag 2025-01-01)"
 eq 'holiday workday'    0  "$(pc_holiday_flag 2025-01-26)"
 eq 'holiday unknown'   ''  "$(pc_holiday_flag 2025-02-01)"
+
+# B1 回归：强制走兜底解析（遮蔽 command 使 jsonfilter 探测失败）的压缩 JSON
+echo '--- 压缩 JSON（兜底路径）---'
+command() { return 1; }
+eq 'compressed offday'   1 "$(pc_holiday_flag 2026-01-01)"
+eq 'compressed workday'  0 "$(pc_holiday_flag 2026-02-16)"
+eq 'compressed name-safe (含日期串的 name 不误命中)' 1 "$(pc_holiday_flag 2026-01-01)"
+unset -f command
 
 # 寒暑假
 VAC0_S=07-01 VAC0_E=08-31

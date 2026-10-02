@@ -48,7 +48,7 @@ elog() {
 }
 
 clean_log() {
-	[ "$(cat $LOG_FILE 2>/dev/null | wc -l)" -gt 500 ] && elog "clear log ."
+	[ "$(cat $LOG_FILE 2>/dev/null | wc -l)" -gt 500 ] && : > "$LOG_FILE"
 }
 
 # ============================================================================
@@ -61,13 +61,6 @@ hook_chain() { # $1=ipcmd $2=table $3=parent $4=chain
 	$1 -t $2 -C $3 -j $4 2>/dev/null || $1 -t $2 -I $3 -j $4 2>/dev/null
 }
 entry_key() { echo "$1_$2"; }
-
-# 条目今天生效的模式：off | time | quota（未设=time，兼容老配置）
-eff_mode() {
-	_md=$(pc_entry_mode "$1" "$2" "$3")
-	[ -z "$_md" ] && _md=time
-	echo "$_md"
-}
 
 # 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），都没有=全部客户端
 devcount() {
@@ -303,7 +296,7 @@ build_time_rules() { # $1=school|holiday
 		if [ "$_cm" = "1" ]; then hook_chain "$_ip" filter INPUT "$TAG"; else $_ip -D INPUT -j "$TAG" 2>/dev/null; fi
 	done
 	for _i in $(pc_ids_on time); do
-		[ "$(eff_mode time $_i "$1")" = "time" ] || continue
+		[ "$(pc_entry_eff_mode time $_i "$1")" = "time" ] || continue
 		WT=$(time_gate time $_i "$1")
 		for _ip in "$ipt" "$ipt6"; do
 			add_dev_rules "$_ip" filter "$TAG" time "$_i" "$WT" "-j REJECT"
@@ -314,7 +307,7 @@ build_time_rules() { # $1=school|holiday
 build_protocol_rules() { # $1=school|holiday
 	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
 	for _i in $(pc_ids_on protocol); do
-		[ "$(eff_mode protocol $_i "$1")" = "time" ] || continue
+		[ "$(pc_entry_eff_mode protocol $_i "$1")" = "time" ] || continue
 		WT=$(time_gate protocol $_i "$1")
 		PT=$(proto_cond $_i)
 		for _ip in "$ipt" "$ipt6"; do
@@ -323,7 +316,9 @@ build_protocol_rules() { # $1=school|holiday
 	done
 }
 
-# 网址过滤匹配串（域名/关键词），逐包 -m string 用
+# 网址过滤匹配串（域名/关键词），逐包 -m string 用。
+# 字符集有意不含 *：-m string 是字面匹配，* 不会被当通配符，加进来只会带出
+# 无意义的规则并使命令拼接有 glob 风险（旧版为此保留了 set -f hack，已去掉）。
 weburl_patterns() {
 	{ pc_uget "@weburl[$1].word"; pc_uget "@weburl[$1].domains"; } 2>/dev/null \
 		| tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
@@ -352,7 +347,7 @@ emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=�
 
 build_weburl_time_rules() { # $1=school|holiday
 	for _i in $(pc_ids_on weburl); do
-		[ "$(eff_mode weburl $_i "$1")" = "time" ] || continue
+		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
 		emit_weburl_targets "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" "$_i"
 	done
 }
@@ -370,47 +365,42 @@ clean_pca_chains() {
 build_acct_rules() { # $1=school|holiday
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_on $_m); do
-			[ "$(eff_mode $_m $_i "$1")" = "quota" ] || continue
-			_key=$(entry_key "$_m" "$_i")
-			ensure_chain "$ipt" mangle "PCA_$_key"
-			ensure_chain "$ipt6" mangle "PCA_$_key"
-			DC=$(devcount "$_m" "$_i")
-			case "$_m" in
-			time)
-				for _ip in "$ipt" "$ipt6"; do
-					$_ip -t mangle -A "$TAGA" $DC -j "PCA_$_key" 2>/dev/null
-				done ;;
-			protocol)
-				PT=$(proto_cond "$_i")
-				for _ip in "$ipt" "$ipt6"; do
-					$_ip -t mangle -A "$TAGA" $DC $PT -j "PCA_$_key" 2>/dev/null
-				done ;;
-			weburl)
-				_f="$IPDIR/weburl_$_i"
-				[ -f "$_f" ] && while read -r _p; do
-					[ -z "$_p" ] && continue
-					case "$_p" in
-					*:*) $ipt6 -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
-					*)   $ipt  -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
-					esac
-				done < "$_f" ;;
-			esac
-		done
+	for _key in $(pc_quota_keys "$1"); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		ensure_chain "$ipt" mangle "PCA_$_key"
+		ensure_chain "$ipt6" mangle "PCA_$_key"
+		DC=$(devcount "$_m" "$_i")
+		case "$_m" in
+		time)
+			for _ip in "$ipt" "$ipt6"; do
+				$_ip -t mangle -A "$TAGA" $DC -j "PCA_$_key" 2>/dev/null
+			done ;;
+		protocol)
+			PT=$(proto_cond "$_i")
+			for _ip in "$ipt" "$ipt6"; do
+				$_ip -t mangle -A "$TAGA" $DC $PT -j "PCA_$_key" 2>/dev/null
+			done ;;
+		weburl)
+			_f="$IPDIR/weburl_$_i"
+			[ -f "$_f" ] && while read -r _p; do
+				[ -z "$_p" ] && continue
+				case "$_p" in
+				*:*) $ipt6 -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
+				*)   $ipt  -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
+				esac
+			done < "$_f" ;;
+		esac
 	done
 	rm -f "$STATE_DIR"/base.* 2>/dev/null
 }
 
-# 池内条目用量之和（只统计同样处于额度模式的成员，否则时段模式条目也会被算进去）
+# 池内条目用量之和（只统计同样处于额度模式的成员）
 pool_usage() { # $1=池名 $2=school|holiday
 	_sum=0
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_on $_m); do
-			[ "$(eff_mode "$_m" "$_i" "$2")" = "quota" ] || continue
-			[ "$(pc_entry_pool $_m $_i "$2")" = "$1" ] || continue
-			_sum=$((_sum + $(pc_usage_get "$(entry_key "$_m" "$_i")")))
-		done
+	for _key in $(pc_quota_keys "$2"); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		[ "$(pc_entry_pool "$_m" "$_i" "$2")" = "$1" ] || continue
+		_sum=$((_sum + $(pc_usage_get "$_key")))
 	done
 	echo "$_sum"
 }
@@ -433,12 +423,14 @@ block_entry() { # $1=module $2=idx
 	esac
 }
 
-# 条目生效的额度/已用/池：池优先；池不存在或没额度则用条目自己的。
-# 输出 "<quota> <used> <pool>"（quota=0 表示不限）。封锁与看板共用，保证两者一致。
+# 条目生效的额度/已用：池优先；池不存在或没额度则用条目自己的。
+# 输出 "<quota> <used>"（quota=0 表示不限）。封锁与看板共用，保证两者一致。
 entry_effective() { # $1=module $2=idx $3=school|holiday
 	_pool=$(pc_entry_pool "$1" "$2" "$3")
-	if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$3")" ]; then
-		echo "$(pc_quota_positive "$(pc_pool_quota "$_pool" "$3")") $(pool_usage "$_pool" "$3") $_pool"
+	_pq=
+	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
+	if [ -n "$_pq" ]; then
+		echo "$(pc_quota_positive "$_pq") $(pool_usage "$_pool" "$3")"
 	else
 		echo "$(pc_quota_positive "$(pc_entry_quota "$1" "$2" "$3")") $(pc_usage_get "$(entry_key "$1" "$2")")"
 	fi
@@ -453,26 +445,19 @@ build_quota_blocks() {
 		ensure_chain "$_ip" mangle "$TAGQ"
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_on $_m); do
-			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
-			set -- $(entry_effective "$_m" "$_i" "$_tt")
-			[ "$1" -gt 0 ] 2>/dev/null || continue
-			if [ "$_issued" = "0" ] || [ "$2" -ge "$1" ]; then
-				block_entry "$_m" "$_i"
-			fi
-		done
+	for _key in $(pc_quota_keys "$_tt"); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		set -- $(entry_effective "$_m" "$_i" "$_tt")
+		[ "$1" -gt 0 ] 2>/dev/null || continue
+		if [ "$_issued" = "0" ] || [ "$2" -ge "$1" ]; then
+			block_entry "$_m" "$_i"
+		fi
 	done
 }
 
 # 额度计数链名（供 sample 读取）
 active_acct_keys() {
-	_tt=$(pc_today_type)
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_on $_m); do
-			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] && echo "$(entry_key "$_m" "$_i")"
-		done
-	done
+	pc_quota_keys "$(pc_today_type)"
 }
 
 # ============================================================================
@@ -572,12 +557,10 @@ usage_tsv() {
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
 	printf 'day\t%s\t%s\t%s\t%s\n' "$(pc_today)" "$_tt" "$_reset" "$_issued"
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_on $_m); do
-			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
-			set -- $(entry_effective "$_m" "$_i" "$_tt")
-			printf 'item\t%s[%s]\t%s\t%s\n' "$_m" "$_i" "$2" "$1"
-		done
+	for _key in $(pc_quota_keys "$_tt"); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		set -- $(entry_effective "$_m" "$_i" "$_tt")
+		printf 'item\t%s[%s]\t%s\t%s\n' "$_m" "$_i" "$2" "$1"
 	done
 	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -7); do
 		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
@@ -622,11 +605,25 @@ refresh_ip() {
 	with_tick_lock refresh_ip_body
 }
 
+# 只重建依赖 IP 解析结果的 mangle 链（网址时段/计数/额度封锁），
+# 不动 filter 表的时段规则，也不重建整个 build_all。
+rebuild_ip_rules() {
+	_tt=$(pc_today_type)
+	for _ip in "$ipt" "$ipt6"; do
+		$_ip -t mangle -F "$TAGI" 2>/dev/null
+		$_ip -t mangle -F "$TAGW" 2>/dev/null
+	done
+	build_weburl_time_rules "$_tt"
+	build_acct_rules "$_tt"
+	build_quota_blocks
+}
+
+# cron 每 ip_refresh 分钟：采样后重解析域名、重建 IP 相关规则。
+# 不调 refresh_holiday（节假日由 start 与每日跨天检查负责），也不重建 filter 表。
 refresh_ip_body() {
-	refresh_holiday
 	sample_counters
 	refresh_ips
-	build_all
+	rebuild_ip_rules
 }
 
 cron_sync() { # $1=1 写入 / $1=0 移除

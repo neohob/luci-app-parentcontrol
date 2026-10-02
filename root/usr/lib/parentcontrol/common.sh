@@ -1,6 +1,7 @@
 # 纯逻辑库：日子类型判定 / 额度状态 / 用量读写 / 配额计算
-# 被 /etc/init.d/parentcontrol source。除 `uci` 外不依赖任何外部命令，
-# 便于 test/common_test.sh 直接 source 后用桩函数测试。
+# 被 /etc/init.d/parentcontrol source。
+# 依赖：uci，以及 busybox 基础工具 date/sed/grep/tr/awk/sort/find。
+# 测试（test/common_test.sh）只给 date 与 uci 打桩，其余走真实命令。
 
 PC_CONF=${PC_CONF:-parentcontrol}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
@@ -33,13 +34,20 @@ pc_holiday_flag() {
 	_y=${_d%%-*}
 	_f="$HOLIDAY_CACHE/$_y.json"
 	[ -f "$_f" ] || return 1
-	# 每个 { ... } 对象压到一行（holiday-cn 的对象无嵌套花括号），再找日期
-	_line=$(tr '}' '\n' < "$_f" | grep -F "$_d" | head -1)
-	[ -n "$_line" ] || return 1
-	case "$_line" in
-	*'"isOffDay": true'*)  echo 1 ;;
-	*'"isOffDay": false'*) echo 0 ;;
-	*)                     return 1 ;;
+	# 首选 OpenWrt 规范工具 jsonfilter
+	if command -v jsonfilter >/dev/null 2>&1; then
+		case "$(jsonfilter -i "$_f" -e "@.days[@.date='$_d'].isOffDay" 2>/dev/null)" in
+		true)  echo 1; return 0 ;;
+		false) echo 0; return 0 ;;
+		*)     return 1 ;;
+		esac
+	fi
+	# 兜底：去掉所有空白后按扁平对象精确匹配（不假设缩进/换行/空格）
+	_o=$(tr -d ' \t\n\r' < "$_f" | grep -o "{[^{}]*\"date\":\"$_d\"[^{}]*}")
+	case "$_o" in
+	*'"isOffDay":true'*)  echo 1 ;;
+	*'"isOffDay":false'*) echo 0 ;;
+	*)                    return 1 ;;
 	esac
 }
 
@@ -54,17 +62,10 @@ pc_in_vacation() {
 		[ -n "$_s" ] && [ -n "$_e" ] || continue
 		case "$_s" in *-*-*) _ss="$_s" ;; *) _ss="$_y-$_s" ;; esac
 		case "$_e" in *-*-*) _ee="$_e" ;; *) _ee="$_y-$_e" ;; esac
-		if [ "$_ss" \> "$_ee" ]; then
-			# 跨年区间（如寒假 12-20 ~ 01-05）
-			if [ "$_d" \> "$_ss" ] || [ "$_d" = "$_ss" ] \
-			   || [ "$_d" \< "$_ee" ] || [ "$_d" = "$_ee" ]; then
-				echo 1; return 0
-			fi
-		else
-			if { [ "$_d" \> "$_ss" ] || [ "$_d" = "$_ss" ]; } \
-			   && { [ "$_d" \< "$_ee" ] || [ "$_d" = "$_ee" ]; }; then
-				echo 1; return 0
-			fi
+		# ISO 日期串按字典序即时间序；ss>ee 表示跨年（寒假 12-20 ~ 01-05）
+		if awk -v d="$_d" -v a="$_ss" -v b="$_ee" \
+			'BEGIN { exit (a > b) ? !(d >= a || d <= b) : !(d >= a && d <= b) }'; then
+			echo 1; return 0
 		fi
 	done
 	echo 0
@@ -146,6 +147,23 @@ pc_entry_quota() {
 pc_entry_mode() {
 	_sfx=$(pc_suffix "$3")
 	pc_uget "@$1[$2].${_sfx}_mode"
+}
+
+# 档案生效模式：off | time | quota（未设=time，兼容老配置）
+pc_entry_eff_mode() {
+	_md=$(pc_entry_mode "$1" "$2" "$3")
+	[ -z "$_md" ] && _md=time
+	echo "$_md"
+}
+
+# 今天处于「每日额度」模式的条目键（<module>_<idx>），每行一个。
+# 所有额度相关遍历都从这里出发，避免模块清单散落各处。
+pc_quota_keys() { # $1=school|holiday
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on "$_m"); do
+			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"
+		done
+	done
 }
 
 # 把非数字/空额度归一：输出 0 表示不限，>0 表示分钟上限

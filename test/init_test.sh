@@ -84,7 +84,7 @@ fails=0
 eq() { if [ "$2" = "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s want=[%s] got=[%s]\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi; }
 has() { if printf '%s' "$2" | grep -qF -- "$3"; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s missing [%s] in [%s]\n' "$1" "$3" "$2"; fails=$((fails + 1)); fi; }
 
-eq 'eff_mode' quota "$(eff_mode weburl 0 school)"
+eq 'pc_entry_eff_mode' quota "$(pc_entry_eff_mode weburl 0 school)"
 eq 'proto_cond' '-p tcp --dport 80' "$(proto_cond 0)"
 eq 'devcount mac' '-m mac --mac-source 00:00:5e:00:53:01' "$(devcount weburl 0)"
 

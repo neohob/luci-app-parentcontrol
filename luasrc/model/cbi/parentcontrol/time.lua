@@ -52,7 +52,7 @@ e = t:option(Value, "ip", translate("静态IP/主机名"),
 	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
 e.rmempty = true
 
-parts.add_profile(t, "sd", translate("平日"))
-parts.add_profile(t, "hd", translate("节假日"))
+parts.add_profile(t, "sd", translate("平日"), translate("平日模式"))
+parts.add_profile(t, "hd", translate("节假日"), translate("节假日模式"))
 
 return a
