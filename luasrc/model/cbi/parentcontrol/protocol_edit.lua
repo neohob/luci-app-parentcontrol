@@ -25,7 +25,7 @@ t.addremove = false
 t:option(Value, "remarks", translate("备注"))
 
 e = t:option(Value, "mac", translate("MAC地址<font color=\"green\">(留空为全部客户端)</font>"))
-e.placeholder = "ALL"
+e.placeholder = translate("全部客户端")
 e.rmempty = true
 o.net.mac_hints(function(mac, name) e:value(mac, "%s (%s)" % {mac, name}) end)
 

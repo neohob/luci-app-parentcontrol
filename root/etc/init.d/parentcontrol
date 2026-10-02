@@ -502,7 +502,7 @@ sample_counters() {
 	local _min_kb _thr _dump _key _v _bf _b _d _k
 	mkdir -p "$STATE_DIR"
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
-	case "$_min_kb" in ''|*[!0-9]*) _min_kb=32 ;; esac
+	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac
 	_thr=$((_min_kb * 1024))
 	_dump=$($ipt -t mangle -nvx -L "$TAGA" 2>/dev/null; $ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null)
 	for _key in $(active_acct_keys); do
@@ -511,8 +511,13 @@ sample_counters() {
 		if [ -f "$_bf" ]; then
 			_b=$(cat "$_bf")
 			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi
-			[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1
+		else
+			# 首次采样（开机/重建后）：计数器当前值就是“自规则建立以来”的流量，
+			# 直接按它判一次，否则这段时间的用量会被白白丢掉。
+			_d=$_v
 		fi
+		# 必须有实际流量（_d>0）且达到阈值才记，否则阈值 0 时零流量也会记一分钟
+		[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1
 		echo "$_v" > "$_bf"
 	done
 	for _bf in "$STATE_DIR"/base.*; do

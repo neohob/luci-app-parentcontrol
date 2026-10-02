@@ -10,7 +10,7 @@ config basic
 	# 用量历史保留天数
 	option usage_keep '90'
 	# 一分钟内至少多少 KB 才算“在用”（滤掉后台心跳），0=任何流量都算
-	option usage_min_kb '32'
+	option usage_min_kb '8'
 
 config weburl
 	option remarks 'Example'

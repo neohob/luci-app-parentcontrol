@@ -67,6 +67,36 @@ function M.profiles(self, section)
 	return one("sd", i18n.translate("平日")) .. "；" .. one("hd", i18n.translate("节假日"))
 end
 
+-- MAC → 已知设备名（来自 DHCP 租约/ARP；只保留真正的名字，丢掉 IP 兜底值）
+local _macnames
+local function mac_names()
+	if _macnames then return _macnames end
+	_macnames = {}
+	local ok, sys = pcall(require, "luci.sys")
+	if ok and sys.net and sys.net.mac_hints then
+		sys.net.mac_hints(function(mac, name)
+			if mac and name and not name:match("^%d+%.%d+%.%d+%.%d+$") then
+				_macnames[mac:lower()] = (name:gsub("%.lan$", ""):gsub("%.local$", ""))
+			end
+		end)
+	end
+	return _macnames
+end
+
+-- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示
+function M.mac(self, section)
+	local mac = self.map:get(section, "mac") or ""
+	local ip = self.map:get(section, "ip") or ""
+	local out = {}
+	if mac ~= "" then
+		local n = mac_names()[mac:lower()]
+		out[#out + 1] = n and (mac .. " （" .. n .. "）") or mac
+	end
+	if ip ~= "" then out[#out + 1] = ip end
+	if #out == 0 then return i18n.translate("全部客户端") end
+	return table.concat(out, " / ")
+end
+
 -- 今日额度（只对处于额度模式的条目有值；池成员显示池的合计）
 function M.used(self, section, typ)
 	local u = M.usage_map()
