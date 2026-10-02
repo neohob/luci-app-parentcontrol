@@ -16,4 +16,20 @@ uci -q set firewall.parentcontrol.path=/etc/parentcontrol.include
 uci -q set firewall.parentcontrol.reload=1
 uci commit firewall
 rm -f /tmp/luci-indexcache
+
+# 兼容搬迁：早期版本用单独的 word(关键词) 做匹配，现在匹配串直接由 domains 生成。
+# 老配置里只填了 word 的，把它搬到 domains，避免升级后功能静默失效。
+[ -e "/etc/config/parentcontrol" ] && {
+	i=0
+	while uci -q get parentcontrol.@weburl[$i] >/dev/null 2>&1; do
+		w=$(uci -q get parentcontrol.@weburl[$i].word)
+		d=$(uci -q get parentcontrol.@weburl[$i].domains)
+		if [ -n "$w" ] && [ -z "$d" ]; then
+			uci -q set parentcontrol.@weburl[$i].domains="$w"
+		fi
+		i=$((i+1))
+	done
+	uci -q commit parentcontrol
+	rm -f /tmp/luci-indexcache
+}
 exit 0

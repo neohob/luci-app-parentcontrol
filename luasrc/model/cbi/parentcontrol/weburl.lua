@@ -56,10 +56,7 @@ e = t:option(Value, "mac", translate("MAC地址<font color=\"green\">(必指定�
 e.rmempty = true
 o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
 
-e = t:option( Value, "word", translate("额外匹配关键词<font color=\"green\">(可留空，逗号分隔)</font>"), translate("按明文匹配：UDP 53 的 DNS 查询，以及 TCP 80/443 的 Host / TLS SNI（后者实际只在 IPv6 上生效）。填了域名也能直接当匹配串，所以这一栏一般可以留空。"))
-e.rmempty = true
-
-e = t:option( Value, "domains", translate("域名<font color=\"green\">(逗号分隔)</font>"), translate("既当匹配串，又会被解析成 IPv4 按 IP 封锁（IPv4 转发报文的负载内核看不到，只能按 IP 封）。apex 域名即可覆盖子域。"))
+e = t:option( Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"), translate("每一项都会当子串去匹配明文 DNS 查询和 TLS SNI（apex 域名即可覆盖子域），同时也会被解析成 IPv4 按 IP 封锁（IPv4 转发报文的负载内核看不到，只能按 IP 封）。填域名最省事；只填关键词也行（会尝试 关键词.com / www.关键词.com / 关键词.cn）。"))
 e.rmempty = true
     function validate_time(self, value, section)
         local hh, mm, ss
