@@ -52,10 +52,20 @@ clean_log() {
 # return 安全 —— 那样会把后面的过滤规则一起跳过）。
 # ============================================================================
 offload_macs() {
+	# 用「配置里出现过的」所有 weburl MAC，不看勾选状态：
+	# 只要列表里还有受管设备就不开流卸载。否则「关掉列表→再打开」期间新建立的
+	# 流会被卸载，而已经卸载的流不会因为后来把规则拿掉就退出（会继续绕过整个
+	# netfilter），于是重新开启依旧封不住。
 	uci -q get $CONFIG.@basic[0].enabled | grep -q '^1$' || return 0
-	uci show $CONFIG 2>/dev/null | grep "enable='1'" | grep 'weburl' \
-		| grep -oE '\[[0-9]+\]' | tr -dc '0-9\n' \
-		| while read i; do uci -q get $CONFIG.@weburl[$i].mac; done | sort -u
+	weburl_macs_all
+}
+
+# 已勾选行的 MAC —— 决定哪些网段真的装规则（累积列表里保留其它行的条目，
+# 但关掉的行不应该继续封锁）。
+weburl_macs_on() {
+	for i in $(weburl_on); do
+		uci -q get $CONFIG.@weburl[$i].mac
+	done | grep -v '^$' | sort -u
 }
 
 offload_handle() {
@@ -68,19 +78,49 @@ apply_offload() {
 	command -v nft >/dev/null 2>&1 || return 0
 	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
 	h=$(offload_handle)
-	[ -z "$h" ] && return 0
-	cond=""
-	for m in $(offload_macs); do
-		cond="$cond ether saddr != $m"
-	done
-	nft delete rule inet fw4 forward handle $h 2>/dev/null
-	if [ -n "$cond" ]; then
-		nft insert rule inet fw4 forward meta l4proto { tcp, udp }$cond flow add @ft 2>/dev/null \
-			|| nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
-		elog "offload: exclude$cond"
-	else
-		nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	if [ -n "$(offload_macs)" ]; then
+		# 有受管设备：直接拿掉整条 flow add 规则，不让任何流被卸载。
+		#
+		# 为什么不用 `ether saddr != <MAC>` 做排除：那个条件盖不住入方向。
+		# 出方向（客户端→外网）源 MAC 确实是客户端，能排除；但入方向（回包）的源 MAC
+		# 是上游网关、目的 MAC 此时还是路由器自己的（LAN 侧的以太头是在 forward 钩子
+		# 之后才写的）。于是回包一进来就把整条流加进卸载表，之后双向都绕过 netfilter，
+		# IP 封锁随之失效——实测受管设备有 48 条 IPv6 流被卸载。
+		# 既然按身份排除盖不全，就干脆不卸载。停用本插件时会恢复原样。
+		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+			h=$(offload_handle)
+			[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+			if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+				elog "offload: ERROR 删除 flow add 规则失败"
+			else
+				elog "offload: disabled"
+			fi
+		fi
+		# 已经卸载的流不会因为规则被拿掉就退出（流表条目一直在快路径生效），
+		# 所以要把受管设备现有的连接显式清掉，它才会重新握手、被 IP 封锁拦住。
+		# 需要 conntrack 工具（opkg install conntrack）；没有则跳过，靠流自然过期。
+		if command -v conntrack >/dev/null 2>&1; then
+			n=0
+			for m in $(offload_macs); do
+				for a in $(ip neigh show 2>/dev/null | grep -i " $m " | awk '{print $1}'); do
+					conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n+1))
+				done
+			done
+			[ "$n" -gt 0 ] && elog "offload: purged conntrack for managed hosts"
+		fi
+		printf 'disabled\n' > /tmp/pc_offload_state
 	fi
+}
+
+# 停用/关闭功能时把 flow add 恢复原样，不留副作用。
+restore_offload() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
+	h=$(offload_handle)
+	[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	printf 'on\n' > /tmp/pc_offload_state
+	elog "offload: restored"
 }
 
 # 停用功能时把 flow add 恢复成不带任何条件的样子，不留副作用。
@@ -225,8 +265,11 @@ apply_ip_rules() {
 		$ip -t mangle -C PREROUTING -j $TAGI 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGI 2>/dev/null
 		$ip -t mangle -F $TAGI 2>/dev/null
 	done
+	onmacs=$(weburl_macs_on)
 	while read m p; do
 		[ -z "$m" ] && continue
+		# 只有「已勾选」的行才真的装规则
+		echo "$onmacs" | grep -qx "$m" || continue
 		case "$p" in
 		*:*) $ipt6 -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
 		*)   $ipt  -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
