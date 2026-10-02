@@ -687,6 +687,7 @@ start() {
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 1
 	[ -n "$ipt" ] || exit 1
 	touch "$LOCK"
+	trap 'rm -f "$LOCK"' EXIT INT TERM
 	mkdir -p "$STATE_DIR" "$USAGE_DIR"
 	refresh_holiday novet
 	refresh_ips

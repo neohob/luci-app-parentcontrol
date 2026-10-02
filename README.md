@@ -103,11 +103,20 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 仓库自带一套白盒测试（无需路由器，`sh` + `python3` 即可跑）：
 
 ```sh
-sh test/run.sh          # 跑全部三套
+sh test/run.sh          # 三个 lint + 三套测试（约 1 分钟）
 sh test/common_test.sh  # 纯逻辑：日子判定/节假日解析/额度/配额
 sh test/init_test.sh    # 规则构建：用状态化假 iptables 断言生成的规则
 sh test/migrate_test.sh # 配置迁移：week→双档案 / word→domains / 默认值
+sh test/mutation_check.sh  # 变异测试（改坏源码，断言测试会失败）
 ```
+
+`run.sh` 还会跑三个静态检查，都是**真机上踩过、主机测不出来**的坑：
+- `lint_locals.py` —— shell 函数里赋值的 `_xxx` 必须 `local`（否则会静默覆盖调用方的
+  同名循环变量；真机上曾导致网址条目的 TCP/SNI 规则整条没被安装）。
+- `lint_ash.sh` —— 禁用 `10#` 等 busybox ash 不支持的写法（主机的 bash/dash 支持，
+  但路由器上会 `arithmetic syntax error`）。
+- `lint_luci_globals.py` —— 被 `require` 的 CBI 子模块不能直接用注入的全局类名/
+  `translate`（否则页面 500：`class must be a descendant of AbstractValue`）。
 
 `test/fakes/` 下是桩：一份状态化 `iptables`/`ip6tables`（支持 `-N/-F/-X/-C/-I/-A/-D/-S/-L`
 与计数器）、文件后端的 `uci`、可控的 `date`/`resolveip`/`wget`/`jsonfilter`/`crontab`。
