@@ -202,7 +202,7 @@ pc_quota_keys() { # $1=school|holiday
 pc_lan_nets() {
 	local _s _ip _nm
 	uci -q show network 2>/dev/null \
-		| sed -n "s/^network\.\([A-Za-z0-9_]*\)\.proto='static'$/\1/p" \
+		| sed -n "s/^network\.\([A-Za-z0-9_-]*\)\.proto='static'$/\1/p" \
 		| while read -r _s; do
 			_ip=$(uci -q get "network.$_s.ipaddr")
 			_nm=$(uci -q get "network.$_s.netmask")
@@ -228,7 +228,7 @@ pc_migrate_config() {
 		case "$_k" in
 		reset_school|reset_holiday) uci -q set "$PC_CONF.@basic[0].$_k=12:00" ;;
 		usage_keep)                 uci -q set "$PC_CONF.@basic[0].$_k=90" ;;
-		usage_min_kb)               uci -q set "$PC_CONF.@basic[0].$_k=32" ;;
+		usage_min_kb)               uci -q set "$PC_CONF.@basic[0].$_k=8" ;;
 		esac
 	done
 

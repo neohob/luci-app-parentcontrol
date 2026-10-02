@@ -3,6 +3,7 @@
 local i18n = require "luci.i18n"
 local sys = require "luci.sys"
 local util = require "luci.util"
+local devnames = require "luci.model.cbi.parentcontrol.devnames"
 
 local M = {}
 
@@ -12,42 +13,19 @@ local function num(s, def)
 	return n
 end
 
--- MAC → 已知设备名（DHCP 租约/ARP），丢掉 IP 兜底值，去掉 .lan/.local 后缀
-local _names
-local function mac_names()
-	if _names then return _names end
-	_names = {}
-	local ok, s = pcall(require, "luci.sys")
-	if ok and s.net and s.net.mac_hints then
-		s.net.mac_hints(function(mac, name)
-			if mac and name and not name:match("^%d+%.%d+%.%d+%.%d+$") then
-				_names[mac:lower()] = (name:gsub("%.lan$", ""):gsub("%.local$", ""))
-			end
-		end)
-	end
-	return _names
-end
-
 function M.device_name(mac)
-	if not mac or mac == "" then return "" end
-	return mac_names()[mac:lower()] or ""
+	return devnames.name(mac)
 end
 
--- 日期递减（纯字符串运算，避免依赖 os.time/TZ）
+-- 日期递减：交给 os.time（取中午，避开夏令时边界），别再手写日历
 local function prev_day(ymd)
 	local y, m, d = ymd:match("^(%d%d%d%d)(%d%d)(%d%d)$")
 	if not y then return nil end
-	y, m, d = tonumber(y), tonumber(m), tonumber(d)
-	local dim = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
-	local leap = (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0)
-	if leap then dim[2] = 29 end
-	d = d - 1
-	if d < 1 then
-		m = m - 1
-		if m < 1 then m = 12; y = y - 1 end
-		d = dim[m]
-	end
-	return string.format("%04d%02d%02d", y, m, d)
+	local t = os.time({
+		year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12,
+	})
+	if not t then return nil end
+	return os.date("%Y%m%d", t - 86400)
 end
 
 local function weekday_cn(ymd)
@@ -161,6 +139,32 @@ function M.collect()
 		end
 	end
 
+	-- 3) 最近 30 天窗口（补零），基于 meta.date 往前推
+	local dates = {}
+	local cur = meta.date and meta.date:gsub("-", "") or nil
+	if cur then
+		for _ = 1, 30 do
+			dates[#dates + 1] = cur
+			cur = prev_day(cur)
+		end
+	end
+	table.sort(dates)
+
+	-- shell 侧只按行数截取重置日志，30 天窗口由这里定义：
+	-- 窗口外的重置不参与任何统计，也不出现在「重置记录」里。
+	local inwin = {}
+	for _, dt in ipairs(dates) do inwin[dt] = true end
+	local rday, rkey, rrows = {}, {}, {}
+	for _, r in ipairs(d.resets) do
+		if inwin[r.date] then
+			rday[r.date] = (rday[r.date] or 0) + r.before
+			rkey[r.key] = (rkey[r.key] or 0) + r.before
+			rrows[#rrows + 1] = r
+		end
+	end
+	d.reset_by_day, d.reset_by_key, d.resets = rday, rkey, rrows
+
+	-- 今日口径：当前用量 + 今日被重置掉的量（只加一次）
 	local today_total = 0
 	local today_quota = 0
 	for _, u in ipairs(d.units) do
@@ -172,36 +176,26 @@ function M.collect()
 	d.today_reset = (meta.date and d.reset_by_day[meta.date:gsub("-", "")]) or 0
 	d.today_actual = today_total + d.today_reset
 
-	-- 3) 最近 30 天序列（补零），基于 meta.date 往前推
-	local dates = {}
-	local cur = meta.date and meta.date:gsub("-", "") or nil
-	if cur then
-		for _ = 1, 30 do
-			dates[#dates + 1] = cur
-			cur = prev_day(cur)
-		end
-	end
-	table.sort(dates)
+	-- 每天的分钟数只有一个口径：历史文件用量 + 当天被重置掉的量
 	local maxmin = 0
 	for _, dt in ipairs(dates) do
-		local v = (d.hist[dt] or 0) + (d.reset_by_day[dt] or 0)
+		local rst = d.reset_by_day[dt] or 0
+		local v = (d.hist[dt] or 0) + rst
 		if v > maxmin then maxmin = v end
 		d.days[#d.days + 1] = {
 			date = dt, minutes = v, weekday = weekday_cn(dt),
-			actual = v + (d.reset_by_day[dt] or 0),
-			reset = (d.reset_by_day[dt] or 0),
-			has = (d.hist[dt] ~= nil),
+			reset = rst, has = (d.hist[dt] ~= nil),
 		}
 	end
 	d.days_max = maxmin
 
-	-- 4) 历史汇总
+	-- 4) 历史汇总（与柱状图、按条目占比同一个 minutes 口径）
 	local sum, cnt, mx = 0, 0, 0
 	for _, day in ipairs(d.days) do
 		if day.has or (day.reset or 0) > 0 then
-			sum = sum + (day.actual or day.minutes)
+			sum = sum + day.minutes
 			cnt = cnt + 1
-			if (day.actual or day.minutes) > mx then mx = day.actual or day.minutes end
+			if day.minutes > mx then mx = day.minutes end
 		end
 	end
 	d.hist_sum = sum

@@ -19,7 +19,6 @@ function index()
 	entry({"admin", "control", "parentcontrol","time_edit"}, cbi("parentcontrol/time_edit")).leaf = true
 	entry({"admin", "control", "parentcontrol","protocol_edit"}, cbi("parentcontrol/protocol_edit")).leaf = true
 	entry({"admin", "control", "parentcontrol","status"}, call("status")).leaf = true
-	entry({"admin", "control", "parentcontrol","usage"}, call("usage")).leaf = true
 	entry({"admin", "control", "parentcontrol","reset_quota"}, call("reset_quota")).leaf = true
 end
 
@@ -34,6 +33,9 @@ end
 
 -- 重置某条目/池今天的额度。key 必须严格匹配白名单（防 shell 注入）。
 function reset_quota()
+    -- 改状态的操作必须 POST + CSRF token：GET 会被跨站顶层导航触发
+    -- （Lax cookie 会带上），导致额度被清零并写日志。
+    if not require("luci.dispatcher").test_post_security() then return end
     local key = luci.http.formvalue("key") or ""
     local ok = false
     if key:match("^[a-z][a-z0-9_]*_[0-9]+$") or key:match("^pool:[A-Za-z0-9_.%-]+$") then
@@ -43,23 +45,4 @@ function reset_quota()
     luci.http.write_json({ ok = ok, key = key })
 end
 
--- 用量看板：shell 只输出 TSV（/etc/init.d/parentcontrol usage_tsv），JSON 在 Lua 侧组装
--- （写入交给 write_json，转义由框架处理）。
-function usage()
-    local out = luci.sys.exec("/etc/init.d/parentcontrol usage_tsv 2>/dev/null") or ""
-    local res = { day = "", type = "", reset = "", issued = false, items = {}, history = {} }
-    for _, line in ipairs(util.split(out, "\n")) do
-        if line ~= "" then
-            local f = util.split(line, "\t")
-            if f[1] == "day" then
-                res.day, res.type, res.reset, res.issued = f[2], f[3], f[4], (f[5] == "1")
-            elseif f[1] == "item" then
-                res.items[#res.items + 1] = { name = f[2], used = tonumber(f[3]) or 0, quota = tonumber(f[4]) or 0 }
-            elseif f[1] == "history" then
-                res.history[#res.history + 1] = { date = f[2], minutes = tonumber(f[3]) or 0 }
-            end
-        end
-    end
-    luci.http.prepare_content("application/json")
-    luci.http.write_json(res)
-end
+

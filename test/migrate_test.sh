@@ -44,7 +44,7 @@ echo '== 默认值（缺失才补，已有不动）=='
 t_eq 'reset_school 已有值不动' '07:00' "$(cfg_get parentcontrol.@basic[0].reset_school)"
 t_eq 'reset_holiday 补默认' '12:00' "$(cfg_get parentcontrol.@basic[0].reset_holiday)"
 t_eq 'usage_keep 补默认' '90' "$(cfg_get parentcontrol.@basic[0].usage_keep)"
-t_eq 'usage_min_kb 补默认' '32' "$(cfg_get parentcontrol.@basic[0].usage_min_kb)"
+t_eq 'usage_min_kb 补默认' '8' "$(cfg_get parentcontrol.@basic[0].usage_min_kb)"
 
 echo '== word → domains =='
 t_eq '只有 word 时搬到 domains' 'xhs' "$(cfg_get parentcontrol.@weburl[0].domains)"

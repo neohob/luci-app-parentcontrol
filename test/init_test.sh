@@ -109,6 +109,46 @@ cfg_apply
 run_build
 t_has '强力管控挂 INPUT' "$(ipt_rules v4 filter INPUT | flat)" '-j PARENTCONTROL_TIME'
 
+# 防自锁：无设备条件的条目在 INPUT 里是无条件 REJECT，会把管理员自己也挡在门外
+echo '== 强力管控 + 无设备条件条目 → 不挂 INPUT（防自锁）=='
+fresh
+cfg_begin 1 1
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '00:00'
+EOF
+cfg_apply
+run_build
+t_eq '无设备条件 → 不挂 INPUT' '' "$(ipt_rules v4 filter INPUT | flat)"
+t_has '仍挂 FORWARD（管控局域网上网）' "$(ipt_rules v4 filter FORWARD | flat)" '-j PARENTCONTROL_TIME'
+t_has '日志有防自锁告警' "$(cat "$LOG_FILE" 2>/dev/null)" '跳过「强力管控」的 INPUT 挂载'
+
+# 带设备条件的条目照旧挂 INPUT（不能因为加固把功能关了）
+echo '== 强力管控 + 有设备条件条目 → 照旧挂 INPUT =='
+fresh
+cfg_begin 1 1
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '00:00'
+EOF
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '00:00'
+EOF
+cfg_apply
+run_build
+t_eq '只要有一个无设备条件条目，就不挂 INPUT（守卫看整条链）' '' "$(ipt_rules v4 filter INPUT | flat)"
+
 # ============================================================
 echo '== 协议 时段模式 + 端口 =='
 fresh
@@ -677,9 +717,15 @@ cfg_apply
 FAKE_DATE_YMD=2026-06-08
 FAKE_DATE_HM=13:00
 pc_usage_add weburl_0 12
-TSV=$(usage_tsv)
-t_has 'day 行含日期与类型' "$TSV" 'day	2026-06-08	school	12:00	1'
-t_has 'item 行含已用/额度' "$TSV" 'item	weburl[0]	12	30'
-t_has 'history 行' "$TSV" 'history	20260608	12'
+# 列表页数据源：stats_tsv brief（只出 meta + entry 两行，不跑历史/计数器）
+TSV=$(stats_tsv brief)
+t_has 'brief: meta 行含日期与类型' "$TSV" 'meta	2026-06-08	school	12:00	1	32	90'
+t_has 'brief: entry 行含 key/模式/额度/已用' "$TSV" 'weburl_0	weburl	0		00:00:5e:00:53:01	quota	30	12'
+t_hasnt 'brief: 不输出 hist 行' "$TSV" 'hist	'
+t_hasnt 'brief: 不输出 reset 行' "$TSV" 'reset	'
+# 看板数据源：完整 stats_tsv（含历史汇总）
+TSV=$(stats_tsv)
+t_has 'full: hist 行' "$TSV" 'hist	20260608	12'
+t_has 'full: histkey 行' "$TSV" 'histkey	20260608	weburl_0	12'
 
 t_summary
