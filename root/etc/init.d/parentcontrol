@@ -114,6 +114,17 @@ weburl_on() {
 		| grep -oE '\[[0-9]+\]' | grep -o '[0-9]'
 }
 
+# 输出某一行要拿去匹配的字符串：word + domains，逗号分隔、去重、只留安全字符。
+# 用域名当匹配串时 apex 域名即可覆盖子域（xhscdn.com 能匹配 sns-img.xhscdn.com）。
+weburl_patterns() {
+	{
+		uci -q get $CONFIG.@weburl[$1].word
+		uci -q get $CONFIG.@weburl[$1].domains
+	} 2>/dev/null | tr ',' '\n' \
+		| sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
+}
+
 # 输出 "MAC<空格>域名"
 ip_domains() {
 	for i in $(weburl_on); do
@@ -272,17 +283,22 @@ for i in $idlist ;do
 	done
     ;;
     weburl)
-	# 原版只封了 UDP 53(DNS) 和 TCP 853(DoT)，且 853 那两条带着永远非法的
-	# `--hex-string`（word 是明文关键词、不是十六进制），等于实际只挡了 DNS —— 而
-	# 浏览器/App 用缓存的 IP 走 443 就完全绕过去了。
-	# 现在按明文关键词同时封 UDP 和 TCP：UDP 命中明文 DNS 查询，TCP 命中 TLS
-	# ClientHello 的 SNI。mangle 表不认 REJECT，只能用 DROP。
-	word=$(uci -q get $CONFIG.@$mmode[$i].word ) && STR="-m string --algo ${algos} --string ${word}" || STR=""
-          for pt in "$ipt" "$ipt6" ; do
-		$pt -t mangle -I $TAGW -p UDP ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
-		$pt -t mangle -I $TAGW -p TCP ${MAC} ${WT} ${STR} -j DROP 2>/dev/null
-		elog "$mmode: $pt -- ${MAC} -- ${WT} -- ${STR}"
+	# 匹配串 = word（可逗号分隔、可留空）+ domains 里的每个域名。
+	# 所以 domains 同时承担两件事：生成匹配串、以及解析成 IPv4 后按 IP 封。word 因此
+	# 退化成可选的补充手段（想宽泛匹配时用它，比如只写 xhs）。
+	#
+	# 这里是逐包做 -m string，成本不低，所以加端口过滤把范围收窄：
+	#   UDP 53     → 明文 DNS 查询
+	#   TCP 80/443 → 明文 HTTP Host / TLS ClientHello 的 SNI
+	# 注意 IPv4 转发报文的负载内核看不到（见上方 apply_ip_rules 的说明），所以这条
+	# TCP 规则实际只在 IPv6 上生效；IPv4 靠 IP 封锁。
+	for p in $(weburl_patterns $i); do
+	  for pt in "$ipt" "$ipt6" ; do
+		$pt -t mangle -I $TAGW -p UDP --dport 53 ${MAC} ${WT} -m string --algo ${algos} --string "$p" -j DROP 2>/dev/null
+		$pt -t mangle -I $TAGW -p TCP -m multiport --dports 80,443 ${MAC} ${WT} -m string --algo ${algos} --string "$p" -j DROP 2>/dev/null
+		elog "$mmode: $pt -- $p"
 	  done
+	done
     ;; 
     *) ;;
    esac

@@ -1,4 +1,8 @@
 <% include("cbi/map") %>
+<style type="text/css">
+	/* 「域名」那一栏内容长，单独收窄，别把表格撑爆；其余字段不受影响。 */
+	input[id$=".domains"] { width: 18em; }
+</style>
 <script type="text/javascript">//<![CDATA[
 	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "control", "parentcontrol", "status")%>', null,
 		function (x, result) {
