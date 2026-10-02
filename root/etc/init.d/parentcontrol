@@ -30,18 +30,20 @@ USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
 HOLIDAY_LOCAL=${HOLIDAY_LOCAL:-/usr/share/parentcontrol/holiday}
 STATE_DIR=${STATE_DIR:-/tmp/parentcontrol}
+RESET_LOG=${RESET_LOG:-/etc/parentcontrol/resets.log}
 CRON_TAG="#pc_tick"
 CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv stats_tsv"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv stats_tsv reset_quota"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
 	refresh_holiday  Fetch statutory-holiday data for this year and next
 	usage_tsv        Print today's quota usage and 7-day history as TSV
-	stats_tsv        Print full stats for the dashboard as TSV"
+	stats_tsv        Print full stats for the dashboard as TSV
+	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -583,11 +585,16 @@ del_rule() {
 }
 
 prune_usage() {
-	local _keep
+	local _keep _cut
 	_keep=$(pc_uget "@basic[0].usage_keep")
 	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
 	if [ "$_keep" -gt 0 ] 2>/dev/null; then
 		find "$USAGE_DIR" -type f -mtime +"$_keep" -delete 2>/dev/null
+		# 重置日志同样按保留天数裁剪（按行内日期过滤）
+		if [ -f "$RESET_LOG" ]; then
+			_cut=$(date -d "@$(( $(date +%s) - _keep * 86400 ))" +%Y-%m-%d 2>/dev/null || echo 0000-00-00)
+			awk -F'\t' -v cut="$_cut" '$1 >= cut' "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+		fi
 	fi
 	return 0
 }
@@ -634,6 +641,40 @@ quota_live_kb() { # $1=key
 	echo $(( _d / 1024 ))
 }
 
+# 重置某条目今天的额度（可对池：pool:<名字>；会记进 $RESET_LOG）
+reset_quota() {
+	local _arg _key _f _used _m _i _name
+	_arg="$1"
+	[ -n "$_arg" ] || { elog "reset_quota: 缺参数"; return 1; }
+	_f=$(pc_usage_file)
+	case "$_arg" in
+	pool:*)
+		_name=${_arg#pool:}
+		case "$_name" in ''|*[!A-Za-z0-9_.-]*) elog "reset_quota: 非法池名"; return 1 ;; esac
+		for _m in time protocol weburl; do
+			for _i in $(pc_ids_on "$_m"); do
+				[ "$(pc_entry_pool "$_m" "$_i" "$(pc_today_type)")" = "$_name" ] && reset_quota "${_m}_${_i}"
+			done
+		done
+		return 0 ;;
+	esac
+	_key="$_arg"
+	# 严格白名单：只允许 module_index（防注入）
+	case "$_key" in ''|*[!a-z0-9_]*) elog "reset_quota: 非法 key $_key"; return 1 ;; esac
+	_used=$(pc_usage_get "$_key")
+	mkdir -p "$(dirname "$RESET_LOG")"
+	printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%d)" "$(date +%H:%M:%S)" "$_key" "$_used" >> "$RESET_LOG"
+	# 抹掉今天的用量行（= 该条目今天已用清零）
+	if [ -f "$_f" ]; then
+		grep -v "^${_key} " "$_f" > "$_f.new" 2>/dev/null
+		mv "$_f.new" "$_f"
+	fi
+	# 若条目正被额度封锁，立刻重建封锁链让它马上可用
+	pc_uget "@basic[0].enabled" | grep -q '^1$' && build_quota_blocks
+	elog "reset_quota: $_key 重置（重置前已用 $_used 分钟）"
+	return 0
+}
+
 # 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
 #   meta     <日期> <school|holiday> <发放时刻> <0|1已发放> <阈值KB> <保留天> <当前HH:MM>
 #   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
@@ -641,7 +682,7 @@ quota_live_kb() { # $1=key
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
-	local _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _pq _live _f _t _n
+	local _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _pq _live _f _t _n _cut
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -688,6 +729,11 @@ stats_tsv() {
 		printf 'hist\t%s\t%s\n' "$_f" "$_t"
 		awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
 	done
+	# 重置记录（最近 30 天）：reset <YYYYMMDD> <HH:MM:SS> <key> <重置前已用分钟>
+	if [ -f "$RESET_LOG" ]; then
+		_cut=$(date -d "@$(( $(date +%s) - 30 * 86400 ))" +%Y-%m-%d 2>/dev/null || echo 0000-00-00)
+		tail -n 500 "$RESET_LOG" 2>/dev/null | awk -F'\t' -v cut="$_cut" '$1 >= cut && NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+	fi
 }
 
 with_tick_lock() {

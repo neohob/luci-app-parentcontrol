@@ -57,4 +57,9 @@ e = t:option(DummyValue, "_used", translate("今日额度"))
 e.cfgvalue = function(self, section) return ui.used(self, section, "protocol") end
 e.rmempty = true
 
+e = t:option(DummyValue, "_reset", translate("重置"))
+e.template = "parentcontrol/resetbtn"
+e.cfgvalue = function(self, section) return ui.quota_key(self, section, "protocol") end
+e.rmempty = true
+
 return a

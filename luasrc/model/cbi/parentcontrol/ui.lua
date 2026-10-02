@@ -97,6 +97,16 @@ function M.mac(self, section)
 	return table.concat(out, " / ")
 end
 
+-- 今天该条目是不是「每日额度」模式：是则返回 "<模块>_<下标>"，否则返回 ""
+function M.quota_key(self, section, typ)
+	local sfx = ((M.usage_map().day or {}).type == "holiday") and "hd" or "sd"
+	local mode = self.map:get(section, sfx .. "_mode") or "time"
+	if mode ~= "quota" then return "" end
+	local idx = M.section_indexes(self.map, typ)[section]
+	if idx == nil then return "" end
+	return typ .. "_" .. idx
+end
+
 -- 今日额度（只对处于额度模式的条目有值；池成员显示池的合计）
 function M.used(self, section, typ)
 	local u = M.usage_map()

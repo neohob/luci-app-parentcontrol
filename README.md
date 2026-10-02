@@ -23,6 +23,24 @@
 - **防改 MAC**（静态 IP/主机名，与 MAC 任一命中即生效）
 - **列表瘦身 + 详情独立编辑页**，列表显示「设备名 + 今日额度」
 
+## 界面
+
+<table>
+<tr>
+<td align="center" width="50%"><img src="screenshot/1.png" width="100%"><br><sub><b>时间限制</b>：按 MAC/IP 限制机器是否联网</sub></td>
+<td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="screenshot/3.png" width="100%"><br><sub><b>协议过滤</b>：按端口/协议限制</sub></td>
+<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：额度发放时刻、共享额度池、寒暑假区间</sub></td>
+</tr>
+</table>
+
+> 三个模块的列表**只显示摘要**：`设备（含设备名） / 档案（平日+节假日一句话） / 今日额度`，
+> 点每行的 **编辑** 进独立页做详细设置。
+> 更完整的用量统计（今天进度条、最近 30 天趋势、按条目/设备分析、重置记录）在
+> **「使用统计」** 页 —— 截图 4 里的旧小看板已经移到那里了。
+
 
 ## 本 fork 的改动
 

@@ -20,6 +20,7 @@ function index()
 	entry({"admin", "control", "parentcontrol","protocol_edit"}, cbi("parentcontrol/protocol_edit")).leaf = true
 	entry({"admin", "control", "parentcontrol","status"}, call("status")).leaf = true
 	entry({"admin", "control", "parentcontrol","usage"}, call("usage")).leaf = true
+	entry({"admin", "control", "parentcontrol","reset_quota"}, call("reset_quota")).leaf = true
 end
 
 function status()
@@ -29,6 +30,17 @@ function status()
     e.status = luci.sys.call("iptables -t mangle -S 2>/dev/null | grep -q PARENTCONTROL || iptables -S 2>/dev/null | grep -q PARENTCONTROL") == 0
     luci.http.prepare_content("application/json")
     luci.http.write_json(e)
+end
+
+-- 重置某条目/池今天的额度。key 必须严格匹配白名单（防 shell 注入）。
+function reset_quota()
+    local key = luci.http.formvalue("key") or ""
+    local ok = false
+    if key:match("^[a-z][a-z0-9_]*_[0-9]+$") or key:match("^pool:[A-Za-z0-9_.%-]+$") then
+        ok = (luci.sys.call("/etc/init.d/parentcontrol reset_quota " .. key .. " >/dev/null 2>&1") == 0)
+    end
+    luci.http.prepare_content("application/json")
+    luci.http.write_json({ ok = ok, key = key })
 end
 
 -- 用量看板：shell 只输出 TSV（/etc/init.d/parentcontrol usage_tsv），JSON 在 Lua 侧组装
