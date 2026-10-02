@@ -24,12 +24,34 @@ function status()
     luci.http.write_json(e)
 end
 
--- 用量看板：实际计算在 shell 侧（/etc/init.d/parentcontrol usage_json），这里只转发。
+-- 用量看板：shell 只输出 TSV（/etc/init.d/parentcontrol usage_tsv），JSON 在 Lua 侧组装
+-- （写入交给 write_json，转义由框架处理）。
+local function tsv_split(s, sep)
+    local t, i = {}, 1
+    while true do
+        local j = s:find(sep, i, true)
+        if not j then t[#t + 1] = s:sub(i); break end
+        t[#t + 1] = s:sub(i, j - 1)
+        i = j + 1
+    end
+    return t
+end
+
 function usage()
-    local out = luci.sys.exec("/etc/init.d/parentcontrol usage_json 2>/dev/null")
-    if not out or out == "" then
-        out = '{"day":"","type":"","reset":"","issued":false,"items":[],"history":[]}'
+    local out = luci.sys.exec("/etc/init.d/parentcontrol usage_tsv 2>/dev/null") or ""
+    local res = { day = "", type = "", reset = "", issued = false, items = {}, history = {} }
+    for _, line in ipairs(tsv_split(out, "\n")) do
+        if line ~= "" then
+            local f = tsv_split(line, "\t")
+            if f[1] == "day" then
+                res.day, res.type, res.reset, res.issued = f[2], f[3], f[4], (f[5] == "1")
+            elseif f[1] == "item" then
+                res.items[#res.items + 1] = { name = f[2], used = tonumber(f[3]) or 0, quota = tonumber(f[4]) or 0 }
+            elseif f[1] == "history" then
+                res.history[#res.history + 1] = { date = f[2], minutes = tonumber(f[3]) or 0 }
+            end
+        end
     end
     luci.http.prepare_content("application/json")
-    luci.http.write(out)
+    luci.http.write_json(res)
 end

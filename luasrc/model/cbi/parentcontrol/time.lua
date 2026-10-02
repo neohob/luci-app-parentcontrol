@@ -4,45 +4,7 @@ local ipc = require "luci.ip"
 local net = require "luci.model.network".init()
 local sys = require "luci.sys"
 
-local function validate_time(self, value, section)
-	local hh, mm = string.match(value, "^(%d?%d):(%d%d)$")
-	hh = tonumber(hh); mm = tonumber(mm)
-	if hh and mm and hh <= 23 and mm <= 59 then
-		return value
-	else
-		return nil, "时间格式必须为 HH:MM 或者留空"
-	end
-end
-
--- 平日/节假日两套档案：模式三选一（关闭/时段/额度），按模式显隐参数
-local function add_profile(t, sfx, label)
-	local m = t:option(ListValue, sfx .. "_mode", translate(label .. "模式"))
-	m:value("off", translate("关闭"))
-	m:value("time", translate("时段"))
-	m:value("quota", translate("每日额度"))
-	m.default = "time"
-	m.rmempty = true
-
-	local s = t:option(Value, sfx .. "_start", translate("起控"))
-	s.placeholder = '00:00'; s.default = '00:00'; s.validate = validate_time
-	s:depends(sfx .. "_mode", "time")
-	s.rmempty = true
-
-	local e = t:option(Value, sfx .. "_end", translate("停控"))
-	e.placeholder = '00:00'; e.default = '00:00'; e.validate = validate_time
-	e:depends(sfx .. "_mode", "time")
-	e.rmempty = true
-
-	local q = t:option(Value, sfx .. "_quota", translate("每日分钟"))
-	q.datatype = "uinteger"
-	q:depends(sfx .. "_mode", "quota")
-	q.rmempty = true
-
-	local p = t:option(Value, sfx .. "_pool", translate("共享组"))
-	p.placeholder = translate("留空=独立额度")
-	p:depends(sfx .. "_mode", "quota")
-	p.rmempty = true
-end
+local parts = require "luci.model.cbi.parentcontrol.parts"
 
 local a, t, e
 a = Map("parentcontrol", translate("Parent Control"),
@@ -90,7 +52,7 @@ e = t:option(Value, "ip", translate("静态IP/主机名"),
 	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
 e.rmempty = true
 
-add_profile(t, "sd", translate("平日"))
-add_profile(t, "hd", translate("节假日"))
+parts.add_profile(t, "sd", translate("平日"))
+parts.add_profile(t, "hd", translate("节假日"))
 
 return a

@@ -101,9 +101,11 @@ has 'quota exhausted -> DROP rule' "$(cat "$IPT_LOG")" '-j DROP'
 
 eq 'active_acct_keys' 'weburl_0' "$(active_acct_keys)"
 
-# JSON 看板应可解析
-J=$(usage_json)
-has 'usage_json has items' "$J" '"items":['
-has 'usage_json used' "$J" '"used":5'
+# TSV 看板：行格式 item<TAB><条目><TAB>已用<TAB>额度
+J=$(usage_tsv)
+has 'usage_tsv day'  "$J" 'day'
+has 'usage_tsv item' "$J" 'weburl[0]'
+echo "$J" | awk -F'\t' '$1=="item"{print $3}' | grep -qx 5 && ok_line='item used=5' || ok_line='item used!=5'
+eq 'usage_tsv item used' 'item used=5' "$ok_line"
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILED"; exit 1; fi

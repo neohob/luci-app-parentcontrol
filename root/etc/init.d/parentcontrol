@@ -36,12 +36,12 @@ CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_json"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
 	refresh_holiday  Fetch statutory-holiday data for this year and next
-	usage_json       Print today's quota usage and 7-day history as JSON"
+	usage_tsv        Print today's quota usage and 7-day history as TSV"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -80,14 +80,12 @@ devcount() {
 
 # 封锁/时段用：对条目的每个设备身份各加一条规则（mac 与 ip 任一命中即生效）
 add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
-	set -f   # 关 glob：匹配串里可能有 * （如关键词通配）
 	_mac=$(pc_uget "@$4[$5].mac")
 	_ip=$(pc_uget "@$4[$5].ip")
 	_n=0
 	[ -n "$_mac" ] && { $1 -t $2 -I $3 -m mac --mac-source "$_mac" $6 $7 2>/dev/null; _n=1; }
 	[ -n "$_ip" ]  && { $1 -t $2 -I $3 -s "$_ip" $6 $7 2>/dev/null; _n=1; }
 	[ "$_n" = 0 ] && $1 -t $2 -I $3 $6 $7 2>/dev/null
-	set +f
 	return 0
 }
 
@@ -329,28 +327,33 @@ build_protocol_rules() { # $1=school|holiday
 weburl_patterns() {
 	{ pc_uget "@weburl[$1].word"; pc_uget "@weburl[$1].domains"; } 2>/dev/null \
 		| tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
+		| grep -E '^[A-Za-z0-9._/-]+$' | sort -u
+}
+
+# 一个 weburl 条目的全部目标规则（目标 IP + 明文 DNS/SNI 匹配串）。
+# 时段模式与额度封锁共用同一个生成器，保证“允许集合”与“封锁集合”永远一致。
+emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=动作 $5=idx
+	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
+	_f="$IPDIR/weburl_$5"
+	[ -f "$_f" ] && while read -r _p; do
+		[ -z "$_p" ] && continue
+		case "$_p" in
+		*:*) add_dev_rules "$ipt6" mangle "$1" weburl "$5" "$3 -d $_p" "$4" ;;
+		*)   add_dev_rules "$ipt"  mangle "$1" weburl "$5" "$3 -d $_p" "$4" ;;
+		esac
+	done < "$_f"
+	for _pat in $(weburl_patterns "$5"); do
+		for _ip in "$ipt" "$ipt6"; do
+			add_dev_rules "$_ip" mangle "$2" weburl "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4"
+			add_dev_rules "$_ip" mangle "$2" weburl "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4"
+		done
+	done
 }
 
 build_weburl_time_rules() { # $1=school|holiday
-	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
 	for _i in $(pc_ids_on weburl); do
 		[ "$(eff_mode weburl $_i "$1")" = "time" ] || continue
-		WT=$(time_gate weburl $_i "$1")
-		_f="$IPDIR/weburl_$_i"
-		[ -f "$_f" ] && while read -r _p; do
-			[ -z "$_p" ] && continue
-			case "$_p" in
-			*:*) add_dev_rules "$ipt6" mangle "$TAGI" weburl "$_i" "$WT -d $_p" "-j DROP" ;;
-			*)   add_dev_rules "$ipt"  mangle "$TAGI" weburl "$_i" "$WT -d $_p" "-j DROP" ;;
-			esac
-		done < "$_f"
-		for _pat in $(weburl_patterns $_i); do
-			for _ip in "$ipt" "$ipt6"; do
-				add_dev_rules "$_ip" mangle "$TAGW" weburl "$_i" "$WT -p UDP --dport 53 -m string --algo $_algos --string $_pat" "-j DROP"
-				add_dev_rules "$_ip" mangle "$TAGW" weburl "$_i" "$WT -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "-j DROP"
-			done
-		done
+		emit_weburl_targets "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" "$_i"
 	done
 }
 
@@ -415,7 +418,6 @@ pool_usage() { # $1=池名 $2=school|holiday
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
 	_m=$1; _i=$2
-	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
 	case "$_m" in
 	time)
 		for _ip in "$ipt" "$ipt6"; do
@@ -427,21 +429,19 @@ block_entry() { # $1=module $2=idx
 			add_dev_rules "$_ip" mangle "$TAGQ" protocol "$_i" "$PT" "-j DROP"
 		done ;;
 	weburl)
-		_f="$IPDIR/weburl_$_i"
-		[ -f "$_f" ] && while read -r _p; do
-			[ -z "$_p" ] && continue
-			case "$_p" in
-			*:*) add_dev_rules "$ipt6" mangle "$TAGQ" weburl "$_i" "-d $_p" "-j DROP" ;;
-			*)   add_dev_rules "$ipt"  mangle "$TAGQ" weburl "$_i" "-d $_p" "-j DROP" ;;
-			esac
-		done < "$_f"
-		for _pat in $(weburl_patterns $_i); do
-			for _ip in "$ipt" "$ipt6"; do
-				add_dev_rules "$_ip" mangle "$TAGQ" weburl "$_i" "-p UDP --dport 53 -m string --algo $_algos --string $_pat" "-j DROP"
-				add_dev_rules "$_ip" mangle "$TAGQ" weburl "$_i" "-p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "-j DROP"
-			done
-		done ;;
+		emit_weburl_targets "$TAGQ" "$TAGQ" "" "-j DROP" "$_i" ;;
 	esac
+}
+
+# 条目生效的额度/已用/池：池优先；池不存在或没额度则用条目自己的。
+# 输出 "<quota> <used> <pool>"（quota=0 表示不限）。封锁与看板共用，保证两者一致。
+entry_effective() { # $1=module $2=idx $3=school|holiday
+	_pool=$(pc_entry_pool "$1" "$2" "$3")
+	if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$3")" ]; then
+		echo "$(pc_quota_positive "$(pc_pool_quota "$_pool" "$3")") $(pool_usage "$_pool" "$3") $_pool"
+	else
+		echo "$(pc_quota_positive "$(pc_entry_quota "$1" "$2" "$3")") $(pc_usage_get "$(entry_key "$1" "$2")")"
+	fi
 }
 
 # 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
@@ -456,16 +456,9 @@ build_quota_blocks() {
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on $_m); do
 			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
-			_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
-			if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$_tt")" ]; then
-				_q=$(pc_quota_positive "$(pc_pool_quota "$_pool" "$_tt")")
-				_u=$(pool_usage "$_pool" "$_tt")
-			else
-				_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")")
-				_u=$(pc_usage_get "$(entry_key "$_m" "$_i")")
-			fi
-			[ "$_q" -gt 0 ] 2>/dev/null || continue
-			if [ "$_issued" = "0" ] || [ "$_u" -ge "$_q" ]; then
+			set -- $(entry_effective "$_m" "$_i" "$_tt")
+			[ "$1" -gt 0 ] 2>/dev/null || continue
+			if [ "$_issued" = "0" ] || [ "$2" -ge "$1" ]; then
 				block_entry "$_m" "$_i"
 			fi
 		done
@@ -569,41 +562,27 @@ prune_usage() {
 	return 0
 }
 
-# 用量看板数据（Lua 控制器只转发这段 JSON）
-usage_json() {
+# 用量看板数据：shell 只输出 TSV，Lua 侧再转 JSON
+# （避免在 shell 里手拼 JSON 的转义问题）。行格式：
+#   day    <日期> <school|holiday> <重置> <0|1已发放>
+#   item   <条目> <已用分钟> <额度分钟,0=不限>
+#   history <YYYYMMDD> <当天总分钟>
+usage_tsv() {
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
-	_issued=false; pc_allowance_issued "$_reset" && _issued=true
-	printf '{"day":"%s","type":"%s","reset":"%s","issued":%s,"items":[' \
-		"$(pc_today)" "$_tt" "$_reset" "$_issued"
-	_first=1
+	_issued=0; pc_allowance_issued "$_reset" && _issued=1
+	printf 'day\t%s\t%s\t%s\t%s\n' "$(pc_today)" "$_tt" "$_reset" "$_issued"
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on $_m); do
 			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
-			_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
-			if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$_tt")" ]; then
-				_q=$(pc_quota_positive "$(pc_pool_quota "$_pool" "$_tt")")
-				_u=$(pool_usage "$_pool" "$_tt")
-				_n="$_m[$_i] @$_pool"
-			else
-				_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")")
-				_u=$(pc_usage_get "$(entry_key "$_m" "$_i")")
-				_n="$_m[$_i]"
-			fi
-			[ "$_first" = 1 ] || printf ','
-			_first=0
-			printf '{"name":"%s","used":%s,"quota":%s}' "$_n" "$_u" "$_q"
+			set -- $(entry_effective "$_m" "$_i" "$_tt")
+			printf 'item\t%s[%s]\t%s\t%s\n' "$_m" "$_i" "$2" "$1"
 		done
 	done
-	printf '],"history":['
-	_first=1
 	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -7); do
 		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
-		[ "$_first" = 1 ] || printf ','
-		_first=0
-		printf '{"date":"%s","minutes":%s}' "$_f" "$_t"
+		printf 'history\t%s\t%s\n' "$_f" "$_t"
 	done
-	printf ']}\n'
 }
 
 with_tick_lock() {
