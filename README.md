@@ -1,5 +1,3 @@
-
-
 <h1 align="center">
   <br>luci-app-parentcontrol<br>
 </h1>
@@ -11,89 +9,97 @@
 <a href="https://www.mozilla.org/firefox/"><img alt="Firefox" src="https://img.shields.io/badge/Firefox-%E2%89%A5128-FF7138?logo=firefoxbrowser&logoColor=white"></a>
 </p>
 
+家长控制，可以按时间控制机器、按端口/协议过滤、按网址（关键词）过滤。
 
 
-家长控制 ，可以按时间控制机器，端口和关键字过滤等。
+**上游原版在开启软件加速的 IPv4/IPv6 双栈环境下，「网址过滤」按 MAC 拦某个网站是完全不生效的**
+（而且是静默失效：界面正常、iptables 不报错）。本 fork 把它修好了，并补上了按 IP/CIDR 的封锁能力。
 
-本家长控制，是2022年群里某生找本人出钱定制界面开发，代码原来网上开源代码只是不符合要求，请本人二次开发，现经和需求方协议将代码开源！以感谢大家的支持与鼓励！！也算是为OPENWRT开源代码添砖加瓦！
-
-当然，本身这代码也不是一个什么很高级的代码，权当是抛砖引玉，如果有什么不足之处，欢迎一起ISSE使之更完善。
-
-
-参考来源：
-
-## 界面
-
-![screenshots](./doc/parentcontrol1.png)
-
-![screenshots](./doc/parentcontrol2.png)
-
-![screenshots](./doc/parentcontrol3.png)
 
 ## 本 fork 的改动
-
-> 上游原版在这类设备（OpenWrt/ImmortalWrt 23.05 + fw4 + passwall 的虚拟化软路由）上，
-> 「网址过滤」按 MAC 拦某个网站是**完全不生效**的，而且是静默失效（界面正常、iptables 不报错）。
-> 本 fork 修好了它。
 
 ### 1. 修复四处上游缺陷
 
 1. `local Z1,Z2,...,Z7=0,...` 是 bash 语法，ash(busybox) 会报 `bad variable name` 并**中止整个脚本**，
-   导致 time 之后 protocol/weburl 两组规则根本没被设置。
+   导致 time 之后 protocol/weburl 两组规则根本没被设置，还留下一个锁文件。
 2. `del_rule` 里的 `$i -F $TAG` / `$TAGP` / `$TAGW` 是 `$ip` 的笔误，旧规则不会被清掉，规则不断堆叠。
-3. `start()` 缺少陈旧锁判断：脚本一旦被中断，锁文件残留，此后每次 `start()` 都 exit 1，界面显示未运行却不报错。
+3. `start()` 缺少陈旧锁判断：脚本一旦被中断，锁文件残留，此后每次 `start()` 都 exit 1，
+   界面显示未运行却不报错。
 4. `/etc/hotplug.d/iface/97-parentcontrol` 里 `[ "$(`uci -q get ...`)" == 1 ]` 把 `$( )` 和反引号套在一起，
-   外层会把内层命令的**输出**当成命令执行，条件恒为假 —— 脚本永远 exit 0，接口事件后从不重装规则。
+   外层会把内层命令的**输出**当成命令执行（报 `1: not found`），条件恒为假 —— 脚本永远 exit 0，
+   接口事件后从不重装规则。
 
 ### 2. 挂载点改到 mangle PREROUTING
 
 原版挂在 `OUTPUT` 链，而 `-m mac --mac-source` 在 OUTPUT 里**永远不成立**
 （路由器本机发出的报文没有源 MAC），所以「按 MAC 限制某台设备访问某网址」从来就没生效过。
-改挂 mangle 表的 PREROUTING —— 只有这个位置同时能看到客户端源 MAC、明文负载，
+
+改挂 mangle 表的 PREROUTING —— 只有这个位置同时能看到客户端源 MAC 和明文负载，
 并且位于 flowtable 快转决策和其它组件 DNAT 之前。
 
-### 3. 排除受管设备的 flow offload
+### 3. 有受管设备时停用 flow offloading
 
-fw4 会往 forward 链装一条 `meta l4proto { tcp, udp } flow add @ft`，把已建立连接丢进流卸载表；
-之后这些连接的报文在内核 ingress 快路径直接转发，**整个 netfilter 栈都不再经过**。
-用 `ether saddr != <受管 MAC>` 把它排除在卸载之外（只影响受管设备，不绕过任何防火墙规则）。
+这是最关键、也最难查的一条。
+
+fw4 会往 `forward` 链装一条 `meta l4proto { tcp, udp } flow add @ft`，把已建立的连接丢进
+流卸载表；之后这条连接的报文在内核 ingress 快路径直接转发，**整个 netfilter 栈（含
+mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也就失效了。
+
+一开始想只把受管设备排除出去，写成 `ether saddr != <MAC> flow add @ft`，但**这个条件盖不住入方向**：
+
+- 出方向（客户端 → 外网）：源 MAC 是客户端，能排除；
+- 入方向（回包）：源 MAC 是上游网关，目的 MAC 此时还是路由器自己的
+  （LAN 侧的以太头是在 forward 钩子之后才写的）——
+  于是**回包一进来就把整条流加进卸载表，之后双向都绕过 netfilter**。
+
+而且流一旦被卸载，**不会因为后来把规则拿掉就退出**（`nft delete flowtable` 会报
+`Resource busy`，清不掉），会一直漏到自然过期。表现出来就是「关掉列表再打开，封不住；
+设备息屏重连之后又好了」。
+
+所以本 fork 的做法是：**只要列表里还有受管设备（不管有没有勾选），就整条拿掉那条
+`flow add` 规则，不让任何流被卸载**；并且用 `conntrack` 显式清掉受管设备现有的连接，
+让它们必须重新握手、从而被 IP 封锁拦住。停用插件时会自动恢复原样。
+
+代价：只要列表里有受管设备，**全部设备的流卸载都是关闭的**（多走一遍 netfilter，x86
+平台上通常无感）；列表清空或停用插件后自动恢复。
+
+> 需要 `conntrack` 工具（`opkg install conntrack`）才能立即清掉旧连接；
+> 没装也能跑，只是残留连接要等它自己过期。
 
 ### 4. 新增按 IP/CIDR 封锁 + 域名解析自动更新
 
-**为什么必须有它 —— 这是最坑的一点：**
+**为什么必须有它：** 在上面那类设备上，**IPv4 转发报文的负载落在 skb 的 page frags 里，
+`-m string` 看不到它**。实测：一个带唯一标记的明文 HTTP GET，转发路径上数到 18 个包经过
+`mangle PREROUTING`，标记匹配 **0** 个（关掉 GRO 也一样）。所以「按关键词匹配 TLS SNI」
+对 **IPv4 转发流量完全无效**。
 
-在这类网卡直接收发报文的设备上，**IPv4 转发报文的负载落在 skb 的 page frags 里，`-m string` 看不到它**。
-实测：一个带唯一标记的明文 HTTP GET，转发路径上数到 18 个包经过 `mangle PREROUTING`，标记匹配 **0** 个
-（关掉 GRO 也一样）。所以「按关键词匹配 TLS SNI」对 **IPv4 转发流量完全无效**。
-而 IPv6 走隧道、解封装会把负载线性化，所以 IPv6 那边 SNI 是能匹配到的。
+（IPv6 相反 —— 走隧道、解封装会把负载线性化，所以 IPv6 那边 SNI 是能匹配到的。）
 
-**结论：IPv4 转发流量只能按目标 IP（报文头）来封 —— 头信息任何情况下都可见。**
+**结论：IPv4 转发流量只能按目标 IP（报文头）来封，头信息任何情况下都可见。** 于是：
 
-于是新增：
+- 新增 `PARENTCONTROL_IP` 链（IPv4/IPv6 各一条，挂在 mangle PREROUTING）
+- 网址过滤行的「关键词/域名」列写域名即可：它既当子串去匹配明文 DNS 查询和 TLS SNI
+  （apex 域名天然覆盖子域），也会被解析成 IP 一起封锁
+- IPv4 默认封解析结果所在的整个 `/24`（`basic.ip_mask` 可改成 `32` 只封精确 IP）
+- IPv6 按 `/64` 封（同一 CDN 换地址基本在同一 /64 内）
+- 域名解析同时取 apex 和 `www.` 两个变体（A 记录常在 apex、AAAA 常在 www 上）
+- 这一列里**含 `/` 的项直接当 CIDR 封锁**，不做解析（覆盖不到时的应急口子）
+- 解析结果累积在 `/etc/parentcontrol/ip.list`，**只增不减** —— 这样 CDN 换节点后老节点
+  依然被挡住，而客户端 DNS 缓存里的旧节点也不会漏
+- 由 cron 按 `basic.ip_refresh`（默认 30 分钟，`0`=关闭）调用 `refresh_ip` 子命令定时刷新；
+  crontab 条目由插件自己维护（start 写入、stop 移除）
 
-- `PARENTCONTROL_IP` 链（mangle PREROUTING），按 MAC + 目标网段封 IPv4
-- 网址过滤行新增 **「要解析封锁的域名」**（逗号分隔；留空则用关键词猜：`关键词` → `关键词.com` / `www.关键词.com` / `关键词.cn`）
-- 用 `resolveip -4` 解析；默认封整个 `/24`（兜住 CDN 邻居节点和客户端 DNS 缓存里残留的旧节点），
-  可通过 `basic.ip_mask` 改成 `32`（仅精确 IP）
-- 解析结果累积在 `/etc/parentcontrol/ip.list`（**只增不减**，CDN 换节点后老节点依然被挡住），
-  由 cron 按 `basic.ip_refresh`（默认 30 分钟，`0`=关闭）调用 `refresh_ip` 子命令定时刷新
-- crontab 条目由插件自己维护（start 写入、stop 移除）
+### 5. 状态判定
 
-### 已知限制
+- 「开启」开关勾着就显示运行中 —— 网址过滤列表全空只意味着没有规则去匹配，不等于没运行
+- 状态接口原来只查 `filter` 表，而网址过滤链在 `mangle` 表，所以「只开网址过滤」会误报
+  未运行；现在两个表都查，且只判断链是否存在
 
-- 不填 `domains` 时靠关键词猜域名，只能覆盖主域名；要覆盖 CDN 图片/视频域名，请显式填写子域。
-- IP 封锁是「当前解析结果 + 历史累积」，CDN 若换到全新的 `/16`，需要等下一次刷新或手动补域名。
+## 已知限制
+
+- 不填域名时靠关键词猜（`关键词` → `关键词.com` / `www.关键词.com` / `关键词.cn`），
+  只能覆盖主域名；要覆盖 CDN 图片/视频域名请显式填子域。
+- IP 封锁是「当前解析结果 + 历史累积」。CDN 若换到全新的段，需要等下一次刷新，
+  或直接把该段当作 CIDR 填进列表。
 - QUIC(HTTP/3) 的 SNI 本身是加密的，任何 `-m string` 方案都拦不到；好在浏览器会自动回落 TCP。
-
-# My other project
-
-
-## 捐助
-
-
-|     <img src="https://img.shields.io/badge/-支付宝-F5F5F5.svg" href="#赞助支持本项目-" height="25" alt="图飞了😂"/>  |  <img src="https://img.shields.io/badge/-微信-F5F5F5.svg" height="25" alt="图飞了😂" href="#赞助支持本项目-"/>  | 
-| :-----------------: | :-------------: |
-
-<a href="#readme">
-    <img src="https://img.shields.io/badge/-返回顶部-orange.svg" alt="图飞了😂" title="返回顶部" align="right"/>
-</a>
+- 客户端若使用自带 HTTPDNS 的 App（IP 不来自系统 DNS），解析式封锁覆盖不到它的 IP。
