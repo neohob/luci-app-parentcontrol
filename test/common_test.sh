@@ -1,155 +1,206 @@
 #!/bin/sh
-# 纯逻辑自测：不依赖路由器。运行： sh test/common_test.sh
+# common.sh 白盒测试：逐分支覆盖日子判定 / 节假日解析 / 额度 / 用量 / 配额。
+# 运行： sh test/common_test.sh
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/lib.sh"
+t_setup
 
-PC_CONF=parentcontrol
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-HOLIDAY_CACHE="$TMP/holiday"
-USAGE_DIR="$TMP/usage"
-mkdir -p "$HOLIDAY_CACHE"
-
-cat > "$HOLIDAY_CACHE/2025.json" <<'EOF'
-{
-  "year": 2025,
-  "days": [
-    {"name": "元旦", "date": "2025-01-01", "isOffDay": true},
-    {"name": "春节", "date": "2025-01-26", "isOffDay": false},
-    {"name": "春节", "date": "2025-01-27", "isOffDay": true}
-  ]
-}
+# ============================================================
+echo '== uci 助手（pc_ids_all / pc_ids_on）=='
+cfg_reset
+cat > "$T_TMP/ids" <<'EOF'
+config weburl
+	option enable '1'
+config weburl
+	option enable '0'
+config weburl
+	option enable '1'
+config weburl
+	option enabled '1'
 EOF
+# 位置无关：直接用 uci 写多位数下标
+cfg_set 'parentcontrol.@weburl[11].enable' '1'
+cfg_set 'parentcontrol.@weburl[11].sd_mode' 'quota'
+cfg_load parentcontrol "$T_TMP/ids"
+t_eq 'ids_all 含 0..3/11' '0 1 2 3 11' "$(pc_ids_all weburl | tr '\n' ' ' | sed 's/ $//')"
+t_eq 'ids_on 只取 enable=1' '0 2 11' "$(pc_ids_on weburl | tr '\n' ' ' | sed 's/ $//')"
+t_eq 'ids_all 空配置' '' "$(cfg_reset; pc_ids_all time)"
 
-# 压缩（无空格）的 2026：上游把 JSON 压成一行时，解析不能因此失效（B1 回归）
-cat > "$HOLIDAY_CACHE/2026.json" <<'EOF'
-{"year":2026,"days":[{"name":"元旦","date":"2026-01-01","isOffDay":true},{"name":"2026-03-03 提示","date":"2026-04-04","isOffDay":true},{"name":"春节","date":"2026-02-16","isOffDay":false}]}
+# ============================================================
+echo '== pc_holiday_flag：jsonfilter 路径 =='
+put_holiday 2026 '{"year": 2026, "days": [
+    {"name": "元旦", "date": "2026-01-01", "isOffDay": true},
+    {"name": "春节", "date": "2026-02-16", "isOffDay": false}
+]}'
+FAKE_JSONFILTER=on
+t_eq 'jsonfilter 放假 → 1' 1 "$(pc_holiday_flag 2026-01-01)"
+t_eq 'jsonfilter 调休 → 0' 0 "$(pc_holiday_flag 2026-02-16)"
+t_eq 'jsonfilter 无此日期 → 空' '' "$(pc_holiday_flag 2026-03-03)"
+t_eq 'jsonfilter 无该年文件 → 空' '' "$(pc_holiday_flag 2027-01-01)"
+
+echo '== pc_holiday_flag：兜底路径（jsonfilter 不可用）=='
+FAKE_JSONFILTER=off
+t_eq '兜底 带空格 JSON → 1' 1 "$(pc_holiday_flag 2026-01-01)"
+t_eq '兜底 带空格 JSON → 0' 0 "$(pc_holiday_flag 2026-02-16)"
+put_holiday 2026 '{"year":2026,"days":[{"name":"元旦","date":"2026-01-01","isOffDay":true},{"name":"2026-03-03 提示","date":"2026-04-04","isOffDay":true},{"name":"春节","date":"2026-02-16","isOffDay":false}]}'
+t_eq '兜底 压缩 JSON → 1' 1 "$(pc_holiday_flag 2026-01-01)"
+t_eq '兜底 压缩 JSON → 0' 0 "$(pc_holiday_flag 2026-02-16)"
+t_eq '兜底 只有 name 含该日期 → 不误命中' '' "$(pc_holiday_flag 2026-03-03)"
+t_eq '兜底 无该年文件 → 空' '' "$(pc_holiday_flag 2027-01-01)"
+FAKE_JSONFILTER=on
+
+# ============================================================
+echo '== pc_in_vacation =='
+cfg_reset
+cat > "$T_TMP/vac" <<'EOF'
+config vacation
+	option name 'summer'
+	option start '07-01'
+	option end '08-31'
+config vacation
+	option name 'winter'
+	option start '2026-01-20'
+	option end '2026-02-16'
+config vacation
+	option name 'newyear'
+	option start '12-28'
+	option end '01-03'
+config vacation
+	option name 'broken'
+	option start '05-01'
 EOF
+cfg_load parentcontrol "$T_TMP/vac"
+t_eq 'MM-DD 每年重复：区间内' 1 "$(pc_in_vacation 2027-07-15)"
+t_eq 'MM-DD 每年重复：区间外' 0 "$(pc_in_vacation 2027-06-30)"
+t_eq 'MM-DD 起点当日含' 1 "$(pc_in_vacation 2026-07-01)"
+t_eq 'MM-DD 终点当日含' 1 "$(pc_in_vacation 2026-08-31)"
+t_eq 'MM-DD 起点前一天' 0 "$(pc_in_vacation 2026-06-30)"
+t_eq 'MM-DD 终点后一天' 0 "$(pc_in_vacation 2026-09-01)"
+t_eq '绝对日期：区间内' 1 "$(pc_in_vacation 2026-02-01)"
+t_eq '绝对日期：跨年不适用' 0 "$(pc_in_vacation 2027-02-01)"
+t_eq '跨年区间：12 月' 1 "$(pc_in_vacation 2026-12-30)"
+t_eq '跨年区间：1 月' 1 "$(pc_in_vacation 2026-01-02)"
+t_eq '跨年区间：11 月' 0 "$(pc_in_vacation 2026-11-30)"
+t_eq '跨年区间：1/4' 0 "$(pc_in_vacation 2026-01-04)"
+t_eq '缺 end 的坏行被跳过' 0 "$(pc_in_vacation 2026-05-01)"
 
-# ---------- stubs ----------
-FAKE_YMD=2025-01-01
-FAKE_WD=3
-FAKE_HM=09:00
-date() {
-	case "$1" in
-	+%Y-%m-%d) echo "$FAKE_YMD" ;;
-	+%u)       echo "$FAKE_WD" ;;
-	+%Y%m%d)   echo "$FAKE_YMD" | tr -d '-' ;;
-	+%H)       echo "${FAKE_HM%%:*}" ;;
-	+%M)       echo "${FAKE_HM##*:}" ;;
-	*)         echo "" ;;
-	esac
-}
+# ============================================================
+echo '== pc_today_type 优先级 =='
+cfg_reset
+cat > "$T_TMP/day" <<'EOF'
+config vacation
+	option name 'winter'
+	option start '01-01'
+	option end '01-10'
+EOF
+cfg_load parentcontrol "$T_TMP/day"
+put_holiday 2026 '{"year":2026,"days":[{"name":"元旦","date":"2026-01-01","isOffDay":true},{"name":"调休","date":"2026-01-11","isOffDay":false}]}'
+FAKE_DATE_YMD=2026-01-05 FAKE_DATE_DOW=1
+t_eq '寒暑假优先于周末/工作日判定' holiday "$(pc_today_type)"
+FAKE_DATE_YMD=2026-01-01 FAKE_DATE_DOW=4
+t_eq '法定放假 → 节假日' holiday "$(pc_today_type)"
+FAKE_DATE_YMD=2026-01-11 FAKE_DATE_DOW=7
+t_eq '调休上班的周末 → 平日' school "$(pc_today_type)"
+FAKE_DATE_YMD=2026-06-06 FAKE_DATE_DOW=6
+t_eq '无数据 周六 → 节假日' holiday "$(pc_today_type)"
+FAKE_DATE_YMD=2026-06-07 FAKE_DATE_DOW=7
+t_eq '无数据 周日 → 节假日' holiday "$(pc_today_type)"
+FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1
+t_eq '无数据 周一 → 平日' school "$(pc_today_type)"
+FAKE_DATE_YMD=2028-06-06 FAKE_DATE_DOW=6
+t_eq '无该年数据 周六 → 降级节假日' holiday "$(pc_today_type)"
 
-# uci 桩：够用即可
-uci() {
-	[ "$1" = "-q" ] && shift
-	case "$1" in
-	get)  uci_get "$2" ;;
-	show) uci_show ;;
-	*)    return 0 ;;
-	esac
-}
-uci_get() {
-	case "$1" in
-	'parentcontrol.@basic[0].reset_school')  echo "${RESET_SCHOOL:-12:00}" ;;
-	'parentcontrol.@basic[0].reset_holiday') echo "${RESET_HOLIDAY:-12:00}" ;;
-	'parentcontrol.@vacation[0].start')       echo "${VAC0_S:-}" ;;
-	'parentcontrol.@vacation[0].end')         echo "${VAC0_E:-}" ;;
-	'parentcontrol.@vacation[1].start')       echo "${VAC1_S:-}" ;;
-	'parentcontrol.@vacation[1].end')         echo "${VAC1_E:-}" ;;
-	'parentcontrol.@quota[0].name')           echo "${Q0_NAME:-}" ;;
-	'parentcontrol.@quota[0].sd_quota')       echo "${Q0_SD:-}" ;;
-	'parentcontrol.@quota[0].hd_quota')       echo "${Q0_HD:-}" ;;
-	'parentcontrol.@weburl[0].enable')        echo "${W0_EN:-}" ;;
-	'parentcontrol.@weburl[0].sd_mode')       echo "${W0_SDM:-}" ;;
-	*) return 1 ;;
-	esac
-}
-uci_show() {
-	[ -n "${W0_EN:-}" ] && echo "parentcontrol.@weburl[0].enable='$W0_EN'"
-	[ -n "${VAC0_S:-}" ] && echo "parentcontrol.@vacation[0].start='$VAC0_S'"
-	[ -n "${VAC1_S:-}" ] && echo "parentcontrol.@vacation[1].start='$VAC1_S'"
-	[ -n "${Q0_NAME:-}" ] && echo "parentcontrol.@quota[0].name='$Q0_NAME'"
-	return 0
-}
+# ============================================================
+echo '== pc_suffix / pc_reset_for / pc_allowance_issued =='
+t_eq 'suffix holiday→hd' hd "$(pc_suffix holiday)"
+t_eq 'suffix school→sd' sd "$(pc_suffix school)"
+cfg_reset
+cfg_set 'parentcontrol.@basic[0].reset_school' '07:30'
+t_eq 'reset 缺省 12:00' '12:00' "$(pc_reset_for holiday)"
+t_eq 'reset 自定义生效' '07:30' "$(pc_reset_for school)"
+FAKE_DATE_HM=07:29; t_eq '07:29 未发放' 1 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
+FAKE_DATE_HM=07:30; t_eq '07:30 恰好发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
+FAKE_DATE_HM=07:31; t_eq '07:31 已发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
+FAKE_DATE_HM=00:00; t_eq 'reset=00:00 恒已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
+FAKE_DATE_HM=23:59; t_eq '23:59 已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
 
-. "$HERE/../root/usr/lib/parentcontrol/common.sh"
-
-# ---------- assert ----------
-fails=0
-eq() { # $1=desc $2=want $3=got
-	if [ "$2" = "$3" ]; then
-		printf 'ok   %s\n' "$1"
-	else
-		printf 'FAIL %s want=[%s] got=[%s]\n' "$1" "$2" "$3"
-		fails=$((fails + 1))
-	fi
-}
-
-# 节假日
-echo '--- 空格 JSON ---'
-eq 'holiday offday'     1  "$(pc_holiday_flag 2025-01-01)"
-eq 'holiday workday'    0  "$(pc_holiday_flag 2025-01-26)"
-eq 'holiday unknown'   ''  "$(pc_holiday_flag 2025-02-01)"
-
-# B1 回归：强制走兜底解析（遮蔽 command 使 jsonfilter 探测失败）的压缩 JSON
-echo '--- 压缩 JSON（兜底路径）---'
-command() { return 1; }
-eq 'compressed offday'   1 "$(pc_holiday_flag 2026-01-01)"
-eq 'compressed workday'  0 "$(pc_holiday_flag 2026-02-16)"
-eq 'compressed name-only date not matched' '' "$(pc_holiday_flag 2026-03-03)"
-unset -f command
-
-# 寒暑假
-VAC0_S=07-01 VAC0_E=08-31
-eq 'summer in'   1 "$(pc_in_vacation 2025-07-15)"
-eq 'summer out'  0 "$(pc_in_vacation 2025-06-15)"
-
-# 跨年寒假（绝对区间）
-VAC0_S=2025-07-01 VAC0_E=2025-08-31
-VAC1_S=12-20 VAC1_E=01-05
-eq 'winter dec'  1 "$(pc_in_vacation 2025-12-25)"
-eq 'winter jan'  1 "$(pc_in_vacation 2025-01-03)"
-eq 'winter out'  0 "$(pc_in_vacation 2025-02-20)"
-
-# 日子类型
-VAC0_S= VAC0_E= VAC1_S= VAC1_E=
-FAKE_YMD=2025-01-01 FAKE_WD=3; eq 'daytype holiday' holiday "$(pc_today_type)"
-FAKE_YMD=2025-01-26 FAKE_WD=7; eq 'daytype makeup'  school  "$(pc_today_type)"
-FAKE_YMD=2025-02-01 FAKE_WD=6; eq 'daytype weekend' holiday "$(pc_today_type)"
-FAKE_YMD=2025-02-03 FAKE_WD=1; eq 'daytype weekday' school  "$(pc_today_type)"
-
-# 重置时刻
-FAKE_HM=09:00; pc_allowance_issued 12:00 && eq 'before reset issued' 1 0 || eq 'before reset issued' 0 0
-FAKE_HM=13:00; pc_allowance_issued 12:00 && eq 'after reset issued' 0 0 || eq 'after reset issued' 1 0
-
-# 用量读写
-FAKE_YMD=2025-01-01
+# ============================================================
+echo '== 用量读写 =='
+FAKE_DATE_YMD=2026-03-01
+t_eq '无文件时用量为 0' 0 "$(pc_usage_get weburl_0)"
 pc_usage_add weburl_0 1
-pc_usage_add weburl_0 1
+pc_usage_add weburl_0 2
 pc_usage_add weburl_1 5
-eq 'usage get key0' 2 "$(pc_usage_get weburl_0)"
-eq 'usage get key1' 5 "$(pc_usage_get weburl_1)"
-eq 'usage get none' 0 "$(pc_usage_get weburl_9)"
+t_eq '同键累加' 3 "$(pc_usage_get weburl_0)"
+t_eq '不同键独立' 5 "$(pc_usage_get weburl_1)"
+t_eq '不存在的键 → 0' 0 "$(pc_usage_get weburl_9)"
+FAKE_DATE_YMD=2026-03-02
+t_eq '跨天清零' 0 "$(pc_usage_get weburl_0)"
+FAKE_DATE_YMD=2026-03-01
 
-# 配额归一
-eq 'quota empty unlimited' 0 "$(pc_quota_positive '')"
-eq 'quota text unlimited'  0 "$(pc_quota_positive 'abc')"
-eq 'quota number'         60 "$(pc_quota_positive 60)"
+# ============================================================
+echo '== 配额归一 / 池 =='
+t_eq '空 → 不限(0)' 0 "$(pc_quota_positive '')"
+t_eq '非数字 → 不限(0)' 0 "$(pc_quota_positive abc)"
+t_eq '0 → 不限(0)' 0 "$(pc_quota_positive 0)"
+t_eq '正常数字' 60 "$(pc_quota_positive 60)"
+t_eq '带空格 → 不限(0)' 0 "$(pc_quota_positive ' 60')"
+cfg_reset
+cat > "$T_TMP/pool" <<'EOF'
+config quota
+	option name 'kid1'
+	option sd_quota '60'
+	option hd_quota '120'
+config quota
+	option name 'onlyone'
+	option quota '45'
+EOF
+cfg_load parentcontrol "$T_TMP/pool"
+t_eq '池 平日额度' 60 "$(pc_pool_quota kid1 school)"
+t_eq '池 节假日额度' 120 "$(pc_pool_quota kid1 holiday)"
+t_eq '池 单 quota 兜底(平日)' 45 "$(pc_pool_quota onlyone school)"
+t_eq '池 单 quota 兜底(节假日)' 45 "$(pc_pool_quota onlyone holiday)"
+t_eq '不存在的池 → 空' '' "$(pc_pool_quota nope school)"
 
-# 池
-Q0_NAME=kid Q0_SD=60 Q0_HD=120
-eq 'pool school' 60  "$(pc_pool_quota kid school)"
-eq 'pool holiday' 120 "$(pc_pool_quota kid holiday)"
+echo '== 条目档案取值 =='
+cfg_reset
+cat > "$T_TMP/entry" <<'EOF'
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '30'
+	option sd_pool 'kid1'
+	option hd_mode 'time'
+	option hd_start '08:00'
+	option hd_end '20:00'
+config weburl
+	option enable '1'
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '10'
+config weburl
+	option enable '0'
+	option sd_mode 'quota'
+	option sd_quota '99'
+config time
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '7'
+EOF
+cfg_load parentcontrol "$T_TMP/entry"
+t_eq '平日 mode' quota "$(pc_entry_mode weburl 0 school)"
+t_eq '节假日 mode' time "$(pc_entry_mode weburl 0 holiday)"
+t_eq '平日 quota' 30 "$(pc_entry_quota weburl 0 school)"
+t_eq '平日 pool' kid1 "$(pc_entry_pool weburl 0 school)"
+t_eq '节假日 pool 为空' '' "$(pc_entry_pool weburl 0 holiday)"
+t_eq '未设 mode → 空' '' "$(pc_entry_mode weburl 1 school)"
+t_eq 'eff_mode 未设 → time(兼容老配置)' time "$(pc_entry_eff_mode weburl 1 school)"
+t_eq 'eff_mode quota' quota "$(pc_entry_eff_mode weburl 0 school)"
 
-# section 列表
-W0_EN=1
-eq 'ids_on'  '0' "$(pc_ids_on weburl)"
-eq 'ids_all' '0' "$(pc_ids_all weburl)"
+echo '== pc_quota_keys：唯一额度遍历入口 =='
+t_eq '只列 enable=1 且额度的条目（模块序 time/protocol/weburl）' 'time_0 weburl_0 weburl_2' \
+	"$(pc_quota_keys school | tr '\n' ' ' | sed 's/ $//')"
+t_eq '该日为非额度模式 → 空' '' "$(pc_quota_keys holiday)"
 
-if [ "$fails" -eq 0 ]; then
-	echo "ALL PASS"
-else
-	echo "$fails FAILED"
-	exit 1
-fi
+t_summary

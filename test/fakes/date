@@ -1,0 +1,13 @@
+#!/bin/sh
+# 可控 date（测试用）：FAKE_DATE_YMD=YYYY-MM-DD，FAKE_DATE_DOW=1..7，FAKE_DATE_HM=HH:MM
+ymd=${FAKE_DATE_YMD:-2026-10-02}
+hm=${FAKE_DATE_HM:-13:00}
+case "$1" in
++%Y-%m-%d) echo "$ymd" ;;
++%u)       echo "${FAKE_DATE_DOW:-5}" ;;
++%Y%m%d)   echo "$ymd" | tr -d '-' ;;
++%Y)       echo "$ymd" | cut -c1-4 ;;
++%H)       echo "${hm%%:*}" ;;
++%M)       echo "${hm##*:}" ;;
+*)         echo "$ymd ${hm}:00" ;;
+esac

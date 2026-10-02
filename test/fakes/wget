@@ -1,0 +1,15 @@
+#!/bin/sh
+# FAKE_WGET_MODE=ok|fail（默认 fail）；FAKE_WGET_LOG 记录 URL。
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -O) out="$2"; shift 2 ;;
+    *) url="$1"; shift ;;
+    esac
+done
+[ -n "$FAKE_WGET_LOG" ] && echo "$url" >> "$FAKE_WGET_LOG"
+[ "$FAKE_WGET_MODE" = "ok" ] || exit 1
+y=$(echo "$url" | sed -n 's#.*/\([0-9][0-9]*\)\.json#\1#p')
+[ -n "$out" ] || exit 0
+printf '{"year":%s,"days":[{"name":"stub","date":"%s-01-01","isOffDay":true}]}\n' "$y" "$y" > "$out"
+exit 0

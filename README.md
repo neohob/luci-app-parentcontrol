@@ -100,6 +100,22 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 - 状态接口原来只查 `filter` 表，而网址过滤链在 `mangle` 表，所以「只开网址过滤」会误报
   未运行；现在两个表都查，且只判断链是否存在
 
+## 测试
+
+仓库自带一套白盒测试（无需路由器，`sh` + `python3` 即可跑）：
+
+```sh
+sh test/run.sh          # 跑全部三套
+sh test/common_test.sh  # 纯逻辑：日子判定/节假日解析/额度/配额
+sh test/init_test.sh    # 规则构建：用状态化假 iptables 断言生成的规则
+sh test/migrate_test.sh # 配置迁移：week→双档案 / word→domains / 默认值
+```
+
+`test/fakes/` 下是桩：一份状态化 `iptables`/`ip6tables`（支持 `-N/-F/-X/-C/-I/-A/-D/-S/-L`
+与计数器）、文件后端的 `uci`、可控的 `date`/`resolveip`/`wget`/`jsonfilter`/`crontab`。
+`init.d` 的关键路径（链名、挂载顺序、时限/额度阈值、跨天换档、采样记账、重建自愈）
+都是直接断言生成的规则文本，而不是“跑通就算过”。
+
 ## 已知限制
 
 - 不填域名时靠关键词猜（`关键词` → `关键词.com` / `www.关键词.com` / `关键词.cn`），

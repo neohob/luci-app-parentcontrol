@@ -1,0 +1,2 @@
+#!/bin/sh
+FAKE_IPT_FAMILY=v6 exec python3 "$(dirname "$0")/iptables.py" "$@"

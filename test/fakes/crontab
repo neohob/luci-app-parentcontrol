@@ -1,0 +1,5 @@
+#!/bin/sh
+f="$FAKE_CRONTAB"
+if [ "$1" = "-l" ]; then [ -f "$f" ] && cat "$f"; exit 0; fi
+cat > "$f"
+exit 0

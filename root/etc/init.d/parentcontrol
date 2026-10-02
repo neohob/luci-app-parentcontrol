@@ -64,6 +64,7 @@ entry_key() { echo "$1_$2"; }
 
 # 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），都没有=全部客户端
 devcount() {
+	local _ip _mac
 	_ip=$(pc_uget "@$1[$2].ip")
 	_mac=$(pc_uget "@$1[$2].mac")
 	if [ -n "$_ip" ]; then echo "-s $_ip"
@@ -73,6 +74,7 @@ devcount() {
 
 # 封锁/时段用：对条目的每个设备身份各加一条规则（mac 与 ip 任一命中即生效）
 add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
+	local _mac _ip _n
 	_mac=$(pc_uget "@$4[$5].mac")
 	_ip=$(pc_uget "@$4[$5].ip")
 	_n=0
@@ -84,6 +86,7 @@ add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=acti
 
 # 时段窗口（禁止时段）。起控=停控 或留空 → 无时间条件（= 全天封，沿用旧语义）
 time_gate() { # $1=module $2=idx $3=school|holiday
+	local _sfx _ts _te
 	_sfx=$(pc_suffix "$3")
 	_ts=$(pc_uget "@$1[$2].${_sfx}_start")
 	_te=$(pc_uget "@$1[$2].${_sfx}_end")
@@ -95,6 +98,7 @@ time_gate() { # $1=module $2=idx $3=school|holiday
 
 # 协议端口条件（单个用 --sport/--dport；多个/范围用 -m multiport）
 proto_cond() { # $1=idx
+	local _proto _ports _portd _spo _dpo _cond
 	_proto=$(pc_uget "@protocol[$1].proto"); [ -z "$_proto" ] && _proto=tcp
 	_ports=$(pc_uget "@protocol[$1].ports")
 	_portd=$(pc_uget "@protocol[$1].portd")
@@ -130,12 +134,14 @@ ip6_slash64() {
 }
 
 entry_domains() { # $1=module $2=idx
+	local _d
 	_d=$(pc_uget "@$1[$2].domains")
 	[ -z "$_d" ] && _d=$(pc_uget "@$1[$2].word")
 	echo "$_d" | tr ',' ' '
 }
 
 resolve_host() { # $1=host → 打印 IPv4(/24 或 /32) 与 IPv6(/64)
+	local _a
 	for _a in $(resolveip -4 -t 2 "$1" 2>/dev/null); do
 		echo "$_a" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
 		if [ "$PC_IPMASK" = "32" ]; then echo "$_a"; else echo "$(echo $_a | cut -d. -f1-3).0/24"; fi
@@ -147,6 +153,7 @@ resolve_host() { # $1=host → 打印 IPv4(/24 或 /32) 与 IPv6(/64)
 }
 
 resolve_entry() { # $1=module $2=idx
+	local _h _hh
 	for _h in $(entry_domains "$1" "$2"); do
 		case "$_h" in
 		*/*) echo "$_h" ;;   # 直接写 CIDR：不解析，原样使用
@@ -163,6 +170,7 @@ resolve_entry() { # $1=module $2=idx
 }
 
 refresh_ips() {
+	local _i _f _idx
 	mkdir -p "$IPDIR"
 	command -v resolveip >/dev/null 2>&1 || return 0
 	PC_IPMASK=$(pc_uget "@basic[0].ip_mask"); [ -z "$PC_IPMASK" ] && PC_IPMASK=24
@@ -249,6 +257,7 @@ offload_handle() {
 		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
 }
 apply_offload() {
+	local h n m a
 	command -v nft >/dev/null 2>&1 || return 0
 	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
 	if [ -n "$(offload_macs)$(weburl_ips_all)" ]; then
@@ -277,6 +286,7 @@ apply_offload() {
 	fi
 }
 restore_offload() {
+	local h
 	command -v nft >/dev/null 2>&1 || return 0
 	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
 	h=$(offload_handle)
@@ -290,6 +300,7 @@ restore_offload() {
 # 规则构建
 # ============================================================================
 build_time_rules() { # $1=school|holiday
+	local _cm _ip _i WT
 	_cm=$(pc_uget "@basic[0].control_mode")
 	for _ip in "$ipt" "$ipt6"; do
 		hook_chain "$_ip" filter FORWARD "$TAG"
@@ -305,6 +316,7 @@ build_time_rules() { # $1=school|holiday
 }
 
 build_protocol_rules() { # $1=school|holiday
+	local _ip _i WT PT
 	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
 	for _i in $(pc_ids_on protocol); do
 		[ "$(pc_entry_eff_mode protocol $_i "$1")" = "time" ] || continue
@@ -328,6 +340,7 @@ weburl_patterns() {
 # 一个 weburl 条目的全部目标规则（目标 IP + 明文 DNS/SNI 匹配串）。
 # 时段模式与额度封锁共用同一个生成器，保证“允许集合”与“封锁集合”永远一致。
 emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=动作 $5=idx
+	local _algos _f _p _pat _ip
 	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
 	_f="$IPDIR/weburl_$5"
 	[ -f "$_f" ] && while read -r _p; do
@@ -346,6 +359,7 @@ emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=�
 }
 
 build_weburl_time_rules() { # $1=school|holiday
+	local _i
 	for _i in $(pc_ids_on weburl); do
 		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
 		emit_weburl_targets "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" "$_i"
@@ -353,6 +367,7 @@ build_weburl_time_rules() { # $1=school|holiday
 }
 
 clean_pca_chains() {
+	local _c
 	for _c in $($ipt -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA_[^ ]*\)$/\1/p'); do
 		$ipt -t mangle -X "$_c" 2>/dev/null
 	done
@@ -363,6 +378,7 @@ clean_pca_chains() {
 
 # 额度模式：常开计数规则（跳进空链 PCA_<key>，读跳转规则的字节计数）
 build_acct_rules() { # $1=school|holiday
+	local _key _m _i _f _p _ip DC PT
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
 	for _key in $(pc_quota_keys "$1"); do
@@ -396,6 +412,7 @@ build_acct_rules() { # $1=school|holiday
 
 # 池内条目用量之和（只统计同样处于额度模式的成员）
 pool_usage() { # $1=池名 $2=school|holiday
+	local _key _m _i _sum
 	_sum=0
 	for _key in $(pc_quota_keys "$2"); do
 		_m=${_key%%_*}; _i=${_key#*_}
@@ -407,6 +424,7 @@ pool_usage() { # $1=池名 $2=school|holiday
 
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
+	local _m _i PT
 	_m=$1; _i=$2
 	case "$_m" in
 	time)
@@ -426,6 +444,7 @@ block_entry() { # $1=module $2=idx
 # 条目生效的额度/已用：池优先；池不存在或没额度则用条目自己的。
 # 输出 "<quota> <used>"（quota=0 表示不限）。封锁与看板共用，保证两者一致。
 entry_effective() { # $1=module $2=idx $3=school|holiday
+	local _pool _pq
 	_pool=$(pc_entry_pool "$1" "$2" "$3")
 	_pq=
 	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
@@ -438,6 +457,7 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 
 # 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
 build_quota_blocks() {
+	local _tt _reset _issued _key _m _i
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -464,6 +484,7 @@ active_acct_keys() {
 # 用量采样：每分钟对比计数增量，超阈值记 1 分钟
 # ============================================================================
 sample_counters() {
+	local _min_kb _thr _dump _dump6 _key _v _bf _b _d _k
 	mkdir -p "$STATE_DIR"
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=32 ;; esac
@@ -490,6 +511,7 @@ sample_counters() {
 # 生命周期
 # ============================================================================
 build_all() {
+	local _tt _ip
 	_tt=$(pc_today_type)
 	elog "build: day=$_tt"
 	for _ip in "$ipt" "$ipt6"; do
@@ -517,6 +539,7 @@ build_all() {
 }
 
 del_rule() {
+	local _ip _ta _c
 	for _ip in "$ipt" "$ipt6"; do
 		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
 			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
@@ -539,6 +562,7 @@ del_rule() {
 }
 
 prune_usage() {
+	local _keep
 	_keep=$(pc_uget "@basic[0].usage_keep")
 	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
 	if [ "$_keep" -gt 0 ] 2>/dev/null; then
@@ -553,6 +577,7 @@ prune_usage() {
 #   item   <条目> <已用分钟> <额度分钟,0=不限>
 #   history <YYYYMMDD> <当天总分钟>
 usage_tsv() {
+	local _tt _reset _issued _key _m _i _f _t
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -582,6 +607,7 @@ with_tick_lock() {
 tick() { with_tick_lock tick_body; }
 
 tick_body() {
+	local _tt
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
 	[ -n "$ipt" ] || return 0
 	# 正在 start（重建全套规则）时跳过，避免并发
@@ -609,6 +635,7 @@ refresh_ip() {
 # 注意：fw4 reload 会清掉这些链与 PREROUTING 跳转，所以必须 ensure/hook，
 # 否则 cron 路径会静默失效（直到下次 restart 或跨天重建）。
 rebuild_ip_rules() {
+	local _tt _ip
 	_tt=$(pc_today_type)
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGA"
@@ -636,6 +663,7 @@ refresh_ip_body() {
 }
 
 cron_sync() { # $1=1 写入 / $1=0 移除
+	local _mins new
 	_mins=$(pc_uget "@basic[0].ip_refresh"); [ -z "$_mins" ] && _mins=30
 	new=$(crontab -l 2>/dev/null | grep -v "$CRON_TAG" | grep -v "$CRON_TAG_IP")
 	if [ "$1" = "1" ]; then
