@@ -605,13 +605,20 @@ refresh_ip() {
 	with_tick_lock refresh_ip_body
 }
 
-# 只重建依赖 IP 解析结果的 mangle 链（网址时段/计数/额度封锁），
-# 不动 filter 表的时段规则，也不重建整个 build_all。
+# 只重建依赖 IP 解析结果的 mangle 链（网址时段/计数/额度封锁）。
+# 注意：fw4 reload 会清掉这些链与 PREROUTING 跳转，所以必须 ensure/hook，
+# 否则 cron 路径会静默失效（直到下次 restart 或跨天重建）。
 rebuild_ip_rules() {
 	_tt=$(pc_today_type)
 	for _ip in "$ipt" "$ipt6"; do
-		$_ip -t mangle -F "$TAGI" 2>/dev/null
-		$_ip -t mangle -F "$TAGW" 2>/dev/null
+		ensure_chain "$_ip" mangle "$TAGA"
+		ensure_chain "$_ip" mangle "$TAGI"
+		ensure_chain "$_ip" mangle "$TAGW"
+		ensure_chain "$_ip" mangle "$TAGQ"
+		hook_chain "$_ip" mangle PREROUTING "$TAGA"
+		hook_chain "$_ip" mangle PREROUTING "$TAGI"
+		hook_chain "$_ip" mangle PREROUTING "$TAGW"
+		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 	done
 	build_weburl_time_rules "$_tt"
 	build_acct_rules "$_tt"
@@ -619,9 +626,11 @@ rebuild_ip_rules() {
 }
 
 # cron 每 ip_refresh 分钟：采样后重解析域名、重建 IP 相关规则。
-# 不调 refresh_holiday（节假日由 start 与每日跨天检查负责），也不重建 filter 表。
+# 不重建 filter 表；refresh_holiday 自带节流（7 天/24h）、只写数据不建规则，
+# 必须保留——长假期间 holiday→holiday 不触发跨天重建，否则节假日数据永不联网刷新。
 refresh_ip_body() {
 	sample_counters
+	refresh_holiday
 	refresh_ips
 	rebuild_ip_rules
 }

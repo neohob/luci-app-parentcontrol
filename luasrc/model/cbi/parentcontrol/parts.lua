@@ -12,8 +12,8 @@ function M.validate_time(self, value)
 end
 
 -- 模式三选一（关闭 / 时段 / 每日额度），按模式显隐参数。
--- lane 与 mode_label 都必须是字面量（翻译键要求字面量，不能拼接）。
-function M.add_profile(t, sfx, label, mode_label)
+-- mode_label 必须是字面量（翻译键要求字面量，不能拼接）。
+function M.add_profile(t, sfx, mode_label)
 	local m = t:option(ListValue, sfx .. "_mode", mode_label)
 	m:value("off", translate("关闭"))
 	m:value("time", translate("时段"))
