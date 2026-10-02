@@ -140,11 +140,51 @@ ip_domains() {
 		[ -z "$d" ] && d=$(uci -q get $CONFIG.@weburl[$i].word)
 		for h in $(echo "$d" | tr ',' ' '); do
 			case "$h" in
-			*.*) echo "$m $h" ;;
+			*/*) continue ;;        # 直接写 CIDR 的项不拿去解析，见 ip_literals
+			*.*) # 带点的按域名处理，apex 和 www. 两个变体都解析
+			     # （IPv4 常在 apex，IPv6(AAAA) 常在 www 上，只解一个会漏一半）
+			     echo "$m $h"
+			     case "$h" in
+			     www.*) echo "$m ${h#www.}" ;;
+			     *)     echo "$m www.$h" ;;
+			     esac ;;
 			*)   for hh in "$h" "$h.com" "www.$h.com" "$h.cn"; do echo "$m $hh"; done ;;
 			esac
 		done
 	done
+}
+
+# 直接写 CIDR 的项（含 /）原样进封锁列表 —— 域名解析覆盖不到时的应急口子，
+# 例如 222.73.192.0/24 或 2402:4e00:1410::/48。
+ip_literals() {
+	for i in $(weburl_on); do
+		m=$(uci -q get $CONFIG.@weburl[$i].mac)
+		[ -z "$m" ] && continue
+		for e in $(uci -q get $CONFIG.@weburl[$i].domains | tr ',' ' '); do
+			case "$e" in
+			*/*) echo "$m $e" ;;
+			esac
+		done
+	done
+}
+
+# 把 IPv6 地址归一化成前 4 组，用于封锁 /64：同一个 CDN 换地址基本都在同一 /64 内，
+# 只封 /128 会漏。先把 :: 展开成 8 组再取前 4 组。
+ip6_slash64() {
+	echo "$1" | awk -F"::" '
+		{
+			if (NF == 2) {
+				na = ($1 == "") ? 0 : split($1, a, ":")
+				nb = ($2 == "") ? 0 : split($2, b, ":")
+				n = 8 - na - nb
+				out = $1
+				for (i = 0; i < n; i++) out = out ":0"
+				out = out ":" $2
+			} else { out = $1 }
+			sub(/^:/, "", out); sub(/:$/, "", out)
+			split(out, p, ":")
+			printf "%s:%s:%s:%s::/64\n", p[1], p[2], p[3], p[4]
+		}'
 }
 
 apply_ip_rules() {
@@ -154,6 +194,7 @@ apply_ip_rules() {
 	fresh=/tmp/pc_ipfresh.$$
 	: > $fresh
 	ip_domains | while read m h; do
+		# IPv4：解析后封 /32 或其 /24
 		for a in $(resolveip -4 -t 2 "$h" 2>/dev/null); do
 			echo "$a" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
 			if [ "$mask" = "32" ]; then
@@ -162,7 +203,14 @@ apply_ip_rules() {
 				echo "$m $(echo $a | cut -d. -f1-3).0/$mask" >> $fresh
 			fi
 		done
+		# IPv6：归一化成 /64 累积。新建连接由关键词规则兜（IPv6 走隧道、负载可见），
+		# 但已经建立的连接拦不住 —— IP 封锁是无状态的、每包都查，补上它才能当场掐断。
+		for a in $(resolveip -6 -t 2 "$h" 2>/dev/null); do
+			echo "$a" | grep -qE '^[0-9a-fA-F:]+$' || continue
+			case "$a" in *:*) echo "$m $(ip6_slash64 "$a")" >> $fresh ;; esac
+		done
 	done
+	ip_literals >> $fresh
 	# 合并（只增不减），并清掉配置里已经删掉的 MAC
 	touch $IPLIST
 	cat $fresh $IPLIST 2>/dev/null | sort -u | while read m p; do
@@ -171,13 +219,18 @@ apply_ip_rules() {
 	done | sort -u > ${IPLIST}.new
 	mv ${IPLIST}.new $IPLIST
 	rm -f $fresh
-	# 重建规则
-	$ipt -t mangle -N $TAGI 2>/dev/null || $ipt -t mangle -F $TAGI 2>/dev/null
-	$ipt -t mangle -C PREROUTING -j $TAGI 2>/dev/null || $ipt -t mangle -I PREROUTING -j $TAGI 2>/dev/null
-	$ipt -t mangle -F $TAGI 2>/dev/null
+	# 重建规则（两个协议族同一条链名，各自建）
+	for ip in "$ipt" "$ipt6"; do
+		$ip -t mangle -N $TAGI 2>/dev/null || $ip -t mangle -F $TAGI 2>/dev/null
+		$ip -t mangle -C PREROUTING -j $TAGI 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGI 2>/dev/null
+		$ip -t mangle -F $TAGI 2>/dev/null
+	done
 	while read m p; do
 		[ -z "$m" ] && continue
-		$ipt -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null
+		case "$p" in
+		*:*) $ipt6 -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
+		*)   $ipt  -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
+		esac
 	done < $IPLIST
 	elog "iprules: $(wc -l < $IPLIST) 个网段 | mask=$mask"
 }
