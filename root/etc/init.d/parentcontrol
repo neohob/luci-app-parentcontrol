@@ -92,7 +92,8 @@ time_gate() { # $1=module $2=idx $3=school|holiday
 	[ -z "$_ts" ] && _ts=00:00
 	[ -z "$_te" ] && _te=00:00
 	[ "$_ts" = "$_te" ] && { echo ""; return; }
-	echo "-m time --kerneltz --timestart $_ts --timestop $_te"
+	# -m time 默认 UTC；用户填的是北京时间，转 UTC 后就不再依赖路由器内核时区
+	echo "-m time --timestart $(pc_utc_hhmm "$_ts") --timestop $(pc_utc_hhmm "$_te")"
 }
 
 # 协议端口条件（单个用 --sport/--dport；多个/范围用 -m multiport）
@@ -300,7 +301,7 @@ restore_offload() {
 # 规则构建
 # ============================================================================
 build_time_rules() { # $1=school|holiday
-	local _cm _ip _i WT
+	local _cm _ip _i
 	_cm=$(pc_uget "@basic[0].control_mode")
 	for _ip in "$ipt" "$ipt6"; do
 		hook_chain "$_ip" filter FORWARD "$TAG"
@@ -308,23 +309,16 @@ build_time_rules() { # $1=school|holiday
 	done
 	for _i in $(pc_ids_on time); do
 		[ "$(pc_entry_eff_mode time $_i "$1")" = "time" ] || continue
-		WT=$(time_gate time $_i "$1")
-		for _ip in "$ipt" "$ipt6"; do
-			add_dev_rules "$_ip" filter "$TAG" time "$_i" "$WT" "-j REJECT"
-		done
+		emit_entry_targets time "$_i" "$TAG" "$TAG" "$(time_gate time $_i "$1")" "-j REJECT" all
 	done
 }
 
 build_protocol_rules() { # $1=school|holiday
-	local _ip _i WT PT
+	local _ip _i
 	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
 	for _i in $(pc_ids_on protocol); do
 		[ "$(pc_entry_eff_mode protocol $_i "$1")" = "time" ] || continue
-		WT=$(time_gate protocol $_i "$1")
-		PT=$(proto_cond $_i)
-		for _ip in "$ipt" "$ipt6"; do
-			add_dev_rules "$_ip" filter "$TAGP" protocol "$_i" "$WT $PT" "-j REJECT"
-		done
+		emit_entry_targets protocol "$_i" "$TAGP" "$TAGP" "$(time_gate protocol $_i "$1")" "-j REJECT" all
 	done
 }
 
@@ -332,8 +326,10 @@ build_protocol_rules() { # $1=school|holiday
 # 字符集有意不含 *：-m string 是字面匹配，* 不会被当通配符，加进来只会带出
 # 无意义的规则并使命令拼接有 glob 风险（旧版为此保留了 set -f hack，已去掉）。
 weburl_patterns() {
-	{ pc_uget "@weburl[$1].word"; pc_uget "@weburl[$1].domains"; } 2>/dev/null \
-		| tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+	# 单一来源：与解析目标 IP 用同一份 entry_domains（domains，缺省回退 word）。
+	# 曾经这里是 word ∪ domains，会让改过域名后的旧 word 变成“幽灵匹配源”。
+	entry_domains weburl "$1" | tr ' ' '\n' \
+		| sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
 		| grep -E '^[A-Za-z0-9._/-]+$' | sort -u
 }
 
@@ -346,18 +342,35 @@ add_dev_rule_single() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $
 }
 
 # 按 devmode 选“封锁式（mac/ip 各一条）”还是“计数式（ip 优先单条）”
-emit_dev_rule() { # $1=ipcmd $2=chain $3=idx $4=extra $5=action $6=devmode
-	if [ "$6" = "single" ]; then
-		add_dev_rule_single "$1" mangle "$2" weburl "$3" "$4" "$5"
+emit_dev_rule() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action $8=devmode
+	if [ "$8" = "single" ]; then
+		add_dev_rule_single "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 	else
-		add_dev_rules "$1" mangle "$2" weburl "$3" "$4" "$5"
+		add_dev_rules "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 	fi
+}
+
+# 一个条目的全部目标规则——time / protocol / weburl 三类统一入口（封锁与计数共用）。
+# $1=module $2=idx $3=IP链 $4=字符串链 $5=gate $6=动作 $7=devmode
+emit_entry_targets() {
+	local _pc
+	case "$1" in
+	time)
+		emit_dev_rule "$ipt"  filter "$3" time "$2" "$5" "$6" "$7"
+		emit_dev_rule "$ipt6" filter "$3" time "$2" "$5" "$6" "$7" ;;
+	protocol)
+		_pc=$(proto_cond "$2")
+		emit_dev_rule "$ipt"  filter "$3" protocol "$2" "$5 $_pc" "$6" "$7"
+		emit_dev_rule "$ipt6" filter "$3" protocol "$2" "$5 $_pc" "$6" "$7" ;;
+	weburl)
+		emit_weburl_targets "$3" "$4" "$5" "$6" "$2" "$7" ;;
+	esac
 }
 
 # 一个 weburl 条目的全部目标规则（目标 IP + 明文 DNS/SNI 匹配串）。
 # 时段封锁 / 额度封锁 / 额度计数 共用同一个生成器，保证三者枚举的目标集合永远一致。
 # $6=devmode：all（默认，mac 与静态IP 各出一条，用于封锁）| single（ip 优先单条，用于计数）
-emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=动作 $5=idx [$6=devmode]
+emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=gate $4=动作 $5=idx [$6=devmode]
 	local _algos _f _p _pat _c _dev
 	_dev=${6:-all}
 	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
@@ -368,12 +381,12 @@ emit_weburl_targets() { # $1=IP链 $2=字符串链 $3=前置条件(时段) $4=�
 		*:*) _c=$ipt6 ;;
 		*)   _c=$ipt ;;
 		esac
-		emit_dev_rule "$_c" "$1" "$5" "$3 -d $_p" "$4" "$_dev"
+		emit_dev_rule "$_c" mangle "$1" weburl "$5" "$3 -d $_p" "$4" "$_dev"
 	done < "$_f"
 	for _pat in $(weburl_patterns "$5"); do
 		for _c in "$ipt" "$ipt6"; do
-			emit_dev_rule "$_c" "$2" "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4" "$_dev"
-			emit_dev_rule "$_c" "$2" "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"
+			emit_dev_rule "$_c" mangle "$2" weburl "$5" "$3 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$4" "$_dev"
+			emit_dev_rule "$_c" mangle "$2" weburl "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"
 		done
 	done
 }
@@ -382,7 +395,7 @@ build_weburl_time_rules() { # $1=school|holiday
 	local _i
 	for _i in $(pc_ids_on weburl); do
 		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
-		emit_weburl_targets "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" "$_i"
+		emit_entry_targets weburl "$_i" "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" all
 	done
 }
 
@@ -398,30 +411,17 @@ clean_pca_chains() {
 
 # 额度模式：常开计数规则（跳进空链 PCA_<key>，读跳转规则的字节计数）
 build_acct_rules() { # $1=school|holiday
-	local _key _m _i _f _p _ip DC PT
+	local _key _m _i _ip
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
 	for _key in $(pc_quota_keys "$1"); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		ensure_chain "$ipt" mangle "PCA_$_key"
 		ensure_chain "$ipt6" mangle "PCA_$_key"
-		DC=$(devcount "$_m" "$_i")
-		case "$_m" in
-		time)
-			for _ip in "$ipt" "$ipt6"; do
-				$_ip -t mangle -A "$TAGA" $DC -j "PCA_$_key" 2>/dev/null
-			done ;;
-		protocol)
-			PT=$(proto_cond "$_i")
-			for _ip in "$ipt" "$ipt6"; do
-				$_ip -t mangle -A "$TAGA" $DC $PT -j "PCA_$_key" 2>/dev/null
-			done ;;
-		weburl)
-			# 计数式：目标 IP + 字符串（DNS/SNI）都计入，全用单一设备条件
-			emit_weburl_targets "$TAGA" "$TAGA" "" "-j PCA_$_key" "$_i" single ;;
-		esac
+		# 计数式：单一设备条件 + IP/字符串都计入
+		emit_entry_targets "$_m" "$_i" "$TAGA" "$TAGA" "" "-j PCA_$_key" single
 	done
-	rm -f "$STATE_DIR"/base.* 2>/dev/null
+	# 不删 base.*：重建前已采样，保留基线才能把重建后那一分钟也计入
 }
 
 # 池内条目用量之和（只统计同样处于额度模式的成员）
@@ -438,21 +438,7 @@ pool_usage() { # $1=池名 $2=school|holiday
 
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
-	local _m _i _ip PT
-	_m=$1; _i=$2
-	case "$_m" in
-	time)
-		for _ip in "$ipt" "$ipt6"; do
-			add_dev_rules "$_ip" mangle "$TAGQ" time "$_i" "" "-j DROP"
-		done ;;
-	protocol)
-		PT=$(proto_cond "$_i")
-		for _ip in "$ipt" "$ipt6"; do
-			add_dev_rules "$_ip" mangle "$TAGQ" protocol "$_i" "$PT" "-j DROP"
-		done ;;
-	weburl)
-		emit_weburl_targets "$TAGQ" "$TAGQ" "" "-j DROP" "$_i" ;;
-	esac
+	emit_entry_targets "$1" "$2" "$TAGQ" "$TAGQ" "" "-j DROP" all
 }
 
 # 条目生效的额度/已用：池优先；池不存在或没额度则用条目自己的。

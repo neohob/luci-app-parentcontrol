@@ -3,22 +3,9 @@
 -- 必须显式 require。
 local i18n = require "luci.i18n"
 local sys = require "luci.sys"
+local util = require "luci.util"
 
 local M = {}
-
-local function split(s, sep)
-	local t, i = {}, 1
-	while true do
-		local j = s:find(sep, i, true)
-		if not j then
-			t[#t + 1] = s:sub(i)
-			break
-		end
-		t[#t + 1] = s:sub(i, j - 1)
-		i = j + 1
-	end
-	return t
-end
 
 -- 每请求缓存一次 usage_tsv 的结果
 local _usage
@@ -26,8 +13,8 @@ function M.usage_map()
 	if _usage then return _usage end
 	_usage = {}
 	local out = sys.exec("/etc/init.d/parentcontrol usage_tsv 2>/dev/null") or ""
-	for _, line in ipairs(split(out, "\n")) do
-		local f = split(line, "\t")
+	for _, line in ipairs(util.split(out, "\n")) do
+		local f = util.split(line, "\t")
 		if f[1] == "day" then
 			_usage.day = { day = f[2], type = f[3], reset = f[4], issued = (f[5] == "1") }
 		elseif f[1] == "item" then

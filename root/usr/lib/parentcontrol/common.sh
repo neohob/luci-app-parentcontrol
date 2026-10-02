@@ -113,6 +113,14 @@ pc_hhmm_to_min() { # $1=HH:MM 或 HH，$2=MM（可选）
 	echo $((_h * 60 + _m))
 }
 
+# 北京时间 HH:MM → UTC HH:MM（iptables 的 -m time 默认 UTC，用它就不依赖内核时区）
+pc_utc_hhmm() {
+	local _m
+	_m=$(pc_hhmm_to_min "$1")
+	_m=$(( (_m - 480 + 1440) % 1440 ))
+	printf '%02d:%02d\n' $((_m / 60)) $((_m % 60))
+}
+
 # 当前上海时间是否已过当日重置点 → 0(是，额度已发放) / 1(否)
 pc_allowance_issued() {
 	[ "$(pc_hhmm_to_min "$(date +%H:%M)")" -ge "$(pc_hhmm_to_min "$1")" ]
@@ -215,7 +223,11 @@ pc_migrate_config() {
 	for _i in $(pc_ids_all weburl); do
 		_w=$(pc_uget "@weburl[$_i].word")
 		_d=$(pc_uget "@weburl[$_i].domains")
-		[ -n "$_w" ] && [ -z "$_d" ] && uci -q set "$PC_CONF.@weburl[$_i].domains=$_w"
+		if [ -n "$_w" ] && [ -z "$_d" ]; then
+			uci -q set "$PC_CONF.@weburl[$_i].domains=$_w"
+		fi
+		# 老 word 一律删除：否则改了域名后，旧关键词仍会生成幽灵匹配规则
+		[ -n "$_w" ] && uci -q delete "$PC_CONF.@weburl[$_i].word"
 	done
 
 	# 3) 老 week 拆到双档案：只含 1-5 → 平日；只含 6,7 → 节假日；* 或混合 → 两者

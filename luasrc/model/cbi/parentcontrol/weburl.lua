@@ -1,7 +1,4 @@
-local o = require "luci.sys"
-local net = require "luci.model.network".init()
 local disp = require "luci.dispatcher"
-local parts = require "luci.model.cbi.parentcontrol.parts"
 local ui = require "luci.model.cbi.parentcontrol.ui"
 
 local a, t, e
