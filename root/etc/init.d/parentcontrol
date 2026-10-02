@@ -1,215 +1,125 @@
 #!/bin/sh /etc/rc.common
+# 本 fork 新增：每日额度 / 平日-节假日双档案 / 共享额度池 / 节假日数据
+# 设计说明见 README；纯逻辑（日子判定、额度、用量）在 /usr/lib/parentcontrol/common.sh
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-MY_PATH=$DIR/iptables.sh
 START=98
 
-CONFIG=parentcontrol
-LOG_FILE=/tmp/log/$CONFIG.log
-LOCK_DIR=/tmp/lock
-LOCK=/tmp/lock/${CONFIG}.lock
+# “今天 / 重置点 / 额度”一律按北京时间（UTC+8）计算，与路由器系统时区无关。
+# 用 POSIX TZ 字串，不依赖 zoneinfo 文件。
+TZ=UTC-8
+export TZ
+
+PC_CONF=parentcontrol
+CONFIG=$PC_CONF
+LOG_FILE=${LOG_FILE:-/tmp/log/$CONFIG.log}
+LOCK=${LOCK:-/tmp/lock/${CONFIG}.lock}
+TICK_LOCK=${TICK_LOCK:-/tmp/lock/${CONFIG}.tick}
 ipt=$(command -v iptables-legacy || command -v iptables)
 ipt6=$(command -v ip6tables-legacy || command -v ip6tables)
 
-TAG="PARENTCONTROL_TIME" 
-TAGP="PARENTCONTROL_PROTOCOL" 
-TAGW="PARENTCONTROL_WEBURL" 
-TAGI="PARENTCONTROL_IP" 
+TAG="PARENTCONTROL_TIME"
+TAGP="PARENTCONTROL_PROTOCOL"
+TAGW="PARENTCONTROL_WEBURL"
+TAGI="PARENTCONTROL_IP"
+TAGA="PARENTCONTROL_ACCT"
+TAGQ="PARENTCONTROL_QUOTA"
 FWI="/var/etc/$CONFIG.include"
-IPLIST="/etc/parentcontrol/ip.list"
-CRON_TAG="#pc_ip_refresh"
+IPDIR=${IPDIR:-/etc/parentcontrol/ips}
+USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
+HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
+HOLIDAY_LOCAL=${HOLIDAY_LOCAL:-/usr/share/parentcontrol/holiday}
+STATE_DIR=${STATE_DIR:-/tmp/parentcontrol}
+CRON_TAG="#pc_tick"
+CRON_TAG_IP="#pc_ip_refresh"
 
-EXTRA_COMMANDS="refresh_ip"
-EXTRA_HELP="        refresh_ip      Re-resolve domains and rebuild IP block rules (cron)"
+. "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
+
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_json"
+EXTRA_HELP="
+	tick             Re-evaluate quota state and account usage (cron, every minute)
+	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
+	refresh_holiday  Fetch statutory-holiday data for this year and next
+	usage_json       Print today's quota usage and 7-day history as JSON"
+
 elog() {
-	local d="$(date "+%Y-%m-%d %H:%M:%S")"
-	echo -e "$d: $*" >>$LOG_FILE
+	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
 }
 
 clean_log() {
-	[ `cat $LOG_FILE  | wc -l ` -gt 500 ] && {
-		elog "clear log ."
-	}
+	[ "$(cat $LOG_FILE 2>/dev/null | wc -l)" -gt 500 ] && elog "clear log ."
 }
-
-
 
 # ============================================================================
-# flow-offload 排除 —— 网址过滤能真正生效的前提
-# ----------------------------------------------------------------------------
-# 开启 flow offloading 的路由器，fw4 会往 forward 链装一条
-#     meta l4proto { tcp, udp } flow add @ft
-# 把「已建立的连接」丢进流卸载表。此后这条连接的报文在内核 ingress 快路径直接转发，
-# 整个 netfilter 栈（包括 mangle PREROUTING）都不再经过。
-#
-# 后果：-m string 只能看到每条 TCP 连接的第一个 SYN，看不到握手之后那个真正带 SNI
-# 的 ClientHello —— TCP 规则永远 0 命中。而 UDP 的 DNS 查询 / QUIC Initial 本身就是
-# 「新流的首包」，必然经过 PREROUTING，所以只有 UDP 规则生效。
-# 表现出来就是：DNS 和 HTTP/3 被拦住了，浏览器/App 一回落 TCP 就照常打开网站。
-#
-# 修法：给这条 flow add 加上 `ether saddr != <受管 MAC>` 条件，只把受管设备排除在
-# 卸载之外。其它设备完全不受影响，也不绕过任何防火墙规则（比在 forward 链里直接
-# return 安全 —— 那样会把后面的过滤规则一起跳过）。
+# 小工具
 # ============================================================================
-offload_macs() {
-	# 用「配置里出现过的」所有 weburl MAC，不看勾选状态：
-	# 只要列表里还有受管设备就不开流卸载。否则「关掉列表→再打开」期间新建立的
-	# 流会被卸载，而已经卸载的流不会因为后来把规则拿掉就退出（会继续绕过整个
-	# netfilter），于是重新开启依旧封不住。
-	uci -q get $CONFIG.@basic[0].enabled | grep -q '^1$' || return 0
-	weburl_macs_all
+ensure_chain() { # $1=ipcmd $2=table $3=chain
+	$1 -t $2 -N $3 2>/dev/null || $1 -t $2 -F $3 2>/dev/null
+}
+hook_chain() { # $1=ipcmd $2=table $3=parent $4=chain
+	$1 -t $2 -C $3 -j $4 2>/dev/null || $1 -t $2 -I $3 -j $4 2>/dev/null
+}
+entry_key() { echo "$1_$2"; }
+
+# 条目今天生效的模式：off | time | quota（未设=time，兼容老配置）
+eff_mode() {
+	_md=$(pc_entry_mode "$1" "$2" "$3")
+	[ -z "$_md" ] && _md=time
+	echo "$_md"
 }
 
-# 已勾选行的 MAC —— 决定哪些网段真的装规则（累积列表里保留其它行的条目，
-# 但关掉的行不应该继续封锁）。
-weburl_macs_on() {
-	for i in $(weburl_on); do
-		uci -q get $CONFIG.@weburl[$i].mac
-	done | grep -v '^$' | sort -u
-}
-
-offload_handle() {
-	nft -a list chain inet fw4 forward 2>/dev/null \
-		| grep 'flow add @ft' | head -1 \
-		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
-}
-
-apply_offload() {
-	command -v nft >/dev/null 2>&1 || return 0
-	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
-	h=$(offload_handle)
-	if [ -n "$(offload_macs)" ]; then
-		# 有受管设备：直接拿掉整条 flow add 规则，不让任何流被卸载。
-		#
-		# 为什么不用 `ether saddr != <MAC>` 做排除：那个条件盖不住入方向。
-		# 出方向（客户端→外网）源 MAC 确实是客户端，能排除；但入方向（回包）的源 MAC
-		# 是上游网关、目的 MAC 此时还是路由器自己的（LAN 侧的以太头是在 forward 钩子
-		# 之后才写的）。于是回包一进来就把整条流加进卸载表，之后双向都绕过 netfilter，
-		# IP 封锁随之失效——实测受管设备有 48 条 IPv6 流被卸载。
-		# 既然按身份排除盖不全，就干脆不卸载。停用本插件时会恢复原样。
-		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
-			h=$(offload_handle)
-			[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
-			if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
-				elog "offload: ERROR 删除 flow add 规则失败"
-			else
-				elog "offload: disabled"
-			fi
-		fi
-		# 已经卸载的流不会因为规则被拿掉就退出（流表条目一直在快路径生效），
-		# 所以要把受管设备现有的连接显式清掉，它才会重新握手、被 IP 封锁拦住。
-		# 需要 conntrack 工具（opkg install conntrack）；没有则跳过，靠流自然过期。
-		if command -v conntrack >/dev/null 2>&1; then
-			n=0
-			for m in $(offload_macs); do
-				for a in $(ip neigh show 2>/dev/null | grep -i " $m " | awk '{print $1}'); do
-					conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n+1))
-				done
-			done
-			[ "$n" -gt 0 ] && elog "offload: purged conntrack for managed hosts"
-		fi
-		printf 'disabled\n' > /tmp/pc_offload_state
+# 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），都没有=全部客户端
+devcount() {
+	_ip=$(pc_uget "@$1[$2].ip")
+	_mac=$(pc_uget "@$1[$2].mac")
+	if [ -n "$_ip" ]; then echo "-s $_ip"
+	elif [ -n "$_mac" ]; then echo "-m mac --mac-source $_mac"
 	fi
 }
 
-# 停用/关闭功能时把 flow add 恢复原样，不留副作用。
-restore_offload() {
-	command -v nft >/dev/null 2>&1 || return 0
-	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
-	h=$(offload_handle)
-	[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
-	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
-	printf 'on\n' > /tmp/pc_offload_state
-	elog "offload: restored"
+# 封锁/时段用：对条目的每个设备身份各加一条规则（mac 与 ip 任一命中即生效）
+add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
+	set -f   # 关 glob：匹配串里可能有 * （如关键词通配）
+	_mac=$(pc_uget "@$4[$5].mac")
+	_ip=$(pc_uget "@$4[$5].ip")
+	_n=0
+	[ -n "$_mac" ] && { $1 -t $2 -I $3 -m mac --mac-source "$_mac" $6 $7 2>/dev/null; _n=1; }
+	[ -n "$_ip" ]  && { $1 -t $2 -I $3 -s "$_ip" $6 $7 2>/dev/null; _n=1; }
+	[ "$_n" = 0 ] && $1 -t $2 -I $3 $6 $7 2>/dev/null
+	set +f
+	return 0
 }
 
-# 停用功能时把 flow add 恢复成不带任何条件的样子，不留副作用。
-restore_offload() {
-	command -v nft >/dev/null 2>&1 || return 0
-	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
-	h=$(offload_handle)
-	[ -z "$h" ] && return 0
-	nft delete rule inet fw4 forward handle $h 2>/dev/null
-	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
-	elog "offload: restored"
+# 时段窗口（禁止时段）。起控=停控 或留空 → 无时间条件（= 全天封，沿用旧语义）
+time_gate() { # $1=module $2=idx $3=school|holiday
+	_sfx=$(pc_suffix "$3")
+	_ts=$(pc_uget "@$1[$2].${_sfx}_start")
+	_te=$(pc_uget "@$1[$2].${_sfx}_end")
+	[ -z "$_ts" ] && _ts=00:00
+	[ -z "$_te" ] && _te=00:00
+	[ "$_ts" = "$_te" ] && { echo ""; return; }
+	echo "-m time --kerneltz --timestart $_ts --timestop $_te"
+}
+
+# 协议端口条件（单个用 --sport/--dport；多个/范围用 -m multiport）
+proto_cond() { # $1=idx
+	_proto=$(pc_uget "@protocol[$1].proto"); [ -z "$_proto" ] && _proto=tcp
+	_ports=$(pc_uget "@protocol[$1].ports")
+	_portd=$(pc_uget "@protocol[$1].portd")
+	_cond="-p $_proto"
+	if [ -n "$_ports" ] && [ -n "$_portd" ]; then
+		_cond="$_cond -m multiport --sports $_ports --dports $_portd"
+	elif [ -n "$_portd" ]; then
+		case "$_portd" in *,*|*:*) _cond="$_cond -m multiport --dports $_portd" ;; *) _cond="$_cond --dport $_portd" ;; esac
+	elif [ -n "$_ports" ]; then
+		case "$_ports" in *,*|*:*) _cond="$_cond -m multiport --sports $_ports" ;; *) _cond="$_cond --sport $_ports" ;; esac
+	fi
+	echo "$_cond"
 }
 
 # ============================================================================
-# IPv4 IP 封锁 + 自动更新
-# ----------------------------------------------------------------------------
-# 为什么必须有它：在这台（虚拟化）路由器上，网卡直接收发的 IPv4 报文负载落在 skb
-# 的 page frags 里，xt_string 的 -m string 看不到它 —— 实测一个带唯一标记的明文
-# HTTP GET，转发路径上数到 18 个包经过 PREROUTING，标记匹配 0 个（关掉 GRO 也一样）。
-# 所以「按关键字匹配 TLS SNI」对 IPv4 转发流量完全无效。
-# 而 IPv6 走隧道，解封装会把负载线性化，所以 IPv6 那边 SNI 是能匹配到的。
-#
-# 结论：IPv4 只能按目标 IP（报文头）来封 —— 头信息永远可见。
-# 域名用 resolveip 解析；同时封 /32 和它的 /24，/24 用来兜住 CDN 邻居节点以及
-# 客户端 DNS 缓存里可能残留的旧节点。解析结果累积在 $IPLIST（只增不减），由 cron
-# 定期刷新，这样 CDN 换节点后老节点依然被挡住。
+# 域名解析 → 按条目存 IP 列表（IPv4 /24 或 /32，IPv6 /64，含 / 的按 CIDR 原样）
 # ============================================================================
-weburl_on() {
-	uci show $CONFIG 2>/dev/null | grep "enable='1'" | grep 'weburl' \
-		| grep -oE '\[[0-9]+\]' | grep -o '[0-9]'
-}
-
-# 输出某一行要拿去匹配的字符串：word + domains，逗号分隔、去重、只留安全字符。
-# 用域名当匹配串时 apex 域名即可覆盖子域（xhscdn.com 能匹配 sns-img.xhscdn.com）。
-weburl_patterns() {
-	{
-		uci -q get $CONFIG.@weburl[$1].word
-		uci -q get $CONFIG.@weburl[$1].domains
-	} 2>/dev/null | tr ',' '\n' \
-		| sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
-}
-
-# 所有 weburl 行的 MAC（不管有没有勾开启）—— 只用来判断累积的 IP 列表该不该清理，
-# 免得把某行临时关掉就把攒下来的网段全丢了。
-weburl_macs_all() {
-	uci show $CONFIG 2>/dev/null | grep 'weburl' | grep '\.mac=' \
-		| sed -n "s/.*\.mac='\(.*\)'/\1/p" | sort -u
-}
-
-ip_domains() {
-	for i in $(weburl_on); do
-		m=$(uci -q get $CONFIG.@weburl[$i].mac)
-		[ -z "$m" ] && continue
-		d=$(uci -q get $CONFIG.@weburl[$i].domains)
-		# 兼容早期只有 word(关键词) 的配置
-		[ -z "$d" ] && d=$(uci -q get $CONFIG.@weburl[$i].word)
-		for h in $(echo "$d" | tr ',' ' '); do
-			case "$h" in
-			*/*) continue ;;        # 直接写 CIDR 的项不拿去解析，见 ip_literals
-			*.*) # 带点的按域名处理，apex 和 www. 两个变体都解析
-			     # （IPv4 常在 apex，IPv6(AAAA) 常在 www 上，只解一个会漏一半）
-			     echo "$m $h"
-			     case "$h" in
-			     www.*) echo "$m ${h#www.}" ;;
-			     *)     echo "$m www.$h" ;;
-			     esac ;;
-			*)   for hh in "$h" "$h.com" "www.$h.com" "$h.cn"; do echo "$m $hh"; done ;;
-			esac
-		done
-	done
-}
-
-# 直接写 CIDR 的项（含 /）原样进封锁列表 —— 域名解析覆盖不到时的应急口子，
-# 例如 222.73.192.0/24 或 2402:4e00:1410::/48。
-ip_literals() {
-	for i in $(weburl_on); do
-		m=$(uci -q get $CONFIG.@weburl[$i].mac)
-		[ -z "$m" ] && continue
-		for e in $(uci -q get $CONFIG.@weburl[$i].domains | tr ',' ' '); do
-			case "$e" in
-			*/*) echo "$m $e" ;;
-			esac
-		done
-	done
-}
-
-# 把 IPv6 地址归一化成前 4 组，用于封锁 /64：同一个 CDN 换地址基本都在同一 /64 内，
-# 只封 /128 会漏。先把 :: 展开成 8 组再取前 4 组。
 ip6_slash64() {
 	echo "$1" | awk -F"::" '
 		{
@@ -227,233 +137,557 @@ ip6_slash64() {
 		}'
 }
 
-apply_ip_rules() {
+entry_domains() { # $1=module $2=idx
+	_d=$(pc_uget "@$1[$2].domains")
+	[ -z "$_d" ] && _d=$(pc_uget "@$1[$2].word")
+	echo "$_d" | tr ',' ' '
+}
+
+resolve_host() { # $1=host → 打印 IPv4(/24 或 /32) 与 IPv6(/64)
+	for _a in $(resolveip -4 -t 2 "$1" 2>/dev/null); do
+		echo "$_a" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
+		if [ "$PC_IPMASK" = "32" ]; then echo "$_a"; else echo "$(echo $_a | cut -d. -f1-3).0/24"; fi
+	done
+	for _a in $(resolveip -6 -t 2 "$1" 2>/dev/null); do
+		echo "$_a" | grep -qE '^[0-9a-fA-F:]+$' || continue
+		case "$_a" in *:*) ip6_slash64 "$_a" ;; esac
+	done
+}
+
+resolve_entry() { # $1=module $2=idx
+	for _h in $(entry_domains "$1" "$2"); do
+		case "$_h" in
+		*/*) echo "$_h" ;;   # 直接写 CIDR：不解析，原样使用
+		*.*)
+			resolve_host "$_h"
+			case "$_h" in
+			www.*) resolve_host "${_h#www.}" ;;
+			*)     resolve_host "www.$_h" ;;
+			esac ;;
+		*)
+			for _hh in "$_h" "$_h.com" "www.$_h.com" "$_h.cn"; do resolve_host "$_hh"; done ;;
+		esac
+	done
+}
+
+refresh_ips() {
+	mkdir -p "$IPDIR"
 	command -v resolveip >/dev/null 2>&1 || return 0
-	mask=$(uci -q get $CONFIG.@basic[0].ip_mask)
-	[ -z "$mask" ] && mask=24
-	fresh=/tmp/pc_ipfresh.$$
-	: > $fresh
-	ip_domains | while read m h; do
-		# IPv4：解析后封 /32 或其 /24
-		for a in $(resolveip -4 -t 2 "$h" 2>/dev/null); do
-			echo "$a" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
-			if [ "$mask" = "32" ]; then
-				echo "$m $a/32" >> $fresh
+	PC_IPMASK=$(pc_uget "@basic[0].ip_mask"); [ -z "$PC_IPMASK" ] && PC_IPMASK=24
+	for _i in $(pc_ids_on weburl); do
+		_f="$IPDIR/weburl_$_i"
+		{ resolve_entry weburl $_i; [ -f "$_f" ] && cat "$_f"; } 2>/dev/null \
+			| grep -v '^$' | sort -u > "$_f.new"
+		mv "$_f.new" "$_f"
+	done
+	for _f in "$IPDIR"/weburl_*; do
+		[ -e "$_f" ] || continue
+		_idx=${_f##*weburl_}
+		pc_ids_on weburl | grep -qx "$_idx" || rm -f "$_f"
+	done
+	elog "refresh_ips: $(cat "$IPDIR"/* 2>/dev/null | wc -l) 条目标 IP"
+}
+
+# ============================================================================
+# 节假日数据
+# ============================================================================
+fetch_url() { # $1=url $2=out
+	if command -v wget >/dev/null 2>&1; then
+		wget -q -T 8 -O "$2" "$1"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -T 8 -O "$2" "$1"
+	elif command -v curl >/dev/null 2>&1; then
+		curl -fsS --max-time 8 -o "$2" "$1"
+	else
+		return 1
+	fi
+}
+
+refresh_holiday() { # [$1=force|novet]
+	mkdir -p "$HOLIDAY_CACHE"
+	for _b in "$HOLIDAY_LOCAL"/*.json; do
+		[ -e "$_b" ] || continue
+		_n="$HOLIDAY_CACHE/$(basename "$_b")"
+		[ -f "$_n" ] || cp "$_b" "$_n"
+	done
+	# novet：只复制离线 bundle，不联网（用于开机，避免启动卡在网络上）
+	[ "$1" = "novet" ] && return 0
+	_y=$(date +%Y); _y2=$((_y + 1))
+	for _yy in $_y $_y2; do
+		_f="$HOLIDAY_CACHE/$_yy.json"
+		_stamp="$HOLIDAY_CACHE/$_yy.stamp"
+		if [ "$1" != "force" ]; then
+			# 一天内不再重试，避免对着未发布的明年数据反复请求
+			[ -f "$_stamp" ] && [ -z "$(find "$_stamp" -mmin +1440 2>/dev/null)" ] && continue
+			# 已有 7 天内的有效数据
+			[ -f "$_f" ] && grep -q '"date"' "$_f" 2>/dev/null && [ -z "$(find "$_f" -mtime +7 2>/dev/null)" ] && continue
+		fi
+		for _u in \
+			"https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/$_yy.json" \
+			"https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/$_yy.json"; do
+			if fetch_url "$_u" "$_f.tmp" && grep -q '"date"' "$_f.tmp" 2>/dev/null; then
+				mv "$_f.tmp" "$_f"
+				elog "holiday: fetched $_yy"
+				break
+			fi
+			rm -f "$_f.tmp"
+		done
+		touch "$_stamp" 2>/dev/null
+	done
+}
+
+# ============================================================================
+# flow-offload（沿用旧逻辑：有受管设备就不让任何流被卸载）
+# ============================================================================
+offload_macs() {
+	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
+	weburl_macs_all
+}
+weburl_macs_all() {
+	uci show "$PC_CONF" 2>/dev/null | grep 'weburl' | grep '\.mac=' \
+		| sed -n "s/.*\.mac='\(.*\)'/\1/p" | sort -u
+}
+weburl_ips_all() {
+	uci show "$PC_CONF" 2>/dev/null | grep 'weburl' | grep '\.ip=' \
+		| sed -n "s/.*\.ip='\(.*\)'/\1/p" | sort -u
+}
+offload_handle() {
+	nft -a list chain inet fw4 forward 2>/dev/null \
+		| grep 'flow add @ft' | head -1 \
+		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
+}
+apply_offload() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
+	if [ -n "$(offload_macs)$(weburl_ips_all)" ]; then
+		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+			h=$(offload_handle)
+			[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+			if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+				elog "offload: ERROR 删除 flow add 规则失败"
 			else
-				echo "$m $(echo $a | cut -d. -f1-3).0/$mask" >> $fresh
+				elog "offload: disabled"
+			fi
+		fi
+		if command -v conntrack >/dev/null 2>&1; then
+			n=0
+			for m in $(offload_macs); do
+				for a in $(ip neigh show 2>/dev/null | grep -i " $m " | awk '{print $1}'); do
+					conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
+				done
+			done
+			for a in $(weburl_ips_all); do
+				conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
+			done
+			[ "$n" -gt 0 ] && elog "offload: purged conntrack for managed hosts"
+		fi
+		printf 'disabled\n' > /tmp/pc_offload_state
+	fi
+}
+restore_offload() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
+	h=$(offload_handle)
+	[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	printf 'on\n' > /tmp/pc_offload_state
+	elog "offload: restored"
+}
+
+# ============================================================================
+# 规则构建
+# ============================================================================
+build_time_rules() { # $1=school|holiday
+	_cm=$(pc_uget "@basic[0].control_mode")
+	for _ip in "$ipt" "$ipt6"; do
+		hook_chain "$_ip" filter FORWARD "$TAG"
+		if [ "$_cm" = "1" ]; then hook_chain "$_ip" filter INPUT "$TAG"; else $_ip -D INPUT -j "$TAG" 2>/dev/null; fi
+	done
+	for _i in $(pc_ids_on time); do
+		[ "$(eff_mode time $_i "$1")" = "time" ] || continue
+		WT=$(time_gate time $_i "$1")
+		for _ip in "$ipt" "$ipt6"; do
+			add_dev_rules "$_ip" filter "$TAG" time "$_i" "$WT" "-j REJECT"
+		done
+	done
+}
+
+build_protocol_rules() { # $1=school|holiday
+	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
+	for _i in $(pc_ids_on protocol); do
+		[ "$(eff_mode protocol $_i "$1")" = "time" ] || continue
+		WT=$(time_gate protocol $_i "$1")
+		PT=$(proto_cond $_i)
+		for _ip in "$ipt" "$ipt6"; do
+			add_dev_rules "$_ip" filter "$TAGP" protocol "$_i" "$WT $PT" "-j REJECT"
+		done
+	done
+}
+
+# 网址过滤匹配串（域名/关键词），逐包 -m string 用
+weburl_patterns() {
+	{ pc_uget "@weburl[$1].word"; pc_uget "@weburl[$1].domains"; } 2>/dev/null \
+		| tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
+}
+
+build_weburl_time_rules() { # $1=school|holiday
+	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
+	for _i in $(pc_ids_on weburl); do
+		[ "$(eff_mode weburl $_i "$1")" = "time" ] || continue
+		WT=$(time_gate weburl $_i "$1")
+		_f="$IPDIR/weburl_$_i"
+		[ -f "$_f" ] && while read -r _p; do
+			[ -z "$_p" ] && continue
+			case "$_p" in
+			*:*) add_dev_rules "$ipt6" mangle "$TAGI" weburl "$_i" "$WT -d $_p" "-j DROP" ;;
+			*)   add_dev_rules "$ipt"  mangle "$TAGI" weburl "$_i" "$WT -d $_p" "-j DROP" ;;
+			esac
+		done < "$_f"
+		for _pat in $(weburl_patterns $_i); do
+			for _ip in "$ipt" "$ipt6"; do
+				add_dev_rules "$_ip" mangle "$TAGW" weburl "$_i" "$WT -p UDP --dport 53 -m string --algo $_algos --string $_pat" "-j DROP"
+				add_dev_rules "$_ip" mangle "$TAGW" weburl "$_i" "$WT -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "-j DROP"
+			done
+		done
+	done
+}
+
+clean_pca_chains() {
+	for _c in $($ipt -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA_[^ ]*\)$/\1/p'); do
+		$ipt -t mangle -X "$_c" 2>/dev/null
+	done
+	for _c in $($ipt6 -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA_[^ ]*\)$/\1/p'); do
+		$ipt6 -t mangle -X "$_c" 2>/dev/null
+	done
+}
+
+# 额度模式：常开计数规则（跳进空链 PCA_<key>，读跳转规则的字节计数）
+build_acct_rules() { # $1=school|holiday
+	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
+	clean_pca_chains
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on $_m); do
+			[ "$(eff_mode $_m $_i "$1")" = "quota" ] || continue
+			_key=$(entry_key "$_m" "$_i")
+			ensure_chain "$ipt" mangle "PCA_$_key"
+			ensure_chain "$ipt6" mangle "PCA_$_key"
+			DC=$(devcount "$_m" "$_i")
+			case "$_m" in
+			time)
+				for _ip in "$ipt" "$ipt6"; do
+					$_ip -t mangle -A "$TAGA" $DC -j "PCA_$_key" 2>/dev/null
+				done ;;
+			protocol)
+				PT=$(proto_cond "$_i")
+				for _ip in "$ipt" "$ipt6"; do
+					$_ip -t mangle -A "$TAGA" $DC $PT -j "PCA_$_key" 2>/dev/null
+				done ;;
+			weburl)
+				_f="$IPDIR/weburl_$_i"
+				[ -f "$_f" ] && while read -r _p; do
+					[ -z "$_p" ] && continue
+					case "$_p" in
+					*:*) $ipt6 -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
+					*)   $ipt  -t mangle -A "$TAGA" $DC -d "$_p" -j "PCA_$_key" 2>/dev/null ;;
+					esac
+				done < "$_f" ;;
+			esac
+		done
+	done
+	rm -f "$STATE_DIR"/base.* 2>/dev/null
+}
+
+# 池内条目用量之和（只统计同样处于额度模式的成员，否则时段模式条目也会被算进去）
+pool_usage() { # $1=池名 $2=school|holiday
+	_sum=0
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on $_m); do
+			[ "$(eff_mode "$_m" "$_i" "$2")" = "quota" ] || continue
+			[ "$(pc_entry_pool $_m $_i "$2")" = "$1" ] || continue
+			_sum=$((_sum + $(pc_usage_get "$(entry_key "$_m" "$_i")")))
+		done
+	done
+	echo "$_sum"
+}
+
+# 把某条目封进 TAGQ（设备条件 × 目标）
+block_entry() { # $1=module $2=idx
+	_m=$1; _i=$2
+	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
+	case "$_m" in
+	time)
+		for _ip in "$ipt" "$ipt6"; do
+			add_dev_rules "$_ip" mangle "$TAGQ" time "$_i" "" "-j DROP"
+		done ;;
+	protocol)
+		PT=$(proto_cond "$_i")
+		for _ip in "$ipt" "$ipt6"; do
+			add_dev_rules "$_ip" mangle "$TAGQ" protocol "$_i" "$PT" "-j DROP"
+		done ;;
+	weburl)
+		_f="$IPDIR/weburl_$_i"
+		[ -f "$_f" ] && while read -r _p; do
+			[ -z "$_p" ] && continue
+			case "$_p" in
+			*:*) add_dev_rules "$ipt6" mangle "$TAGQ" weburl "$_i" "-d $_p" "-j DROP" ;;
+			*)   add_dev_rules "$ipt"  mangle "$TAGQ" weburl "$_i" "-d $_p" "-j DROP" ;;
+			esac
+		done < "$_f"
+		for _pat in $(weburl_patterns $_i); do
+			for _ip in "$ipt" "$ipt6"; do
+				add_dev_rules "$_ip" mangle "$TAGQ" weburl "$_i" "-p UDP --dport 53 -m string --algo $_algos --string $_pat" "-j DROP"
+				add_dev_rules "$_ip" mangle "$TAGQ" weburl "$_i" "-p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "-j DROP"
+			done
+		done ;;
+	esac
+}
+
+# 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
+build_quota_blocks() {
+	_tt=$(pc_today_type)
+	_reset=$(pc_reset_for "$_tt")
+	_issued=0; pc_allowance_issued "$_reset" && _issued=1
+	for _ip in "$ipt" "$ipt6"; do
+		ensure_chain "$_ip" mangle "$TAGQ"
+		$_ip -t mangle -F "$TAGQ" 2>/dev/null
+	done
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on $_m); do
+			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
+			_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
+			if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$_tt")" ]; then
+				_q=$(pc_quota_positive "$(pc_pool_quota "$_pool" "$_tt")")
+				_u=$(pool_usage "$_pool" "$_tt")
+			else
+				_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")")
+				_u=$(pc_usage_get "$(entry_key "$_m" "$_i")")
+			fi
+			[ "$_q" -gt 0 ] 2>/dev/null || continue
+			if [ "$_issued" = "0" ] || [ "$_u" -ge "$_q" ]; then
+				block_entry "$_m" "$_i"
 			fi
 		done
-		# IPv6：归一化成 /64 累积。新建连接由关键词规则兜（IPv6 走隧道、负载可见），
-		# 但已经建立的连接拦不住 —— IP 封锁是无状态的、每包都查，补上它才能当场掐断。
-		for a in $(resolveip -6 -t 2 "$h" 2>/dev/null); do
-			echo "$a" | grep -qE '^[0-9a-fA-F:]+$' || continue
-			case "$a" in *:*) echo "$m $(ip6_slash64 "$a")" >> $fresh ;; esac
+	done
+}
+
+# 额度计数链名（供 sample 读取）
+active_acct_keys() {
+	_tt=$(pc_today_type)
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on $_m); do
+			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] && echo "$(entry_key "$_m" "$_i")"
 		done
 	done
-	ip_literals >> $fresh
-	# 合并（只增不减），并清掉配置里已经删掉的 MAC
-	touch $IPLIST
-	cat $fresh $IPLIST 2>/dev/null | sort -u | while read m p; do
-		[ -z "$p" ] && continue
-		weburl_macs_all | grep -qx "$m" && echo "$m $p"
-	done | sort -u > ${IPLIST}.new
-	mv ${IPLIST}.new $IPLIST
-	rm -f $fresh
-	# 重建规则（两个协议族同一条链名，各自建）
-	for ip in "$ipt" "$ipt6"; do
-		$ip -t mangle -N $TAGI 2>/dev/null || $ip -t mangle -F $TAGI 2>/dev/null
-		$ip -t mangle -C PREROUTING -j $TAGI 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGI 2>/dev/null
-		$ip -t mangle -F $TAGI 2>/dev/null
+}
+
+# ============================================================================
+# 用量采样：每分钟对比计数增量，超阈值记 1 分钟
+# ============================================================================
+sample_counters() {
+	mkdir -p "$STATE_DIR"
+	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
+	case "$_min_kb" in ''|*[!0-9]*) _min_kb=32 ;; esac
+	_thr=$((_min_kb * 1024))
+	_dump=$($ipt -t mangle -nvx -L "$TAGA" 2>/dev/null; $ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null)
+	for _key in $(active_acct_keys); do
+		_v=$(printf '%s\n' "$_dump" | awk -v t="PCA_$_key" '$3==t{s+=$2} END{printf "%d\n", s+0}')
+		_bf="$STATE_DIR/base.$_key"
+		if [ -f "$_bf" ]; then
+			_b=$(cat "$_bf")
+			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi
+			[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1
+		fi
+		echo "$_v" > "$_bf"
 	done
-	onmacs=$(weburl_macs_on)
-	while read m p; do
-		[ -z "$m" ] && continue
-		# 只有「已勾选」的行才真的装规则
-		echo "$onmacs" | grep -qx "$m" || continue
-		case "$p" in
-		*:*) $ipt6 -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
-		*)   $ipt  -t mangle -A $TAGI -m mac --mac-source "$m" -d "$p" -j DROP 2>/dev/null ;;
-		esac
-	done < $IPLIST
-	elog "iprules: $(wc -l < $IPLIST) 个网段 | mask=$mask"
+	for _bf in "$STATE_DIR"/base.*; do
+		[ -e "$_bf" ] || continue
+		_k=${_bf##*/base.}
+		active_acct_keys | grep -qx "$_k" || rm -f "$_bf"
+	done
 }
 
-# 由 cron 调用：只刷新 IP 规则，不重建其它规则
+# ============================================================================
+# 生命周期
+# ============================================================================
+build_all() {
+	_tt=$(pc_today_type)
+	elog "build: day=$_tt"
+	for _ip in "$ipt" "$ipt6"; do
+		ensure_chain "$_ip" filter "$TAG";  $_ip -t filter -F "$TAG" 2>/dev/null
+		ensure_chain "$_ip" filter "$TAGP"; $_ip -t filter -F "$TAGP" 2>/dev/null
+		ensure_chain "$_ip" mangle "$TAGW"; $_ip -t mangle -F "$TAGW" 2>/dev/null
+		ensure_chain "$_ip" mangle "$TAGI"; $_ip -t mangle -F "$TAGI" 2>/dev/null
+		ensure_chain "$_ip" mangle "$TAGA"; $_ip -t mangle -F "$TAGA" 2>/dev/null
+		ensure_chain "$_ip" mangle "$TAGQ"; $_ip -t mangle -F "$TAGQ" 2>/dev/null
+	done
+	build_time_rules "$_tt"
+	build_protocol_rules "$_tt"
+	build_weburl_time_rules "$_tt"
+	build_acct_rules "$_tt"
+	# PREROUTING 挂载顺序：TAGQ 最先（封了的包不再进计数链）→ TAGW → TAGI → TAGA
+	for _ip in "$ipt" "$ipt6"; do
+		hook_chain "$_ip" mangle PREROUTING "$TAGA"
+		hook_chain "$_ip" mangle PREROUTING "$TAGI"
+		hook_chain "$_ip" mangle PREROUTING "$TAGW"
+		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
+	done
+	build_quota_blocks
+	apply_offload
+	echo "$_tt" > "$STATE_DIR/daytype"
+}
+
+del_rule() {
+	for _ip in "$ipt" "$ipt6"; do
+		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
+			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
+		done
+		for _c in INPUT FORWARD OUTPUT; do
+			for _ta in "$TAG" "$TAGP" "$TAGW"; do
+				$_ip -D "$_c" -j "$_ta" 2>/dev/null
+			done
+		done
+		for _ta in "$TAG" "$TAGP"; do
+			$_ip -F "$_ta" 2>/dev/null; $_ip -X "$_ta" 2>/dev/null
+		done
+		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
+			$_ip -t mangle -F "$_ta" 2>/dev/null
+			$_ip -t mangle -X "$_ta" 2>/dev/null
+		done
+	done
+	clean_pca_chains
+	restore_offload
+}
+
+prune_usage() {
+	_keep=$(pc_uget "@basic[0].usage_keep")
+	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
+	if [ "$_keep" -gt 0 ] 2>/dev/null; then
+		find "$USAGE_DIR" -type f -mtime +"$_keep" -delete 2>/dev/null
+	fi
+	return 0
+}
+
+# 用量看板数据（Lua 控制器只转发这段 JSON）
+usage_json() {
+	_tt=$(pc_today_type)
+	_reset=$(pc_reset_for "$_tt")
+	_issued=false; pc_allowance_issued "$_reset" && _issued=true
+	printf '{"day":"%s","type":"%s","reset":"%s","issued":%s,"items":[' \
+		"$(pc_today)" "$_tt" "$_reset" "$_issued"
+	_first=1
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on $_m); do
+			[ "$(eff_mode $_m $_i "$_tt")" = "quota" ] || continue
+			_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
+			if [ -n "$_pool" ] && [ -n "$(pc_pool_quota "$_pool" "$_tt")" ]; then
+				_q=$(pc_quota_positive "$(pc_pool_quota "$_pool" "$_tt")")
+				_u=$(pool_usage "$_pool" "$_tt")
+				_n="$_m[$_i] @$_pool"
+			else
+				_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")")
+				_u=$(pc_usage_get "$(entry_key "$_m" "$_i")")
+				_n="$_m[$_i]"
+			fi
+			[ "$_first" = 1 ] || printf ','
+			_first=0
+			printf '{"name":"%s","used":%s,"quota":%s}' "$_n" "$_u" "$_q"
+		done
+	done
+	printf '],"history":['
+	_first=1
+	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -7); do
+		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		printf '{"date":"%s","minutes":%s}' "$_f" "$_t"
+	done
+	printf ']}\n'
+}
+
+with_tick_lock() {
+	mkdir "$TICK_LOCK" 2>/dev/null || {
+		[ -n "$(find "$TICK_LOCK" -mmin +2 2>/dev/null)" ] || return 0
+		rm -rf "$TICK_LOCK"
+		mkdir "$TICK_LOCK" 2>/dev/null || return 0
+	}
+	"$@"
+	rmdir "$TICK_LOCK" 2>/dev/null
+	return 0
+}
+
+tick() { with_tick_lock tick_body; }
+
+tick_body() {
+	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
+	[ -n "$ipt" ] || return 0
+	# 正在 start（重建全套规则）时跳过，避免并发
+	[ -f "$LOCK" ] && return 0
+	mkdir -p "$STATE_DIR"
+	_tt=$(pc_today_type)
+	if [ "$(cat "$STATE_DIR/daytype" 2>/dev/null)" != "$_tt" ]; then
+		# 跨天 / 日子类型变化 → 生效档案变了，整套静态规则重建
+		refresh_holiday
+		refresh_ips
+		build_all
+	else
+		sample_counters
+		build_quota_blocks
+	fi
+}
+
 refresh_ip() {
-	[ "$(uci -q get $CONFIG.@basic[0].enabled)" = "1" ] || return 0
-	apply_ip_rules
+	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
+	[ -n "$ipt" ] || return 0
+	with_tick_lock refresh_ip_body
 }
 
-# 让 crontab 里始终只有一条本插件的刷新任务；$1=1 写入，$1=0 移除
-cron_sync() {
-	mins=$(uci -q get $CONFIG.@basic[0].ip_refresh)
-	[ -z "$mins" ] && mins=30
-	new=$(crontab -l 2>/dev/null | grep -v "$CRON_TAG")
-	if [ "$1" = "1" ] && [ "$mins" -gt 0 ] 2>/dev/null; then
+refresh_ip_body() {
+	refresh_holiday
+	sample_counters
+	refresh_ips
+	build_all
+}
+
+cron_sync() { # $1=1 写入 / $1=0 移除
+	_mins=$(pc_uget "@basic[0].ip_refresh"); [ -z "$_mins" ] && _mins=30
+	new=$(crontab -l 2>/dev/null | grep -v "$CRON_TAG" | grep -v "$CRON_TAG_IP")
+	if [ "$1" = "1" ]; then
 		new="$new
-*/$mins * * * * /etc/init.d/parentcontrol refresh_ip >/dev/null 2>&1 $CRON_TAG"
+* * * * * /etc/init.d/parentcontrol tick >/dev/null 2>&1 $CRON_TAG"
+		if [ "$_mins" -gt 0 ] 2>/dev/null; then
+			new="$new
+*/$_mins * * * * /etc/init.d/parentcontrol refresh_ip >/dev/null 2>&1 $CRON_TAG_IP"
+		fi
 	fi
 	printf '%s\n' "$new" | grep -v '^$' | crontab -
 	/etc/init.d/cron reload >/dev/null 2>&1
 }
 
-set_rules() {
-mmode=$1
-   case $mmode in
-    time)
-	  controlmode=`uci -q get $CONFIG.@basic[0].control_mode`
-	  [ "x$controlmode" == 'x1' ] && chains="INPUT FORWARD" || chains="FORWARD"
-          for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAG 2>/dev/null || $ip -F $TAG 2>/dev/null 
-                  for chain in $chains; do
-                    $ip -C $chain -j  $TAG 2>/dev/null ||  $ip -I $chain -j  $TAG 2>/dev/null
-                  done
-	  done
-    ;;
-    protocol)
-       chain=FORWARD
-       for ip in "$ipt" "$ipt6" ; do
-                  $ip -N $TAGP 2>/dev/null || $ip -F $TAGP 2>/dev/null 
-                  $ip -C $chain -j  $TAGP 2>/dev/null ||  $ip -I $chain -j  $TAGP 2>/dev/null
-      done
-    
-    ;;
-    weburl)
-      # 原版把网址过滤挂在 OUTPUT 链上，但 `-m mac --mac-source` 在 OUTPUT 里永远不成立
-      # （路由器本机发出的报文没有源 MAC），所以「按 MAC 限制某台设备访问某个网址」
-      # 从来就没生效过 —— 界面显示正常、iptables 也不报错，纯粹静默失效。
-      #
-      # 改挂 mangle 表的 PREROUTING：只有这个位置同时满足三个条件 ——
-      #   1. 还看得到客户端的源 MAC；
-      #   2. 报文负载还是明文（TLS ClientHello 里的 SNI、明文 DNS 查询里的域名）；
-      #   3. 位于 flowtable 快转决策之前、也位于其它组件改写目的地址之前。
-      # 挂在 filter 的 INPUT/FORWARD 上时，连接一建立就被卸载，后续报文根本到不了规则。
-      algos=`uci -q get $CONFIG.@basic[0].algos` 
-      for ip in "$ipt" "$ipt6" ; do
-                  $ip -t mangle -N $TAGW 2>/dev/null || $ip -t mangle -F $TAGW 2>/dev/null
-                  $ip -t mangle -C PREROUTING -j $TAGW 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGW 2>/dev/null
-      done
-      apply_offload
-      apply_ip_rules
-    
-    ;;
-esac  
-idlist=`uci show $CONFIG | grep "enable='1'" | grep "$mmode" | grep -oE '\[.*?\]' | grep -o '[0-9]'`
-for i in $idlist ;do
-    mac=$(uci -q get $CONFIG.@$mmode[$i].mac ) && MAC="-m mac --mac-source $mac" || MAC=""
-    timestart=$(uci -q get $CONFIG.@$mmode[$i].timestart ) || timestart="00:00"
-    timeend=$(uci -q get $CONFIG.@$mmode[$i].timeend) ||  timeend="00:00"
-    wweek=$(uci -q get $CONFIG.@$mmode[$i].week )  || wweek='*'
-    # ash 不支持 `local a=1,b=2` 这种写法，会报 "bad variable name" 并中止整个脚本，
-    # 导致 time 之后再也没设置 protocol/weburl 两组规则，还留下一个锁文件。
-    local Z1 Z2 Z3 Z4 Z5 Z6 Z7
-    for ww in `echo $wweek | sed 's/,/ /g' `; do 
-        [ "$ww" == "1" ] && Z1="Mon,"
-        [ "$ww" == "2" ] && Z2="Tue,"
-        [ "$ww" == "3" ] && Z3="Wed," 
-        [ "$ww" == "4" ] && Z4="Thu," 
-        [ "$ww" == "5" ] && Z5="Fri,"
-        [ "$ww" == "6" ] && Z6="Sat," 
-        [ "$ww" == "7" ] && Z7="Sun"
-    done
-    [ -z "$timestart" -o -z "$timeend" -o "$timestart" = "$timeend" ] && TIME="" || TIME="--timestart ${timestart} --timestop ${timeend}"
-    [ -z "$wweek" -o "x$wweek" = "x*" ] && WEEK="" || WEEK="--weekdays $Z1$Z2$Z3$Z4$Z5$Z6$Z7"
-    [ -n "$TIME" -o -n "$WEEK" ] && WT="-m time --kerneltz ${TIME} ${WEEK}" || WT=""
-   case $mmode in
-    time)
-          for pt in "$ipt" "$ipt6" ; do
-		$pt -I $TAG ${MAC} ${WT} -j REJECT 2>/dev/null 
-		elog "$mmode:$pt -- ${MAC} -- ${WT}  "
-	done
-    ;;
-    protocol)
-        proto=$(uci -q get $CONFIG.@$mmode[$i].proto ) || proto="tcp"
-	ports=$(uci -q get $CONFIG.@$mmode[$i].ports ) && SPO="--sport ${ports}" || SPO=""
-	portd=$(uci -q get $CONFIG.@$mmode[$i].portd ) && DPO="--dport ${portd}" || DPO=""
-	mMPT=`echo "$ports"|grep ","` && mSPO="-m multiport" || mSPO=""
-	mMPT=`echo "$portd"|grep ","` && mDPO="-m multiport" || mDPO=""
-	[ -z "$ports" -a -z "$portd" ] && PTO="" || PTO="-p ${proto} ${mSPO} ${SPO} ${mDPO} ${DPO}"
-        for pt in "$ipt" "$ipt6" ; do
-		$pt -I $TAGP ${MAC} ${WT} ${PTO} -j REJECT 2>/dev/null 
-		elog "$mmode: $pt -- ${MAC} -- ${WT} -- ${PTO}"
-	done
-    ;;
-    weburl)
-	# 匹配串 = word（可逗号分隔、可留空）+ domains 里的每个域名。
-	# 所以 domains 同时承担两件事：生成匹配串、以及解析成 IPv4 后按 IP 封。word 因此
-	# 退化成可选的补充手段（想宽泛匹配时用它，比如只写 xhs）。
-	#
-	# 这里是逐包做 -m string，成本不低，所以加端口过滤把范围收窄：
-	#   UDP 53     → 明文 DNS 查询
-	#   TCP 80/443 → 明文 HTTP Host / TLS ClientHello 的 SNI
-	# 注意 IPv4 转发报文的负载内核看不到（见上方 apply_ip_rules 的说明），所以这条
-	# TCP 规则实际只在 IPv6 上生效；IPv4 靠 IP 封锁。
-	for p in $(weburl_patterns $i); do
-	  for pt in "$ipt" "$ipt6" ; do
-		$pt -t mangle -I $TAGW -p UDP --dport 53 ${MAC} ${WT} -m string --algo ${algos} --string "$p" -j DROP 2>/dev/null
-		$pt -t mangle -I $TAGW -p TCP -m multiport --dports 80,443 ${MAC} ${WT} -m string --algo ${algos} --string "$p" -j DROP 2>/dev/null
-		elog "$mmode: $pt -- $p"
-	  done
-	done
-    ;; 
-    *) ;;
-   esac
-   unset STR MAC WT PTO
-done
+start() {
+	[ -f "$LOCK" ] && {
+		[ -n "$(find "$LOCK" -mmin +1 2>/dev/null)" ] || exit 1
+		elog "removing stale lock $LOCK"
+	}
+	del_rule
+	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 1
+	[ -n "$ipt" ] || exit 1
+	touch "$LOCK"
+	mkdir -p "$STATE_DIR" "$USAGE_DIR"
+	refresh_holiday novet
+	refresh_ips
+	build_all
+	cron_sync 1
+	prune_usage
+	clean_log
+	rm -f "$LOCK" 2>/dev/null
 }
 
-flush_include() {
-	echo '#!/bin/sh' >$FWI
+stop() {
+	del_rule
+	cron_sync 0
+	rm -f "$LOCK" 2>/dev/null
+	rm -rf "$STATE_DIR" 2>/dev/null
 }
 
-del_rule() {
-  for ip in "$ipt" "$ipt6" ; do
-      for ta in "$TAG" "$TAGW" "$TAGP" ; do
-	 for chain in "PREROUTING" "FORWARD" "OUTPUT" "INPUT" ; do
-	     	$ip -D  $chain -j $ta 2>/dev/null
-		
-		# elog "delrule: $ip -- $ta -- ${chain} "
-	 done
-	 $ip -F $ta 2>/dev/null
-	 $ip -X $ta 2>/dev/null
-      done
-      # mangle 表里还有一条同名链（不同表），必须单独清，否则关掉功能后
-      # PREROUTING 上会残留一条永远匹配不上的跳转。
-      $ip -t mangle -D PREROUTING -j $TAGW 2>/dev/null
-      $ip -t mangle -F $TAGW 2>/dev/null
-      $ip -t mangle -X $TAGW 2>/dev/null
-      $ip -t mangle -D PREROUTING -j $TAGI 2>/dev/null
-      $ip -t mangle -F $TAGI 2>/dev/null
-      $ip -t mangle -X $TAGI 2>/dev/null
-  done
-  restore_offload
-}
-
-start(){
-     # 脚本被中断时锁文件会残留，之后每次 start() 都直接 exit 1（界面显示未运行、
-     # 也不报任何错）。超过一分钟的锁视为陈旧锁，清掉继续。
-     [ -f $LOCK ] && {
-        [ -n "$(find $LOCK -mmin +1 2>/dev/null)" ] || exit 1
-        elog "removing stale lock $LOCK"
-     }
-     del_rule
-     enabled=`uci -q get $CONFIG.@basic[0].enabled`
-     [ "x$enabled" == "x1" ] || exit 1
-     # 开启开关勾着就算运行 —— 列表全空也只意味着没有规则去匹配，不等于没运行。
-     # 所以无条件建链（空链什么也不拦），状态判定才能反映「开启」本身。
-     touch $LOCK
-     set_rules time
-     set_rules protocol
-     set_rules weburl
-     cron_sync 1
-     clean_log 
-     rm -f $LOCK  2>/dev/null
-}
-
-stop(){
-     del_rule
-     cron_sync 0
-     rm -f $LOCK  2>/dev/null
-}
-
-
+reload() { stop; start; }
