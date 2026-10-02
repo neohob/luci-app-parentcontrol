@@ -197,6 +197,19 @@ pc_quota_keys() { # $1=school|holiday
 	done
 }
 
+# 局域网网段（IPv4，UCI 里所有 proto=static 的 network 节）。
+# 用途：封锁规则前面先放行「到局域网/路由器自身」的流量，避免把自己锁在门外。
+pc_lan_nets() {
+	local _s _ip _nm
+	uci -q show network 2>/dev/null \
+		| sed -n "s/^network\.\([A-Za-z0-9_]*\)\.proto='static'$/\1/p" \
+		| while read -r _s; do
+			_ip=$(uci -q get "network.$_s.ipaddr")
+			_nm=$(uci -q get "network.$_s.netmask")
+			[ -n "$_ip" ] && [ -n "$_nm" ] && echo "$_ip/$_nm"
+		done
+}
+
 # 把非数字/空额度归一：输出 0 表示不限，>0 表示分钟上限
 pc_quota_positive() {
 	case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac

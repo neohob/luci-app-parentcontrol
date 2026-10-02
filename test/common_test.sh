@@ -152,6 +152,21 @@ t_eq '跨天清零' 0 "$(pc_usage_get weburl_0)"
 FAKE_DATE_YMD=2026-03-01
 
 # ============================================================
+echo '== pc_lan_nets（防自锁用）=='
+cfg_reset
+cat > "$T_TMP/net.uci" <<'EOF'
+config interface 'lan'
+	option proto 'static'
+	option ipaddr '192.0.2.1'
+	option netmask '255.255.255.0'
+config interface 'wan'
+	option proto 'dhcp'
+EOF
+cfg_load network "$T_TMP/net.uci"
+t_eq '静态 LAN 网段' '192.0.2.1/255.255.255.0' "$(pc_lan_nets)"
+cfg_reset
+t_eq '无 network 配置 → 空' '' "$(pc_lan_nets)"
+
 echo '== 配额归一 / 池 =='
 t_eq '空 → 不限(0)' 0 "$(pc_quota_positive '')"
 t_eq '非数字 → 不限(0)' 0 "$(pc_quota_positive abc)"

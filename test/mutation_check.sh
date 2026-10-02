@@ -113,6 +113,11 @@ run_mut '计数不计字符串命中' "$INIT" \
 	'emit_weburl_targets "$TAGA" "$TAGA" "" "-j PCA_$_key" "$_i" single ;;' \
 	':' init_test.sh
 
+# 12c) 计数/封锁装到错误的表（filter 而非 mangle）
+run_mut '计数装错表(filter)' "$INIT" \
+	'emit_entry_targets "$_m" "$_i" mangle "$TAGA" "$TAGA" "" "-j PCA_$_key" single' \
+	'emit_entry_targets "$_m" "$_i" filter "$TAGA" "$TAGA" "" "-j PCA_$_key" single' init_test.sh
+
 # 12) 拆除时不清理 mangle 链
 run_mut '拆除残留 mangle 链' "$INIT" \
 	'		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do

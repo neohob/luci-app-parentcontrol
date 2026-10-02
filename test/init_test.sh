@@ -228,6 +228,40 @@ build_quota_blocks
 t_eq '无额度 → 永不封' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 
 # ============================================================
+echo '== 时间/协议条目的额度模式（补盲区：此前只测 weburl）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option sd_mode 'quota'
+	option sd_quota '10'
+config protocol
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option proto 'tcp'
+	option portd '80'
+	option sd_mode 'quota'
+	option sd_quota '10'
+EOF
+cfg_apply
+FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1
+run_build
+A=$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)
+t_has '时间条目计数在 mangle ACCT' "$A" '-m mac --mac-source aa:bb:cc:dd:ee:ff -j PCA_time_0'
+t_has '协议条目计数在 mangle ACCT' "$A" '-m mac --mac-source aa:bb:cc:dd:ee:ff -p tcp --dport 80 -j PCA_protocol_0'
+t_eq 'filter 表不该出现计数链' '' "$(ipt_rules v4 filter PARENTCONTROL_ACCT | flat)"
+t_eq '未耗尽 → QUOTA 空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+pc_usage_add time_0 10
+pc_usage_add protocol_0 10
+build_quota_blocks
+Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)
+t_has '时间条目用满 → mangle QUOTA DROP' "$Q" '-m mac --mac-source aa:bb:cc:dd:ee:ff -j DROP'
+t_has '协议条目用满 → mangle QUOTA DROP' "$Q" '-m mac --mac-source aa:bb:cc:dd:ee:ff -p tcp --dport 80 -j DROP'
+FAKE_DATE_YMD=2026-06-08
+
+# ============================================================
 echo '== 共享池 =='
 fresh
 cfg_begin 1
@@ -286,6 +320,49 @@ pc_usage_add weburl_1 999    # 时段模式成员，不应计入池
 pc_usage_add weburl_0 10
 build_quota_blocks
 t_eq '时段成员的用量不计入池' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+
+# ============================================================
+echo '== 防自锁：到局域网/路由器自身的流量必须放行 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '10'
+EOF
+cfg_apply
+cat > "$T_TMP/net.uci" <<'EOF'
+config interface 'lan'
+	option proto 'static'
+	option ipaddr '192.0.2.1'
+	option netmask '255.255.255.0'
+EOF
+cfg_load network "$T_TMP/net.uci"
+run_build
+pc_usage_add time_0 10
+build_quota_blocks
+Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA)
+t_has '放行到局域网(含路由器)的流量' "$Q" '-d 192.0.2.1/255.255.255.0 -j RETURN'
+t_has '仍然封锁无设备条件的条目' "$Q" '-j DROP'
+# RETURN 必须在 DROP 之前
+t_eq 'RETURN 排在 DROP 之前' RETURN "$(printf '%s\n' "$Q" | grep -m1 -- '-j' | awk '{print $NF}')"
+
+echo '== 防自锁：拿不到局域网网段时，跳过无设备条件的封锁 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config time
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '10'
+EOF
+cfg_apply
+run_build
+pc_usage_add time_0 10
+build_quota_blocks
+t_eq '无网段 → 不封锁（防自锁）' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+t_has '日志有告警' "$(cat "$LOG_FILE" 2>/dev/null)" '跳过封锁以防自锁'
 
 # ============================================================
 echo '== 日子类型切换 → 用节假日档案 =='
