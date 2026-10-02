@@ -28,6 +28,66 @@ clean_log() {
 
 
 
+# ============================================================================
+# flow-offload 排除 —— 网址过滤能真正生效的前提
+# ----------------------------------------------------------------------------
+# 开启 flow offloading 的路由器，fw4 会往 forward 链装一条
+#     meta l4proto { tcp, udp } flow add @ft
+# 把「已建立的连接」丢进流卸载表。此后这条连接的报文在内核 ingress 快路径直接转发，
+# 整个 netfilter 栈（包括 mangle PREROUTING）都不再经过。
+#
+# 后果：-m string 只能看到每条 TCP 连接的第一个 SYN，看不到握手之后那个真正带 SNI
+# 的 ClientHello —— TCP 规则永远 0 命中。而 UDP 的 DNS 查询 / QUIC Initial 本身就是
+# 「新流的首包」，必然经过 PREROUTING，所以只有 UDP 规则生效。
+# 表现出来就是：DNS 和 HTTP/3 被拦住了，浏览器/App 一回落 TCP 就照常打开网站。
+#
+# 修法：给这条 flow add 加上 `ether saddr != <受管 MAC>` 条件，只把受管设备排除在
+# 卸载之外。其它设备完全不受影响，也不绕过任何防火墙规则（比在 forward 链里直接
+# return 安全 —— 那样会把后面的过滤规则一起跳过）。
+# ============================================================================
+offload_macs() {
+	uci -q get $CONFIG.@basic[0].enabled | grep -q '^1$' || return 0
+	uci show $CONFIG 2>/dev/null | grep "enable='1'" | grep 'weburl' \
+		| grep -oE '\[[0-9]+\]' | tr -dc '0-9\n' \
+		| while read i; do uci -q get $CONFIG.@weburl[$i].mac; done | sort -u
+}
+
+offload_handle() {
+	nft -a list chain inet fw4 forward 2>/dev/null \
+		| grep 'flow add @ft' | head -1 \
+		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
+}
+
+apply_offload() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
+	h=$(offload_handle)
+	[ -z "$h" ] && return 0
+	cond=""
+	for m in $(offload_macs); do
+		cond="$cond ether saddr != $m"
+	done
+	nft delete rule inet fw4 forward handle $h 2>/dev/null
+	if [ -n "$cond" ]; then
+		nft insert rule inet fw4 forward meta l4proto { tcp, udp }$cond flow add @ft 2>/dev/null \
+			|| nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+		elog "offload: exclude$cond"
+	else
+		nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	fi
+}
+
+# 停用功能时把 flow add 恢复成不带任何条件的样子，不留副作用。
+restore_offload() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
+	h=$(offload_handle)
+	[ -z "$h" ] && return 0
+	nft delete rule inet fw4 forward handle $h 2>/dev/null
+	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	elog "offload: restored"
+}
+
 set_rules() {
 mmode=$1
    case $mmode in
@@ -64,6 +124,7 @@ mmode=$1
                   $ip -t mangle -N $TAGW 2>/dev/null || $ip -t mangle -F $TAGW 2>/dev/null
                   $ip -t mangle -C PREROUTING -j $TAGW 2>/dev/null || $ip -t mangle -I PREROUTING -j $TAGW 2>/dev/null
       done
+      apply_offload
     
     ;;
 esac  
@@ -147,6 +208,7 @@ del_rule() {
       $ip -t mangle -F $TAGW 2>/dev/null
       $ip -t mangle -X $TAGW 2>/dev/null
   done
+  restore_offload
 }
 
 start(){
