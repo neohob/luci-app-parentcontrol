@@ -3,9 +3,55 @@ local fs = require "nixio.fs"
 local ipc = require "luci.ip"
 local net = require "luci.model.network".init()
 local sys = require "luci.sys"
+
+local function validate_time(self, value, section)
+	local hh, mm = string.match(value, "^(%d?%d):(%d%d)$")
+	hh = tonumber(hh); mm = tonumber(mm)
+	if hh and mm and hh <= 23 and mm <= 59 then
+		return value
+	else
+		return nil, "时间格式必须为 HH:MM 或者留空"
+	end
+end
+
+-- 平日/节假日两套档案：模式三选一（关闭/时段/额度），按模式显隐参数
+local function add_profile(t, sfx, label)
+	local m = t:option(ListValue, sfx .. "_mode", translate(label .. "模式"))
+	m:value("off", translate("关闭"))
+	m:value("time", translate("时段"))
+	m:value("quota", translate("每日额度"))
+	m.default = "time"
+	m.rmempty = true
+
+	local s = t:option(Value, sfx .. "_start", translate("起控"))
+	s.placeholder = '00:00'; s.default = '00:00'; s.validate = validate_time
+	s:depends(sfx .. "_mode", "time")
+	s.rmempty = true
+
+	local e = t:option(Value, sfx .. "_end", translate("停控"))
+	e.placeholder = '00:00'; e.default = '00:00'; e.validate = validate_time
+	e:depends(sfx .. "_mode", "time")
+	e.rmempty = true
+
+	local q = t:option(Value, sfx .. "_quota", translate("每日分钟"))
+	q.datatype = "uinteger"
+	q:depends(sfx .. "_mode", "quota")
+	q.rmempty = true
+
+	local p = t:option(Value, sfx .. "_pool", translate("共享组"))
+	p.placeholder = translate("留空=独立额度")
+	p:depends(sfx .. "_mode", "quota")
+	p.rmempty = true
+end
+
 local a, t, e
-a = Map("parentcontrol", translate("Parent Control"), translate("<b><font color=\"green\">利用iptables来管控数据包过滤以禁止符合设定条件的用户连接互联网的工具软件。</font> </b></br>\
-协议过滤：可以控制指定MAC机器是否使用指定协议端口，包括IPV4和IPV6，端口可以是连续端口范围用冒号分隔如5000:5100或多个端口用逗号分隔如：5100,5110,5001:5002,440:443</br>不指定MAC就是代表限制所有机器,星期用1-7表示，多个日期用：1,5表示星期一和星期五" ))
+a = Map("parentcontrol", translate("Parent Control"),
+	translate("<b><font color=\"green\">协议过滤：控制指定 MAC/IP 机器是否使用指定端口/协议，含 IPv4 与 IPv6。</font></b></br>\
+端口可写范围（5000:5100）或多段（5100,5110,5001:5002）。</br>\
+每条目分「平日」「节假日」两套档案，各选 关闭 / 时段 / 每日额度 之一：</br>\
+· <b>时段</b>：只在此时段内禁止（起控=停控 或留空 = 全天禁止）。</br>\
+· <b>每日额度</b>：每天给 N 分钟该端口的可用时间，用完后封到当天重置点；可填「共享组」并入共享额度池。</br>\
+不指定 MAC/IP 表示限制所有机器。"))
 
 a.template = "parentcontrol/index"
 
@@ -19,7 +65,8 @@ e.value = translate("Collecting data...")
 e = t:option(Flag, "enabled", translate("开启"))
 e.rmempty = false
 
-e = t:option(ListValue, "control_mode",translate("管控强度"), translate("普通管控：管控国内网站端口，出国插件的国外端口无法管控！"))
+e = t:option(ListValue, "control_mode", translate("管控强度"),
+	translate("普通管控：管控国内端口，出国插件的国外端口无法管控。"))
 e.rmempty = false
 e:value("0", "普通管控")
 e.default = "0"
@@ -29,7 +76,7 @@ t.template = "cbi/tblsection"
 t.anonymous = true
 t.addremove = true
 
-e = t:option(Value, 'remarks', translate('Remarks'))
+t:option(Value, 'remarks', translate('备注'))
 
 e = t:option(Flag, "enable", translate("开启"))
 e.rmempty = false
@@ -40,18 +87,22 @@ e.placeholder = "ALL"
 e.rmempty = true
 o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
 
-e = t:option(ListValue, "proto", translate("<font color=\"gray\">端口协议</font>"))
+e = t:option(Value, "ip", translate("静态IP/主机名"),
+	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
+e.rmempty = true
+
+e = t:option(ListValue, "proto", translate("端口协议"))
 e.rmempty = false
 e.default = 'tcp'
 e:value("tcp", translate("TCP"))
 e:value("udp", translate("UDP"))
 e:value("icmp", translate("ICMP"))
 
-e = t:option(Value, "ports", translate("<font color=\"gray\">源端口</font>"))
+e = t:option(Value, "ports", translate("源端口"))
 e.rmempty = true
 
-e = t:option(Value, "portd", translate("<font color=\"gray\">目的端口</font>"))
-e:value("",translate("ICMP"))
+e = t:option(Value, "portd", translate("目的端口"))
+e:value("", translate("ICMP"))
 e:value("80", "TCP-HTTP")
 e:value("443", "TCP-HTTPS")
 e:value("22", "TCP-SSH")
@@ -68,44 +119,8 @@ e:value("500", "UDP-IPSEC")
 e:value("53", "UDP-DNS53")
 e:value("161", "UDP-SNMP")
 e.rmempty = true
-    function validate_time(self, value, section)
-        local hh, mm, ss
-        hh, mm, ss = string.match (value, "^(%d?%d):(%d%d)$")
-        hh = tonumber (hh)
-        mm = tonumber (mm)
-        if hh and mm and hh <= 23 and mm <= 59 then
-            return value
-        else
-            return nil, "时间格式必须为 HH:MM 或者留空"
-        end
-    end
-    
-e = t:option(Value, "timestart", translate("起控时间"))
-e.placeholder = '00:00'
-e.default = '00:00'
-e.validate = validate_time
-e.rmempty = true
 
-e = t:option(Value, "timeend", translate("停控时间"))
-e.placeholder = '00:00'
-e.default = '00:00'
-e.validate = validate_time
-e.rmempty = true
-
-week=t:option(Value,"week",translate("Week Day"))
-week.rmempty = true
-week:value('*',translate("Everyday"))
-week:value(7,translate("Sunday"))
-week:value(1,translate("Monday"))
-week:value(2,translate("Tuesday"))
-week:value(3,translate("Wednesday"))
-week:value(4,translate("Thursday"))
-week:value(5,translate("Friday"))
-week:value(6,translate("Saturday"))
-week.default='*'
-
+add_profile(t, "sd", translate("平日"))
+add_profile(t, "hd", translate("节假日"))
 
 return a
-
-
-

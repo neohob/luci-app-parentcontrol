@@ -21,3 +21,6 @@ msgstr "设定星期"
 
 msgid "Everyday"
 msgstr "每天"
+
+msgid "Usage Limit"
+msgstr "使用限额"

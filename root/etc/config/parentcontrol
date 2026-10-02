@@ -4,53 +4,53 @@ config basic
 	option enabled '0'
 	option ip_refresh '30'
 	option ip_mask '24'
+	# 额度发放时刻（北京时间）。R 之前当天额度未发放，按“没额度”封住。
+	option reset_school '12:00'
+	option reset_holiday '12:00'
+	# 用量历史保留天数
+	option usage_keep '90'
+	# 一分钟内至少多少 KB 才算“在用”（滤掉后台心跳），0=任何流量都算
+	option usage_min_kb '32'
 
 config weburl
-	option word 'baidu'
-	option timestart '00:00'
-	option timeend '00:00'
-	option week '*'
+	option remarks 'Example'
 	option enable '0'
-
-config weburl
-	option timestart '00:00'
-	option timeend '00:00'
-	option word 'youtube'
-	option week '1,2,3,4,5'
-	option enable '0'
+	option domains 'example.com'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '00:00'
+	option hd_mode 'time'
+	option hd_start '00:00'
+	option hd_end '00:00'
 
 config protocol
 	option proto 'tcp'
-	option timestart '00:00'
-	option week '*'
-	option timeend '23:00'
 	option portd '80'
 	option enable '0'
-
-config protocol
-	option proto 'tcp'
-	option timestart '00:00'
-	option week '*'
-	option portd '443'
-	option timeend '23:00'
-	option enable '0'
-
-config protocol
-	option proto 'tcp'
-	option timestart '00:00'
-	option timeend '00:00'
-	option week '1,2,3,4,5'
-	option enable '0'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '00:00'
+	option hd_mode 'time'
+	option hd_start '00:00'
+	option hd_end '00:00'
 
 config time
-	option timestart '00:00'
-	option week '*'
-	option timeend '23:59'
 	option enable '0'
+	option sd_mode 'time'
+	option sd_start '00:00'
+	option sd_end '23:59'
+	option hd_mode 'time'
+	option hd_start '00:00'
+	option hd_end '23:59'
 
-config time
-	option timestart '00:00'
-	option enable '0'
-	option week '1,2,3,4,5'
-	option timeend '23:59'
+# 共享额度池：条目在额度模式里填池名即可并入，组内流量加总、共用额度
+config quota
+	option name 'kid1'
+	option sd_quota '60'
+	option hd_quota '120'
 
+# 寒暑假区间：MM-DD 表示每年重复（如暑假），YYYY-MM-DD 表示绝对年份（如寒假）
+config vacation
+	option name 'summer'
+	option start '07-01'
+	option end '08-31'

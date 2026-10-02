@@ -10,7 +10,9 @@ function index()
 	entry({"admin","control","parentcontrol","time"},cbi("parentcontrol/time"),_("Time Control"),1).leaf=true
 	entry({"admin", "control", "parentcontrol","weburl"}, cbi("parentcontrol/weburl"), _("Weburl Control"), 20).leaf = true
         entry({"admin", "control", "parentcontrol","protocol"}, cbi("parentcontrol/protocol"), _("Protocol Control"), 30).leaf = true 
+	entry({"admin", "control", "parentcontrol","quota"}, cbi("parentcontrol/quota"), _("Usage Limit"), 40).leaf = true
 	entry({"admin", "control", "parentcontrol","status"}, call("status")).leaf = true
+	entry({"admin", "control", "parentcontrol","usage"}, call("usage")).leaf = true
 end
 
 function status()
@@ -20,4 +22,14 @@ function status()
     e.status = luci.sys.call("iptables -t mangle -S 2>/dev/null | grep -q PARENTCONTROL || iptables -S 2>/dev/null | grep -q PARENTCONTROL") == 0
     luci.http.prepare_content("application/json")
     luci.http.write_json(e)
+end
+
+-- 用量看板：实际计算在 shell 侧（/etc/init.d/parentcontrol usage_json），这里只转发。
+function usage()
+    local out = luci.sys.exec("/etc/init.d/parentcontrol usage_json 2>/dev/null")
+    if not out or out == "" then
+        out = '{"day":"","type":"","reset":"","issued":false,"items":[],"history":[]}'
+    end
+    luci.http.prepare_content("application/json")
+    luci.http.write(out)
 end
