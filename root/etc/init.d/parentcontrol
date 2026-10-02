@@ -124,6 +124,13 @@ weburl_patterns() {
 		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
 }
 
+# 所有 weburl 行的 MAC（不管有没有勾开启）—— 只用来判断累积的 IP 列表该不该清理，
+# 免得把某行临时关掉就把攒下来的网段全丢了。
+weburl_macs_all() {
+	uci show $CONFIG 2>/dev/null | grep 'weburl' | grep '\.mac=' \
+		| sed -n "s/.*\.mac='\(.*\)'/\1/p" | sort -u
+}
+
 ip_domains() {
 	for i in $(weburl_on); do
 		m=$(uci -q get $CONFIG.@weburl[$i].mac)
@@ -160,12 +167,7 @@ apply_ip_rules() {
 	touch $IPLIST
 	cat $fresh $IPLIST 2>/dev/null | sort -u | while read m p; do
 		[ -z "$p" ] && continue
-		for i in $(weburl_on); do
-			if [ "$(uci -q get $CONFIG.@weburl[$i].mac)" = "$m" ]; then
-				echo "$m $p"
-				break
-			fi
-		done
+		weburl_macs_all | grep -qx "$m" && echo "$m $p"
 	done | sort -u > ${IPLIST}.new
 	mv ${IPLIST}.new $IPLIST
 	rm -f $fresh
@@ -341,13 +343,12 @@ start(){
      del_rule
      enabled=`uci -q get $CONFIG.@basic[0].enabled`
      [ "x$enabled" == "x1" ] || exit 1
-     allsum=`grep -c 'enable .1.' /etc/config/$CONFIG`
-     [ "$allsum" -gt 0 ] && {
-        touch $LOCK
-        set_rules time
-	set_rules protocol
-	set_rules weburl
-    }
+     # 开启开关勾着就算运行 —— 列表全空也只意味着没有规则去匹配，不等于没运行。
+     # 所以无条件建链（空链什么也不拦），状态判定才能反映「开启」本身。
+     touch $LOCK
+     set_rules time
+     set_rules protocol
+     set_rules weburl
      cron_sync 1
      clean_log 
      rm -f $LOCK  2>/dev/null
