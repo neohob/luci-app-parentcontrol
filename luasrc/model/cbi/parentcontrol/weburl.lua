@@ -1,18 +1,13 @@
 local o = require "luci.sys"
-local fs = require "nixio.fs"
-local ipc = require "luci.ip"
 local net = require "luci.model.network".init()
-local sys = require "luci.sys"
-
+local disp = require "luci.dispatcher"
 local parts = require "luci.model.cbi.parentcontrol.parts"
+local ui = require "luci.model.cbi.parentcontrol.ui"
 
 local a, t, e
 a = Map("parentcontrol", translate("Parent Control"),
-	translate("<b><font color=\"green\">网址过滤：按域名/CIDR 管控，支持 IPv4 与 IPv6。</font></b></br>\
-每条目分「平日」「节假日」两套档案，各选 关闭 / 时段 / 每日额度 之一：</br>\
-· <b>时段</b>：只在此时段内封锁（起控=停控 或留空 = 全天封）。</br>\
-· <b>每日额度</b>：每天给 N 分钟，用完后封到当天重置点；可填「共享组」把多个条目并进同一个额度池。</br>\
-不指定 MAC/IP 表示限制所有机器。"))
+	translate("网址过滤：按域名/CIDR 管控，支持 IPv4 与 IPv6。</br>\
+列表只显示摘要，点每行的 <b>编辑</b> 进去设置「平日 / 节假日」两套档案（关闭 / 时段 / 每日额度）。"))
 
 a.template = "parentcontrol/index"
 
@@ -60,26 +55,29 @@ t = a:section(TypedSection, "weburl", translate("网址过滤列表"))
 t.template = "cbi/tblsection"
 t.anonymous = true
 t.addremove = true
-
-t:option(Value, 'remarks', translate('备注'))
+t.extedit = disp.build_url("admin", "control", "parentcontrol", "weburl_edit") .. "/%s"
 
 e = t:option(Flag, "enable", translate("开启"))
 e.rmempty = false
 e.default = '1'
 
-e = t:option(Value, "mac", translate("MAC地址"))
-e.rmempty = true
-o.net.mac_hints(function(t, a) e:value(t, "%s (%s)" % {t, a}) end)
+t:option(Value, 'remarks', translate('备注'))
 
-e = t:option(Value, "ip", translate("静态IP/主机名"),
-	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
+e = t:option(DummyValue, "mac", translate("MAC"))
 e.rmempty = true
 
-e = t:option(Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"),
-	translate("填域名（apex 覆盖子域），或直接填 CIDR。"))
+e = t:option(DummyValue, "ip", translate("静态IP"))
 e.rmempty = true
 
-parts.add_profile(t, "sd", translate("平日模式"))
-parts.add_profile(t, "hd", translate("节假日模式"))
+e = t:option(DummyValue, "domains", translate("域名/IP"))
+e.rmempty = true
+
+e = t:option(DummyValue, "_profiles", translate("档案"))
+e.cfgvalue = ui.profiles
+e.rmempty = true
+
+e = t:option(DummyValue, "_used", translate("今日额度"))
+e.cfgvalue = function(self, section) return ui.used(self, section, "weburl") end
+e.rmempty = true
 
 return a
