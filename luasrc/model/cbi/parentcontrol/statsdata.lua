@@ -1,0 +1,245 @@
+-- 使用统计：读 shell 的 stats_tsv，解析并做分析，供看板模板渲染。
+-- 本文件是被 require 的子模块 —— 不能用 LuCI 注入的全局（translate 等），必须显式 require。
+local i18n = require "luci.i18n"
+local sys = require "luci.sys"
+local util = require "luci.util"
+
+local M = {}
+
+local function num(s, def)
+	local n = tonumber(s)
+	if n == nil then return def or 0 end
+	return n
+end
+
+-- MAC → 已知设备名（DHCP 租约/ARP），丢掉 IP 兜底值，去掉 .lan/.local 后缀
+local _names
+local function mac_names()
+	if _names then return _names end
+	_names = {}
+	local ok, s = pcall(require, "luci.sys")
+	if ok and s.net and s.net.mac_hints then
+		s.net.mac_hints(function(mac, name)
+			if mac and name and not name:match("^%d+%.%d+%.%d+%.%d+$") then
+				_names[mac:lower()] = (name:gsub("%.lan$", ""):gsub("%.local$", ""))
+			end
+		end)
+	end
+	return _names
+end
+
+function M.device_name(mac)
+	if not mac or mac == "" then return "" end
+	return mac_names()[mac:lower()] or ""
+end
+
+-- 日期递减（纯字符串运算，避免依赖 os.time/TZ）
+local function prev_day(ymd)
+	local y, m, d = ymd:match("^(%d%d%d%d)(%d%d)(%d%d)$")
+	if not y then return nil end
+	y, m, d = tonumber(y), tonumber(m), tonumber(d)
+	local dim = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+	local leap = (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0)
+	if leap then dim[2] = 29 end
+	d = d - 1
+	if d < 1 then
+		m = m - 1
+		if m < 1 then m = 12; y = y - 1 end
+		d = dim[m]
+	end
+	return string.format("%04d%02d%02d", y, m, d)
+end
+
+local function weekday_cn(ymd)
+	local y, m, d = ymd:match("^(%d%d%d%d)(%d%d)(%d%d)$")
+	if not y then return "" end
+	local t = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12 })
+	local w = tonumber(os.date("%w", t))          -- 0=周日
+	local cn = { "周日", "周一", "周二", "周三", "周四", "周五", "周六" }
+	return cn[w + 1] or ""
+end
+
+-- 采集 + 分析
+function M.collect()
+	local raw = sys.exec("/etc/init.d/parentcontrol stats_tsv 2>/dev/null") or ""
+	local d = {
+		meta = {}, entries = {}, pools = {}, hist = {}, hist_key = {},
+		units = {}, key_totals = {}, dev_totals = {}, days = {},
+	}
+	for _, line in ipairs(util.split(raw, "\n")) do
+		if line ~= "" then
+			local f = util.split(line, "\t")
+			local k = f[1]
+			if k == "meta" then
+				d.meta = {
+					date = f[2], daytype = f[3], reset = f[4], issued = (f[5] == "1"),
+					min_kb = num(f[6], 8), keep = num(f[7], 90), now = f[8] or "",
+				}
+			elseif k == "entry" then
+				d.entries[#d.entries + 1] = {
+					key = f[2], module = f[3], idx = f[4], name = f[5] or "",
+					mac = f[6] or "", mode = f[7] or "", quota = num(f[8]),
+					used = num(f[9]), pool = f[10] or "", live_kb = num(f[11]),
+				}
+			elseif k == "pool" then
+				d.pools[#d.pools + 1] = {
+					name = f[2], quota = num(f[3]), used = num(f[4]), members = f[5] or "",
+				}
+			elseif k == "hist" then
+				d.hist[f[2]] = num(f[3])
+			elseif k == "histkey" then
+				local dt, key = f[2], f[3]
+				d.hist_key[dt] = d.hist_key[dt] or {}
+				d.hist_key[dt][key] = num(f[4])
+			end
+		end
+	end
+
+	-- ---------- 分析 ----------
+	local meta = d.meta
+	local info = i18n.translate
+
+	-- 1) 额度条目：剩余 / 百分比 / 状态 / 预测
+	for _, e in ipairs(d.entries) do
+		e.device = M.device_name(e.mac)
+		e.label = (e.name ~= "" and e.name or (e.module .. "[" .. e.idx .. "]"))
+		if e.device ~= "" then e.label2 = e.device end
+		if e.mode == "quota" then
+			e.remain = math.max(0, e.quota - e.used)
+			e.pct = (e.quota > 0) and math.min(100, math.floor(e.used * 100 / e.quota)) or 0
+			if not meta.issued then
+				e.status = info("未发放")
+			elseif e.quota > 0 and e.used >= e.quota then
+				e.status = info("已耗尽")
+			else
+				e.status = info("放行中")
+			end
+			-- 预测：以「自发放时刻起的已过时间」推算到 24:00
+			local rh, rm = (meta.reset or "12:00"):match("^(%d?%d):(%d%d)$")
+			local nh, nm = (meta.now or "00:00"):match("^(%d?%d):(%d%d)$")
+			if rh and nh then
+				local started = 0
+				if meta.issued then
+					started = (tonumber(nh) * 60 + tonumber(nm)) - (tonumber(rh) * 60 + tonumber(rm))
+				end
+				if started > 5 and e.used > 0 then
+					e.projected = math.floor(e.used * (1440 - tonumber(rh) * 60 - tonumber(rm)) / started)
+				end
+			end
+		else
+			e.remain, e.pct, e.status = nil, 0, (e.mode == "off" and info("关闭") or info("时段"))
+		end
+	end
+
+	-- 2) 「统计单元」：池算一次，私有额度按条目算一次（避免池成员重复计入合计）
+	local pooled = {}
+	for _, p in ipairs(d.pools) do
+		pooled[p.name] = true
+		local members = {}
+		for m in (p.members or ""):gmatch("[^,]+") do members[#members + 1] = m end
+		d.units[#d.units + 1] = {
+			name = p.name, kind = "pool", quota = p.quota, used = p.used,
+			members = members, pct = (p.quota > 0) and math.min(100, math.floor(p.used * 100 / p.quota)) or 0,
+			remain = math.max(0, p.quota - p.used),
+			status = (not meta.issued) and info("未发放")
+				or ((p.quota > 0 and p.used >= p.quota) and info("已耗尽") or info("放行中")),
+		}
+	end
+	for _, e in ipairs(d.entries) do
+		if e.mode == "quota" and not (e.pool ~= "" and pooled[e.pool]) then
+			d.units[#d.units + 1] = {
+				name = e.label, device = e.device, kind = "entry", quota = e.quota,
+				used = e.used, pct = e.pct, remain = e.remain, status = e.status,
+				projected = e.projected, live_kb = e.live_kb, key = e.key,
+			}
+		end
+	end
+
+	local today_total = 0
+	local today_quota = 0
+	for _, u in ipairs(d.units) do
+		today_total = today_total + (u.used or 0)
+		if (u.quota or 0) > 0 then today_quota = today_quota + u.quota end
+	end
+	d.today_total = today_total
+	d.today_quota = today_quota
+
+	-- 3) 最近 30 天序列（补零），基于 meta.date 往前推
+	local dates = {}
+	local cur = meta.date and meta.date:gsub("-", "") or nil
+	if cur then
+		for _ = 1, 30 do
+			dates[#dates + 1] = cur
+			cur = prev_day(cur)
+		end
+	end
+	table.sort(dates)
+	local maxmin = 0
+	for _, dt in ipairs(dates) do
+		local v = d.hist[dt] or 0
+		if v > maxmin then maxmin = v end
+		d.days[#d.days + 1] = {
+			date = dt, minutes = v, weekday = weekday_cn(dt),
+			has = (d.hist[dt] ~= nil),
+		}
+	end
+	d.days_max = maxmin
+
+	-- 4) 历史汇总
+	local sum, cnt, mx = 0, 0, 0
+	for _, day in ipairs(d.days) do
+		if day.has then
+			sum = sum + day.minutes
+			cnt = cnt + 1
+			if day.minutes > mx then mx = day.minutes end
+		end
+	end
+	d.hist_sum = sum
+	d.hist_days = cnt
+	d.hist_avg = (cnt > 0) and math.floor(sum / cnt + 0.5) or 0
+	d.hist_max = mx
+
+	-- 5) 按条目（最近 30 天合计 + 占比）
+	local labels = {}
+	for _, e in ipairs(d.entries) do labels[e.key] = e end
+	for _, day in ipairs(d.days) do
+		local per = d.hist_key[day.date]
+		if per then
+			for key, v in pairs(per) do
+				d.key_totals[key] = (d.key_totals[key] or 0) + v
+			end
+		end
+	end
+	local rows = {}
+	for key, v in pairs(d.key_totals) do
+		local e = labels[key]
+		rows[#rows + 1] = {
+			key = key,
+			name = e and e.label or key,
+			device = e and e.device or "",
+			minutes = v,
+			share = (sum > 0) and math.floor(v * 100 / sum + 0.5) or 0,
+		}
+	end
+	table.sort(rows, function(a, b) return a.minutes > b.minutes end)
+	d.key_rows = rows
+
+	-- 6) 按设备（把该设备下各条目 30 天用量相加）
+	for _, r in ipairs(rows) do
+		local dev = (r.device ~= "" and r.device) or nil
+		if dev then
+			d.dev_totals[dev] = (d.dev_totals[dev] or 0) + r.minutes
+		end
+	end
+	local drows = {}
+	for dev, v in pairs(d.dev_totals) do
+		drows[#drows + 1] = { device = dev, minutes = v,
+			share = (sum > 0) and math.floor(v * 100 / sum + 0.5) or 0 }
+	end
+	table.sort(drows, function(a, b) return a.minutes > b.minutes end)
+	d.dev_rows = drows
+
+	return d
+end
+
+return M

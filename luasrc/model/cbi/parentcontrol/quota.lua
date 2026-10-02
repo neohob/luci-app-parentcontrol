@@ -33,8 +33,9 @@ e.datatype = "uinteger"
 e.default = "90"
 e.rmempty = true
 
-e = t:option(DummyValue, "pc_usage_board", translate("用量看板"))
-e.template = "parentcontrol/pcusage"
+e = t:option(DummyValue, "pc_usage_link", translate("用量看板"),
+	translate("详细统计、最近 30 天趋势与条目/设备分析已移到「使用统计」页。"))
+e.template = "parentcontrol/pcusagelink"
 
 t = a:section(TypedSection, "quota", translate("共享额度池"))
 t.template = "cbi/tblsection"

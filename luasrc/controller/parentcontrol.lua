@@ -13,6 +13,7 @@ function index()
 	entry({"admin", "control", "parentcontrol","weburl"}, cbi("parentcontrol/weburl"), _("网址过滤"), 20).leaf = true
         entry({"admin", "control", "parentcontrol","protocol"}, cbi("parentcontrol/protocol"), _("协议过滤"), 30).leaf = true 
 	entry({"admin", "control", "parentcontrol","quota"}, cbi("parentcontrol/quota"), _("使用限额"), 40).leaf = true
+	entry({"admin", "control", "parentcontrol","stats"}, cbi("parentcontrol/stats"), _("使用统计"), 45).leaf = true
 	-- 各模块的「详细设置」独立页（列表行用 extedit 跳过来，section id 在 arg[1]）
 	entry({"admin", "control", "parentcontrol","weburl_edit"}, cbi("parentcontrol/weburl_edit")).leaf = true
 	entry({"admin", "control", "parentcontrol","time_edit"}, cbi("parentcontrol/time_edit")).leaf = true

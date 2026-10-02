@@ -35,12 +35,13 @@ CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday usage_tsv stats_tsv"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
 	refresh_holiday  Fetch statutory-holiday data for this year and next
-	usage_tsv        Print today's quota usage and 7-day history as TSV"
+	usage_tsv        Print today's quota usage and 7-day history as TSV
+	stats_tsv        Print full stats for the dashboard as TSV"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -610,6 +611,82 @@ usage_tsv() {
 	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -7); do
 		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
 		printf 'history\t%s\t%s\n' "$_f" "$_t"
+	done
+}
+
+# 池成员（"module[idx]" 列表）
+pool_members() { # $1=池名 $2=school|holiday
+	local _m _i
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on "$_m"); do
+			[ "$(pc_entry_pool "$_m" "$_i" "$2")" = "$1" ] && echo "${_m}[${_i}]"
+		done
+	done
+}
+
+# 当前这一分钟内该条目产生的流量（KB）= 计数器当前值 - 上次采样基线
+quota_live_kb() { # $1=key
+	local _v _v6 _b _d
+	_v=$($ipt -t mangle -nvx -L "$TAGA" 2>/dev/null | awk -v t="PCA_$1" '$3==t{s+=$2} END{printf "%d", s+0}')
+	_v6=$($ipt6 -t mangle -nvx -L "$TAGA" 2>/dev/null | awk -v t="PCA_$1" '$3==t{s+=$2} END{printf "%d", s+0}')
+	_b=0; [ -f "$STATE_DIR/base.$1" ] && _b=$(cat "$STATE_DIR/base.$1")
+	_d=$(( _v + _v6 - _b )); [ "$_d" -lt 0 ] && _d=$(( _v + _v6 ))
+	echo $(( _d / 1024 ))
+}
+
+# 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
+#   meta     <日期> <school|holiday> <发放时刻> <0|1已发放> <阈值KB> <保留天> <当前HH:MM>
+#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
+#   pool     <池名> <额度> <已用> <成员,逗号分隔>
+#   hist     <YYYYMMDD> <当天总分钟>
+#   histkey  <YYYYMMDD> <条目key> <分钟>
+stats_tsv() {
+	local _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _pq _live _f _t _n
+	_tt=$(pc_today_type)
+	_reset=$(pc_reset_for "$_tt")
+	_issued=0; pc_allowance_issued "$_reset" && _issued=1
+	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
+	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac
+	_keep=$(pc_uget "@basic[0].usage_keep")
+	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
+	printf 'meta\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$(pc_today)" "$_tt" "$_reset" "$_issued" "$_min_kb" "$_keep" "$(date +%H:%M)"
+	# 所有「已启用」条目（含时段模式，看板需要完整信息）
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_on "$_m"); do
+			_mode=$(pc_entry_eff_mode "$_m" "$_i" "$_tt")
+			_key="${_m}_${_i}"
+			_name=$(pc_uget "@$_m[$_i].remarks")
+			_mac=$(pc_uget "@$_m[$_i].mac")
+			_q=0; _u=0; _pool=""
+			if [ "$_mode" = "quota" ]; then
+				_pool=$(pc_entry_pool "$_m" "$_i" "$_tt")
+				_pq=""
+				[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$_tt")
+				if [ -n "$_pq" ]; then
+					_q=$(pc_quota_positive "$_pq"); _u=$(pool_usage "$_pool" "$_tt")
+				else
+					_q=$(pc_quota_positive "$(pc_entry_quota "$_m" "$_i" "$_tt")"); _u=$(pc_usage_get "$_key")
+				fi
+			fi
+			_live=$(quota_live_kb "$_key")
+			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_mode" "$_q" "$_u" "$_pool" "$_live"
+		done
+	done
+	# 共享池
+	for _i in $(pc_ids_all quota); do
+		_n=$(pc_uget "@quota[$_i].name"); [ -n "$_n" ] || continue
+		_q=$(pc_quota_positive "$(pc_pool_quota "$_n" "$_tt")")
+		_u=$(pool_usage "$_n" "$_tt")
+		printf 'pool\t%s\t%s\t%s\t%s\n' "$_n" "$_q" "$_u" \
+			"$(pool_members "$_n" "$_tt" | tr '\n' ',' | sed 's/,$//')"
+	done
+	# 历史（最近 30 天）
+	for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -30); do
+		_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
+		printf 'hist\t%s\t%s\n' "$_f" "$_t"
+		awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
 	done
 }
 
