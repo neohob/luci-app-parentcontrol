@@ -18,6 +18,10 @@ t_setup() {
 	trap 'rm -rf "$T_TMP"' EXIT INT TERM
 	BIN="$T_TMP/bin"
 	mkdir -p "$BIN"
+	# 把“快 python”放到 PATH 最前，绕开 pyenv/asdf 之类 shim（实测差 6~7 倍）
+	for _py in /usr/bin/python3 /opt/homebrew/bin/python3 "$(command -v python3 2>/dev/null)"; do
+		[ -n "$_py" ] && [ -x "$_py" ] && { ln -sf "$_py" "$BIN/python3"; break; }
+	done
 	for f in resolveip wget crontab nft conntrack jsonfilter uci date; do
 		ln -s "$FAKES/$f" "$BIN/$f"
 	done

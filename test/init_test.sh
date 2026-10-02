@@ -51,7 +51,6 @@ echo '== 关闭开关 → 不建任何规则 =='
 fresh
 cfg_begin 0
 cfg_apply
-set -- ; for _f in $(pc_ids_all weburl); do : ; done
 ( start ) >/dev/null 2>&1 || true
 t_eq '关闭时无 filter 链' '' "$(ipt_chains v4 filter | grep PARENTCONTROL || true)"
 t_eq '关闭时无 mangle 链' '' "$(ipt_chains v4 mangle | grep PARENTCONTROL || true)"

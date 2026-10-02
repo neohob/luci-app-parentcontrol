@@ -98,7 +98,7 @@ time_gate() { # $1=module $2=idx $3=school|holiday
 
 # 协议端口条件（单个用 --sport/--dport；多个/范围用 -m multiport）
 proto_cond() { # $1=idx
-	local _proto _ports _portd _spo _dpo _cond
+	local _proto _ports _portd _cond
 	_proto=$(pc_uget "@protocol[$1].proto"); [ -z "$_proto" ] && _proto=tcp
 	_ports=$(pc_uget "@protocol[$1].ports")
 	_portd=$(pc_uget "@protocol[$1].portd")
@@ -204,6 +204,7 @@ fetch_url() { # $1=url $2=out
 }
 
 refresh_holiday() { # [$1=force|novet]
+	local _b _n _y _y2 _yy _f _stamp _u
 	mkdir -p "$HOLIDAY_CACHE"
 	for _b in "$HOLIDAY_LOCAL"/*.json; do
 		[ -e "$_b" ] || continue
@@ -424,7 +425,7 @@ pool_usage() { # $1=池名 $2=school|holiday
 
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
-	local _m _i PT
+	local _m _i _ip PT
 	_m=$1; _i=$2
 	case "$_m" in
 	time)
@@ -457,7 +458,7 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 
 # 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
 build_quota_blocks() {
-	local _tt _reset _issued _key _m _i
+	local _tt _reset _issued _key _m _i _ip
 	_tt=$(pc_today_type)
 	_reset=$(pc_reset_for "$_tt")
 	_issued=0; pc_allowance_issued "$_reset" && _issued=1
@@ -484,7 +485,7 @@ active_acct_keys() {
 # 用量采样：每分钟对比计数增量，超阈值记 1 分钟
 # ============================================================================
 sample_counters() {
-	local _min_kb _thr _dump _dump6 _key _v _bf _b _d _k
+	local _min_kb _thr _dump _key _v _bf _b _d _k
 	mkdir -p "$STATE_DIR"
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=32 ;; esac
