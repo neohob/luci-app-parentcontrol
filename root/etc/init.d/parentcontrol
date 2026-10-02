@@ -125,19 +125,18 @@ weburl_patterns() {
 		| grep -E '^[A-Za-z0-9._*/-]+$' | sort -u
 }
 
-# 输出 "MAC<空格>域名"
 ip_domains() {
 	for i in $(weburl_on); do
 		m=$(uci -q get $CONFIG.@weburl[$i].mac)
 		[ -z "$m" ] && continue
 		d=$(uci -q get $CONFIG.@weburl[$i].domains)
-		if [ -z "$d" ]; then
-			w=$(uci -q get $CONFIG.@weburl[$i].word)
-			[ -z "$w" ] && continue
-			d="$w,$w.com,www.$w.com,$w.cn"
-		fi
+		# 兼容早期只有 word(关键词) 的配置
+		[ -z "$d" ] && d=$(uci -q get $CONFIG.@weburl[$i].word)
 		for h in $(echo "$d" | tr ',' ' '); do
-			echo "$m $h"
+			case "$h" in
+			*.*) echo "$m $h" ;;
+			*)   for hh in "$h" "$h.com" "www.$h.com" "$h.cn"; do echo "$m $hh"; done ;;
+			esac
 		done
 	done
 }
