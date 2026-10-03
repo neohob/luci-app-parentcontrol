@@ -224,20 +224,20 @@ pc_entry_quota() {
 	pc_uget "@$1[$2].${_sfx}_quota"
 }
 
-# 条目今天「生效的额度来源」——全仓唯一一份「池优先」解析，输出 "<原始额度> <池名>"。
-# 挂了池且池有额度 → 用池的额度；否则用条目自己的。封锁链(entry_effective)、配置迁移
-# 都读这一份，避免同一策略在两处各写一遍（历史教训：ui.lua 与 statsdata 各写一份 TSV 解析，
-# 改列时漏改一处就是整列静默错值）。
-# 注意：空额度表示"没有这个额度来源"，它的含义（不限 / 全禁）由调用方按语义决定。
+# 条目今天「生效的原始额度」——shell 侧的池优先取值只此一份：挂了池且池有额度 → 用池的
+# 额度，否则用条目自己的。只输出额度值本身（不夹带池名，避免空格分隔的隐式协议）。
+# 空 = 没有额度来源，它代表"不限"还是"全禁"由调用方按语义决定。
+# 注意：ui.lua 渲染列表时需要同一份判定，但 Lua 不能调 shell 函数，那边有一份**镜像**
+# （luasrc/model/cbi/parentcontrol/ui.lua 的 qmin/pool_quota）—— 改这里必须同步改它。
 pc_effective_quota() { # $1=module $2=idx $3=school|holiday
 	local _pool _pq
 	_pool=$(pc_entry_pool "$1" "$2" "$3")
 	_pq=""
 	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
 	if [ -n "$_pq" ]; then
-		echo "$_pq $_pool"
+		echo "$_pq"
 	else
-		echo "$(pc_entry_quota "$1" "$2" "$3") $_pool"
+		pc_entry_quota "$1" "$2" "$3"
 	fi
 }
 
@@ -371,7 +371,7 @@ pc_migrate_config() {
 					# 已知的不可判别之处（不要再试图用标记去猜）：我的中间开发版 a0c7936 曾短暂把
 					# 「额度 0/空」定义成"全天禁止"，那种配置与老配置**形状完全一样**，没有任何字段
 					# 能区分（试过用 week 当标记：无 week 会被误判成全禁、有 week 会被误判成不限，
-					# 两个方向都是 bug，已放弃）。这里统一按**发布版**语义解释 —— 对真实用户来说
+					# 两个方向都是 bug，已放弃）。这里统一按**额度模型早期的老判据**解释 —— 对真实用户来说
 					# 那才是历史上一直成立的约定；受影响的只有"用过那个中间开发版、并把额度填 0
 					# 表示全天禁止"的极窄情况，迁移会为这类条目打日志，README 也写明了怎么复核。
 					# 注意 entry_effective 是池优先：判定必须跟着它走。
@@ -381,12 +381,11 @@ pc_migrate_config() {
 						if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
 						# 池优先的有效额度只有一份实现（common.sh 的 pc_effective_quota）
 						_eq=$(pc_effective_quota "$_m" "$_i" "$_dt")
-						_eq=${_eq%% *}
 						if [ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null; then
 							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
 						else
 							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
-							_pclog "migrate: $_m[$_i] ${_sfx}: 老额度非正/非法 → 不限（发布版语义）。若你本来要的是「全天禁止」，请在界面上把额度填 0 并取消勾选「不限额度」"
+							_pclog "migrate: $_m[$_i] ${_sfx}: 老额度非正/非法 → 不限（额度模型 8ab43a2 引入、a0c7936 之前的老判据）。若你本来要的是「全天禁止」，请在界面上把额度填 0 并取消勾选「不限额度」"
 						fi
 					fi ;;
 				off)
@@ -405,7 +404,7 @@ pc_migrate_config() {
 				esac
 				# 只在确定存在"老时段限制"时才补窗口；其余一律不写时段（= 全天可用），
 				# 避免把本来 24h 可用的条目静默收紧。这里只写 qstart/qend 这两个"新模式字段"，
-				# 语义字段（unlimited/quota）一律由上面的分支按发布版语义决定。
+				# 语义字段（unlimited/quota）一律由上面的分支按老判据（8ab43a2..a0c7936 之前）决定。
 				if [ -n "$_ws" ]; then
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=$_ws"
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=$_we"
