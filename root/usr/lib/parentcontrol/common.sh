@@ -271,7 +271,7 @@ pc_lan_nets() {
 		done
 }
 
-# 额度的唯一归一器：非纯数字（空/"abc"/"-1"/"+5"/" 5"/"00"）一律归 0，纯数字原样输出。
+# shell 侧唯一的额度归一器（ui.lua 有一份必须同步的镜像 qmin）：非纯数字（空/"abc"/"-1"/"+5"/" 5"/"00"）一律归 0，纯数字原样输出。
 # 这是老版本（c4fe179..a1ae0e9）就在用的口径，迁移端也读它 —— 迁移与运行必须用
 # 同一套解析，否则同一个脏值会在两边得出不同结论（B1′/S1′ 的教训）。
 # 注意新语义：0 = 一分钟都不给；「到底受不受额度限制」由 pc_entry_unlimited 决定。
@@ -285,7 +285,7 @@ pc_quota_positive() {
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _p _eq
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
 	#    （README 里承诺了这件事，就必须真的做；测试环境没有 /etc/config 时自动跳过。）
 	if [ -f "/etc/config/$PC_CONF" ]; then
@@ -385,7 +385,8 @@ pc_migrate_config() {
 					[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
 					if [ "$_unl" = 0 ]; then
 						if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
-						# 池优先的有效额度只有一份实现（common.sh 的 pc_effective_quota）
+						# 池优先的有效额度在 shell 侧只有一份实现（common.sh 的 pc_effective_quota，
+						# ui.lua 有必须同步的镜像）
 						_eq=$(pc_effective_quota "$_m" "$_i" "$_dt")
 						if [ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null; then
 							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
