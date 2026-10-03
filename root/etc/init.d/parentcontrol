@@ -388,7 +388,7 @@ clean_pca_chains() {
 	done
 }
 
-# 额度模式：常开计数规则（跳进空链 PCA_<key>，读跳转规则的字节计数）
+# 计数规则：常开（跳进空链 PCA_<key>，读跳转规则的字节计数）
 build_acct_rules() { # $1=school|holiday
 	local _key _m _i _ip
 	# 重建会清空计数器，所以「先采样再重建」必须在这里做：
@@ -406,7 +406,7 @@ build_acct_rules() { # $1=school|holiday
 	# 不删 base.*：本函数开头已采样，保留基线才能把重建后那一分钟也计入
 }
 
-# 池内条目用量之和（只统计同样处于额度模式的成员）
+# 池内条目用量之和（跳过勾了「不限额度」的成员：他们本来就不该消耗共享池）
 pool_usage() { # $1=池名 $2=school|holiday
 	local _key _m _i _sum
 	_sum=0
@@ -700,13 +700,6 @@ reset_quota() {
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 #   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
-# 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）
-#   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
-#   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
-#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
-#   pool     <池名> <额度> <已用> <成员,逗号分隔>
-#   hist     <YYYYMMDD> <当天总分钟>
-#   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
 	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl
 	_brief="${1:-}"
@@ -721,7 +714,7 @@ stats_tsv() {
 	if [ "$_brief" != "brief" ]; then
 		mkdir -p "$STATE_DIR"; _dump="$STATE_DIR/acct.stats.$$"; dump_acct "$_dump"
 	fi
-	# 所有「已启用」条目（含时段模式，看板需要完整信息）
+	# 所有「已启用」条目（看板需要完整信息）
 	for _m in $PC_MODULES; do
 		for _i in $(pc_ids_on "$_m"); do
 			_key="${_m}_${_i}"
@@ -729,8 +722,8 @@ stats_tsv() {
 			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")
 			_mac=$(pc_uget "@$_m[$_i].mac")
 			_q=0; _u=0; _pool=""
-				set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
-				_q=$1; _u=$2; _pool=${3:-}
+			set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
+			_q=$1; _u=$2; _pool=${3:-}
 			_live=0
 			[ -z "$_dump" ] || _live=$(quota_live_kb "$_key" "$_dump")
 			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

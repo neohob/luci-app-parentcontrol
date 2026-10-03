@@ -266,6 +266,12 @@ pc_quota_positive() {
 # ============================================================================
 pc_migrate_config() {
 	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual
+	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
+	#    （README 里承诺了这件事，就必须真的做；测试环境没有 /etc/config 时自动跳过。）
+	if [ -f "/etc/config/$PC_CONF" ]; then
+		mkdir -p /etc/parentcontrol/backup 2>/dev/null
+		cp -a "/etc/config/$PC_CONF" 			"/etc/parentcontrol/backup/$PC_CONF.$(date +%Y%m%d%H%M%S).bak" 2>/dev/null
+	fi
 	# 1) 默认值
 	for _k in usage_keep usage_min_kb; do
 		[ -n "$(pc_uget "@basic[0].$_k")" ] && continue
@@ -337,21 +343,23 @@ pc_migrate_config() {
 					_pcset "@$_m[$_i].${_sfx}_quota=0"
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 老配额模式但没填额度 → 老语义是"不限"。新语义里 0 = 全禁，
-					# 所以必须显式补成不限，否则升级后会静默全天全禁。
-					if [ -n "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ]; then
-						_pcset "@$_m[$_i].${_sfx}_unlimited=0"
-					else
+					# 老配额模式当年的运行判据是 `[ "$q" -gt 0 ] || continue`（c4fe179..a1ae0e9），
+					# 也就是「没填」和「填 0」在老语义里都等于"不限"。新语义里 0 = 全禁，
+					# 所以这两种都必须显式补成不限，否则升级后会静默把设备锁死。
+					case "$(pc_uget "@$_m[$_i].${_sfx}_quota")" in
+					''|0)
 						_pcset "@$_m[$_i].${_sfx}_unlimited=1"
-						_pclog "migrate: $_m[$_i] ${_sfx}: 配额模式但没填额度 → 不限（新语义 0=全禁）"
-					fi ;;
+						_pclog "migrate: $_m[$_i] ${_sfx}: 老配额为空/0（老语义=不限）→ 不限" ;;
+					*)
+						_pcset "@$_m[$_i].${_sfx}_unlimited=0" ;;
+					esac ;;
 				off)
 					_pcset "@$_m[$_i].${_sfx}_unlimited=1" ;;
 				'')
 					# 只有真的处在「按星期」时代的老条目才推窗口；已经是新模型的条目
 					# 完全不动（这样"只配了某一边档案"的条目不会被造出另一边）
 					if [ "$_had_dual" = 0 ]; then
-						eval "_on=\$_has_$_sfx"
+						if [ "$_sfx" = "sd" ]; then _on=$_has_sd; else _on=$_has_hd; fi
 						_pcset "@$_m[$_i].${_sfx}_unlimited=1"
 						if [ -n "$_w" ] && [ "$_on" = 1 ]; then
 							_ws=09:00:00; _we=21:00:00

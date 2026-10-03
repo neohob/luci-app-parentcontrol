@@ -32,23 +32,43 @@ local function get(map, section, key)
 	return map:get(section, key)
 end
 
--- 档案摘要：平日 / 节假日 各自的模式
+-- 共享池的该档案额度（与后端 pc_pool_quota 同口径）：返回 nil / "" = 池没填额度 = 不限额
+local function pool_quota(map, pool, sfx)
+	if not pool or pool == "" then return nil end
+	local found
+	map.uci:foreach("parentcontrol", "quota", function(s)
+		if not found and s.name == pool then
+			local v = s[sfx .. "_quota"]
+			if v == nil or v == "" then v = s.quota end
+			found = v
+		end
+	end)
+	return found
+end
+
+-- 档案摘要：平日 / 节假日 各自的「可用时段 + 额度」。
+-- 判定必须与后端 pc_entry_unlimited 同源，否则会出现「界面说不限、其实全天全禁」这种反向矛盾。
 function M.profiles(self, section)
 	local map = self.map
 	local function one(sfx, label)
 		local q = get(map, section, sfx .. "_quota")
 		local p = get(map, section, sfx .. "_pool")
+		local unl = get(map, section, sfx .. "_unlimited")
 		local st
-		if get(map, section, sfx .. "_unlimited") == "1" then
+		if unl == "1" then
 			st = label .. " " .. i18n.translate("不限额度")
 		elseif q and q ~= "" then
 			st = label .. " " .. q .. i18n.translate("分钟")
-		elseif not (p and p ~= "") then
-			st = label .. " " .. i18n.translate("不限")
+		elseif p and p ~= "" then
+			-- 额度交给共享池：池有额度 → 只显示 @池名（下面统一补）；池没额度 → 不限额
+			local pq = pool_quota(map, p, sfx)
+			if pq and pq ~= "" then st = label
+			else st = label .. " " .. i18n.translate("不限额度") end
+		elseif unl == "0" then
+			-- 显式关掉「不限额度」又没有任何额度来源 → 后端判 0 分钟 = 全天全禁
+			st = label .. " 0 " .. i18n.translate("分钟")
 		else
-			-- 自己没填额度但挂了共享池：限制由池负责（与后端 pc_entry_unlimited 同一口径），
-			-- 这里不能写「不限」，否则和实际的池限流互相矛盾。池名在下面统一补 @池名。
-			st = label
+			st = label .. " " .. i18n.translate("不限")
 		end
 		-- 时段不是全天时附上，列表里一眼看出"只在几点到几点能用"
 		local ws = get(map, section, sfx .. "_qstart")
@@ -95,7 +115,8 @@ function M.used(self, section, typ)
 	if rec.quota > 0 then
 		return string.format("%d / %d %s", rec.used, rec.quota, i18n.translate("分钟"))
 	end
-	return string.format("%d %s", rec.used, i18n.translate("分钟"))
+	-- 额度 0 = 全天全禁（一分钟都不给），照实显示成 已用/0
+	return string.format("%d / 0 %s", rec.used, i18n.translate("分钟"))
 end
 
 return M
