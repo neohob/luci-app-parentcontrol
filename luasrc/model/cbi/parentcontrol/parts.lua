@@ -41,7 +41,11 @@ function M.validate_window(self, value)
 	local ok, err = M.validate_time(self, value)
 	if not ok then return nil, err end
 	local is_start = self.option:find("_qstart$") ~= nil
-	local other = submitted(self, self.option:gsub("_qstart$", "_qend"):gsub("_qend$", "_qstart"))
+	-- 注意：不能写成 gsub("_qstart$","_qend"):gsub("_qend$","_qstart") —— 来回替换会转回自己，
+	-- 于是 a>=b 恒真、每个合法的"起"都被判错、编辑页存不了盘（真机上踩过）。
+	local other = submitted(self, is_start
+		and self.option:gsub("_qstart$", "_qend")
+		or  self.option:gsub("_qend$",  "_qstart"))
 	if other and other ~= "" then
 		local a, b = to_sec(value), to_sec(other)
 		if a and b then

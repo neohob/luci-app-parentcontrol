@@ -86,10 +86,9 @@ function M.mac(self, section)
 end
 
 -- 今天该条目是不是「每日额度」模式：是则返回 "<模块>_<下标>"，否则返回 ""
+-- 列表页「重置」按钮的 key：统一模型下没有模式了，任何条目都能重置当天用量，
+-- 所以恒返回 "<模块>_<下标>"（重置不限额度的条目也无害）。
 function M.quota_key(self, section, typ)
-	local sfx = ((M.usage_map().day or {}).type == "holiday") and "hd" or "sd"
-	local mode = self.map:get(section, sfx .. "_mode") or "time"
-	if mode ~= "quota" then return "" end
 	local idx = M.section_indexes(self.map, typ)[section]
 	if idx == nil then return "" end
 	return typ .. "_" .. idx
