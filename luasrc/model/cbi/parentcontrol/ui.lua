@@ -32,6 +32,14 @@ local function get(map, section, key)
 	return map:get(section, key)
 end
 
+-- 与后端 pc_quota_positive 同口径的归一：纯数字 → 该数；非纯数字 → 0（新语义 0 = 全禁）；
+-- 空/没填 → nil（表示"没有这个额度来源"，由调用方继续往下判）
+local function qmin(v)
+	if v == nil or v == "" then return nil end
+	if v:match("^%d+$") then return tonumber(v) end
+	return 0
+end
+
 -- 共享池的该档案额度（与后端 pc_pool_quota 同口径）：返回 nil / "" = 池没填额度 = 不限额
 local function pool_quota(map, pool, sfx)
 	if not pool or pool == "" then return nil end
@@ -54,18 +62,21 @@ function M.profiles(self, section)
 		local q = get(map, section, sfx .. "_quota")
 		local p = get(map, section, sfx .. "_pool")
 		local unl = get(map, section, sfx .. "_unlimited")
-		local pq = pool_quota(map, p, sfx)          -- nil / "" = 池没额度（含根本没挂池）
+		local pqn = qmin(pool_quota(map, p, sfx))   -- nil = 池没额度（含根本没挂池）
+		local qn = qmin(q)                         -- nil = 没自填额度
 		local st
 		-- 判定顺序必须与后端 pc_entry_unlimited + entry_effective 完全一致：
 		--   ① 勾了不限 → 不限；② 挂了池且池有额度 → 池优先（entry_effective 就是池优先）；
 		--   ③ 自填额度；④ 显式关掉不限且没有任何额度来源 → 后端判 0 分钟 = 全天全禁；
 		--   ⑤ 挂了池但池没额度 → 不限；⑥ 什么都没有 → 不限
+		-- 额度值一律经 qmin 归一后再显示，否则界面会把 "+5" 这类脏值原样显示、
+		-- 而后端其实把它归 0（= 全禁），又变成两套口径。
 		if unl == "1" then
 			st = label .. " " .. i18n.translate("不限额度")
-		elseif pq and pq ~= "" then
-			st = label .. " " .. pq .. i18n.translate("分钟")
-		elseif q and q ~= "" then
-			st = label .. " " .. q .. i18n.translate("分钟")
+		elseif pqn then
+			st = label .. " " .. pqn .. i18n.translate("分钟")
+		elseif qn then
+			st = label .. " " .. qn .. i18n.translate("分钟")
 		elseif unl == "0" then
 			st = label .. " 0 " .. i18n.translate("分钟")
 		elseif p and p ~= "" then
