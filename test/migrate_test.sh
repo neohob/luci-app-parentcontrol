@@ -153,34 +153,65 @@ pc_migrate_config
 t_eq '老 quota=30 → unlimited=0' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq '额度不动' '30' "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
 
-echo '== B1′ 防线：老额度是负数/非数字/00 等脏值（老判据 [ "$q" -gt 0 ] 下都=不限）=='
-# 注意：老判据是 [ "$q" -gt 0 ]，ash 认 "+5" 是正数，所以 +5 当年确实是"限 5 分钟"，
-# 迁移必须保持"有限额"（不能因为它是脏值就压成不限）；而 -1/abc/00 当年都=不限。
-for bad in -1 abc 00; do
+echo '== B1′/B1″ 防线：老额度为空/0/负数/非数字/脏值 → 老语义都=不限，迁移后必须真不限 =='
+# 关键：老配置里普遍**已经带着** sd_unlimited='0'（中间版本写的），而迁移这一类必须
+# 强制改写这个开关 —— 只在"没设过"时写的话，就会把「不限」翻译成新语义的全天全禁（B1″）。
+# 判据也不是"原始值 -gt 0"，而是老版本用的归一器 pc_quota_positive（老白名单）：
+# "+5"/" 5"/"00" 这些在老语义里同样被归 0 = 不限（S1′）。
+for bad in '' 0 -1 abc 00 +5 ' 5'; do
 	cfg_reset
 	cat > "$T_TMP/bad.uci" <<EOF
 config weburl
 	option enable '1'
 	option sd_mode 'quota'
+	option sd_unlimited '0'
 	option sd_quota '$bad'
 EOF
 	cfg_load parentcontrol "$T_TMP/bad.uci"
 	pc_migrate_config
-	t_eq "老 quota=$bad → 不限（不得判成全禁）" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+	t_eq "老 quota='$bad' + stale unlimited=0 → unlimited=1" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+	t_eq "老 quota='$bad' → 运行时口径也判不限（端到端）" '1' "$(pc_entry_unlimited weburl 0 school)"
 done
+
+echo '== 老额度是正数 → 仍按有限额（不能被"非空即不限"误放）=='
 cfg_reset
-cat > "$T_TMP/bad2.uci" <<'EOF'
+cat > "$T_TMP/ok.uci" <<'EOF'
 config weburl
 	option enable '1'
 	option sd_mode 'quota'
-	option sd_quota '+5'
+	option sd_unlimited '0'
+	option sd_quota '30'
 EOF
-cfg_load parentcontrol "$T_TMP/bad2.uci"
+cfg_load parentcontrol "$T_TMP/ok.uci"
 pc_migrate_config
-t_eq '老 quota=+5 → 仍按有限额（老判据认它是正数）' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
-t_eq 'pc_quota_positive 保住 +5 的数值（不得压成 0=全禁）' '5' "$(pc_quota_positive '+5')"
-t_eq 'pc_quota_positive 对 abc → 0' '0' "$(pc_quota_positive 'abc')"
-t_eq 'pc_quota_positive 对 -3 → 0' '0' "$(pc_quota_positive '-3')"
-t_eq 'pc_quota_positive 对 30 → 30' '30' "$(pc_quota_positive '30')"
+t_eq '老 quota=30 → unlimited=0' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+t_eq '老 quota=30 → 运行时口径 = 有限额' '0' "$(pc_entry_unlimited weburl 0 school)"
+t_eq '额度值原样保留' '30' "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
+
+echo '== S2′ 防线：老 quota 分支必须照 entry_effective 的池优先 —— 挂了有额度的池 = 有限额 =='
+cfg_reset
+cat > "$T_TMP/poolq.uci" <<'EOF'
+config quota
+	option name 'kid1'
+	option sd_quota '60'
+
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_unlimited '0'
+	option sd_quota '0'
+	option sd_pool 'kid1'
+EOF
+cfg_load parentcontrol "$T_TMP/poolq.uci"
+pc_migrate_config
+t_eq '挂了有额度的池 → 仍按有限额（不得静默解封）' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+t_eq '运行时口径 = 有限额' '0' "$(pc_entry_unlimited weburl 0 school)"
+
+echo '== 归一器口径（迁移与运行共用同一套）=='
+t_eq '空 → 0' '0' "$(pc_quota_positive '')"
+t_eq '非数字 → 0' '0' "$(pc_quota_positive abc)"
+t_eq '+5 → 0（老白名单口径）' '0' "$(pc_quota_positive '+5')"
+t_eq ' 5 → 0（老白名单口径）' '0' "$(pc_quota_positive ' 5')"
+t_eq '30 → 30' '30' "$(pc_quota_positive 30)"
 
 t_summary
