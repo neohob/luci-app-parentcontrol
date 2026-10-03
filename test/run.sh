@@ -18,6 +18,7 @@ python3 "$HERE/lint_luci_globals.py" "$REPO"/luasrc/model/cbi/parentcontrol/*.lu
 printf '\n########## lint: TSV 只能有一份解析器 ##########\n'
 # stats_tsv 的列只有 tsv.lua 能解析。历史上 ui.lua 和 statsdata.lua 各写了一份按下标解析，
 # shell 侧改了列之后其中一个漏改，那一整列就静默显示错值（"-" / 错位数字）—— 用这条守住。
+# 注意：这只是个绊线（只扫本目录一层、只认字面 \t），不是契约测试；真要硬保证得用 Lua 断言。
 tsv_bad=$(grep -l '\\t' "$REPO"/luasrc/model/cbi/parentcontrol/*.lua | grep -v '/tsv\.lua$')
 if [ -n "$tsv_bad" ]; then
 	echo "FAIL: 以下文件自己解析 TSV（只允许 tsv.lua 解析）:"

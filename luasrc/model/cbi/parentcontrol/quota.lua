@@ -28,7 +28,7 @@ t.anonymous = true
 t.addremove = true
 
 t:option(Value, "name", translate("组名"),
-	translate("条目在额度模式里填这个组名即并入。"))
+	translate("条目在档案里填这个组名即并入（也可以自己不填额度、完全交给池）。"))
 
 e = t:option(Value, "sd_quota", translate("平日(分钟)"))
 e.datatype = "uinteger"

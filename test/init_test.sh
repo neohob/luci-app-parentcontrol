@@ -447,6 +447,9 @@ EOF
 cfg_apply
 FAKE_DATE_HM=13:00
 run_build
+# run_build 内部（build_acct_rules）自己会先采样一次，base 文件已经存在了。
+# 想验「首次采样」这条路，必须先把 base 清掉，否则走的是增量分支。
+rm -f "$STATE_DIR"/base.*
 t_eq '首次采样：无流量不计数' 0 "$(sample_counters; pc_usage_get weburl_0)"
 ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 40960   # +40KB ≥ 32KB
 sample_counters
@@ -466,6 +469,7 @@ EOF
 cfg_apply
 FAKE_DATE_HM=13:00
 run_build
+rm -f "$STATE_DIR"/base.*   # 必须真的没有 base 文件，才是在验首次采样
 ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 40960
 t_eq '首次采样（无 base）即计入' 1 "$(sample_counters; pc_usage_get weburl_0)"
 ipt_setcounters v4 mangle PARENTCONTROL_ACCT PCA_weburl_0 41984   # +1KB < 32KB
