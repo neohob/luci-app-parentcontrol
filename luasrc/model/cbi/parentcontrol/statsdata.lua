@@ -104,7 +104,7 @@ function M.collect()
 				e.projected = math.floor(e.used * 1440 / elapsed)
 			end
 		else
-			# 勾了「不限额度」：只判时段，额度不构成限制
+			-- 勾了「不限额度」：只判时段，额度不构成限制
 			e.remain, e.pct, e.status = nil, 0, info("不限额度")
 		end
 	end
