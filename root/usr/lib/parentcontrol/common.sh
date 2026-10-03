@@ -133,9 +133,10 @@ pc_utc_ranges() { # $1=起秒 $2=止秒
 }
 
 # 该条目今天是否勾了「不限额度」（输出 1=不限）。
-# 这是全仓唯一的「谁受额度限制」判定口径：build_quota_blocks / pool_usage / stats_tsv / 列表页 都读它。
+# 这是 shell 侧唯一的「谁受额度限制」判定口径：build_quota_blocks / pool_usage / stats_tsv 都读它
+# （ui.lua 渲染列表时因不能调 shell 而有一份镜像，改这里要同步改它）。
 pc_entry_unlimited() { # $1=module $2=idx $3=school|holiday
-	local _v _q _p _pq
+	local _v _q
 	_v=$(pc_uget "@$1[$2].$(pc_suffix "$3")_unlimited")
 	[ "$_v" = "1" ] && { echo 1; return 0; }
 	[ -n "$_v" ] && { echo 0; return 0; }          # 显式写了 0 → 按有限额处理
@@ -222,7 +223,7 @@ pc_entry_quota() {
 }
 
 # 该条目今天从共享池拿到的额度（空 = 池没提供额度）。
-# 「池是否提供额度」这个判据全仓只此一处 —— pc_entry_unlimited / entry_effective /
+# 「池是否提供额度」这个判据 shell 侧只此一处（ui.lua 有镜像）—— pc_entry_unlimited / entry_effective /
 # pc_effective_quota 都读它，别再各自内联 `pc_pool_quota && [ -n ... ]`。
 pc_pool_provided_quota() { # $1=module $2=idx $3=school|holiday
 	local _p
@@ -375,9 +376,10 @@ pc_migrate_config() {
 					# 已知的不可判别之处（不要再试图用标记去猜）：我的中间开发版 a0c7936 曾短暂把
 					# 「额度 0/空」定义成"全天禁止"，那种配置与老配置**形状完全一样**，没有任何字段
 					# 能区分（试过用 week 当标记：无 week 会被误判成全禁、有 week 会被误判成不限，
-					# 两个方向都是 bug，已放弃）。这里统一按**额度模型早期的老判据**解释 —— 对真实用户来说
-					# 那才是历史上一直成立的约定；受影响的只有"用过那个中间开发版、并把额度填 0
-					# 表示全天禁止"的极窄情况，迁移会为这类条目打日志，README 也写明了怎么复核。
+					# 两个方向都是 bug，已放弃）。这里统一按**额度模型早期的老判据**解释：
+					# 该判据从额度模型引入（8ab43a2）起一直沿用到 a0c7936 之前。受影响的只有
+					# "用过那个中间开发版、并把额度填 0 表示全天禁止"的极窄情况，迁移会为这类
+					# 条目打日志，README 也写明了怎么复核。
 					# 注意 entry_effective 是池优先：判定必须跟着它走。
 					_unl=0
 					[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
