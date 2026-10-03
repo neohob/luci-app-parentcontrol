@@ -1,16 +1,20 @@
 <% include("cbi/map") %>
 <style type="text/css">
 	/* 勾了「不限额度」→ 收起同档案的「每日分钟」和「共享组」两行。
+	   选择器刻意**不引用 input 的 id**：这台机上 Checkbox 的 <input> 拿不到
+	   label[for] 指的那个 id（浏览器会报 "Incorrect use of <label for=FORM_ELEMENT>"），
+	   所以按 input[id$=...] 永远选不中；这里只靠**行 div 的 id**（服务端渲染的，稳定）
+	   + 行内有 checked 的 checkbox。
 	   为什么用 CSS 而不是 JS：
 	     1) 这台路由器是 LuCI 的新式 JS 控件渲染（字段以 data-ui-widget 形式由前端 js
 	        注入真正的 <input>），JS 里按 id 找控件会有"跑得比控件渲染还早"的时机问题；
 	     2) LuCI 在 Flag 改变时会 cbi_d_update() 重渲染字段 DOM，JS 设的行内样式会被冲掉。
 	   :has() 是声明式的：勾上/取消的那一刻立即生效，与渲染时机无关。
 	   ~ 是兄弟选择器：quota/pool 两行都排在该档案「不限额度」那一行之后。 */
-	.cbi-value:has(input[id$=".sd_unlimited"]:checked) ~ .cbi-value[id$="-sd_quota"],
-	.cbi-value:has(input[id$=".sd_unlimited"]:checked) ~ .cbi-value[id$="-sd_pool"],
-	.cbi-value:has(input[id$=".hd_unlimited"]:checked) ~ .cbi-value[id$="-hd_quota"],
-	.cbi-value:has(input[id$=".hd_unlimited"]:checked) ~ .cbi-value[id$="-hd_pool"] {
+	.cbi-value[id$="-sd_unlimited"]:has(input:checked) ~ .cbi-value[id$="-sd_quota"],
+	.cbi-value[id$="-sd_unlimited"]:has(input:checked) ~ .cbi-value[id$="-sd_pool"],
+	.cbi-value[id$="-hd_unlimited"]:has(input:checked) ~ .cbi-value[id$="-hd_quota"],
+	.cbi-value[id$="-hd_unlimited"]:has(input:checked) ~ .cbi-value[id$="-hd_pool"] {
 		display: none !important;
 	}
 	/* 平日 / 节假日两组的字段原来是一长串堆在一起，看不出分组：
