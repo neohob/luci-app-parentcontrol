@@ -358,6 +358,58 @@ Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)
 t_has '池内合计 60/60 → 成员0 被封' "$Q" '-m mac --mac-source 00:00:5e:00:53:01 -d 1.2.3.0/24 -j DROP'
 t_has '池内合计 60/60 → 成员1 被封' "$Q" '-m mac --mac-source aa:bb:cc:dd:ee:ff -d 1.2.3.0/24 -j DROP'
 
+echo '== entry_effective 的分支键必须是「池里确实有额度」，不是「挂了池」=='
+# 回归背景：曾把分支键写成 `[ -n "$_pool" ]`，于是"挂了池但池没额度"的条目会改用
+# pool_usage、丢掉池名、额度归一也跟着变，封锁判定与看板一起错。两种池都要钉住。
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config quota
+	option name 'nq'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_quota '30'
+	option sd_pool 'nq'
+config weburl
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option domains 'example.com'
+	option sd_quota '40'
+	option sd_pool 'nq'
+EOF
+cfg_apply
+pc_usage_add weburl_0 30
+# 关键：第二个成员也要**有限额**，否则它算"不限额度"、会被 pool_usage 跳过，
+# 池内合计就仍等于 weburl_0 自己的 30，这条断言就分辨不出分支键。
+pc_usage_add weburl_1 20
+t_eq '池内合计(50) 确实不等于条目自己(30)，下面这条才有鉴别力' '50' "$(pool_usage nq school)"
+t_eq '挂「没填额度」的池 → 用条目自己的额度/用量（30 30 nq，不是池内合计）' '30 30 nq' "$(entry_effective weburl 0 school)"
+
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config quota
+	option name 'wq'
+	option sd_quota '60'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_quota '30'
+	option sd_pool 'wq'
+config weburl
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option domains 'example.com'
+	option sd_pool 'wq'
+EOF
+cfg_apply
+pc_usage_add weburl_0 30
+pc_usage_add weburl_1 20
+t_eq '挂「有额度」的池 → 用池的额度/池内合计（60 50 wq）' '60 50 wq' "$(entry_effective weburl 0 school)"
+
 echo '== 防自锁：到局域网/路由器自身的流量必须放行 =='
 fresh
 cfg_begin 1

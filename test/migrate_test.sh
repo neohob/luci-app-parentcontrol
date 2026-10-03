@@ -127,7 +127,7 @@ t_eq '未凭空造出平日档案（sd_quota 应为空）' '' "$(cfg_get parentc
 t_eq '未凭空造出平日时段' '-' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)-$(cfg_get parentcontrol.@weburl[0].sd_qend)"
 t_eq 'week 残留已清掉' '' "$(cfg_get parentcontrol.@weburl[0].week)"
 
-echo '== B1′/B1″ 防线：老额度为空/0/负数/非数字/脏值 → 发布版语义都是"不限"，迁移必须真不限 =='
+echo '== B1′/B1″ 防线：老额度为空/0/负数/非数字/脏值 → 老判据（8ab43a2..a0c7936 之前）都是"不限" =='
 # 关键 1：老配置里普遍已带着 sd_unlimited='0'（中间版本写的），所以必须**强制改写**开关；
 #         只在"没设过"时才写，就会把「不限」翻译成新语义的全天全禁。
 # 关键 2：这条形状**没有可靠的年代标记** —— 评审实测用 week 做标记时两个方向都会误判
