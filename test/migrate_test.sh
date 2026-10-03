@@ -58,7 +58,9 @@ t_eq 'sd_mode 已统一为 quota → 模式键已删除（统一模型没有模�
 t_eq 'sd_unlimited=1（原时段无额度）' 1 "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq 'sd 可用时段 起' '09:00:00' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)"
 t_eq 'sd 可用时段 止' '21:00:00' "$(cfg_get parentcontrol.@weburl[0].sd_qend)"
-t_eq 'sd_start 老字段保留未动' '08:00' "$(cfg_get parentcontrol.@weburl[0].sd_start)"
+t_eq 'sd_start 老键已删除（N2：与统一模型字段并存的死字段会误导维护者）' '' "$(cfg_get parentcontrol.@weburl[0].sd_start)"
+t_eq 'week 老键已删除（断掉重跑触发源）' '' "$(cfg_get parentcontrol.@weburl[0].week)"
+t_eq 'timestart 老键已删除' '' "$(cfg_get parentcontrol.@weburl[0].timestart)"
 t_eq 'hd_mode=off → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[0].hd_mode)"
 t_eq 'hd 起止未写' '' "$(cfg_get parentcontrol.@weburl[0].hd_start)"
 
@@ -103,6 +105,26 @@ t_eq '已有 sd_mode → 不覆盖 → 模式键已删除（统一模型没有�
 t_eq '已有 sd_mode → 不补 hd_mode' '' "$(cfg_get parentcontrol.@weburl[0].hd_mode)"
 t_eq '已有额度 → unlimited 补 0' 0 "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq '已有额度 → 额度不动' 30 "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
-t_eq '已有额度 → 补可用时段' '09:00:00-21:00:00' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)-$(cfg_get parentcontrol.@weburl[0].sd_qend)"
+t_eq '已有额度 → 不加时段（老额度模式本来 24h 可用，别静默收紧成 12h）' '-' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)-$(cfg_get parentcontrol.@weburl[0].sd_qend)"
+
+echo '== B1 防线：只配了节假日档案 + 残留 week → 不得覆盖已设值，也不得凭空造出平日档案 =='
+cfg_reset
+cat > "$T_TMP/hdonly.uci" <<'EOF'
+config weburl
+	option enable '1'
+	option week '1,2,3'
+	option hd_unlimited '0'
+	option hd_quota '30'
+	option hd_qstart '08:00:00'
+	option hd_qend '20:00:00'
+EOF
+cfg_load parentcontrol "$T_TMP/hdonly.uci"
+pc_migrate_config
+t_eq 'hd 额度未被覆盖' '30' "$(cfg_get parentcontrol.@weburl[0].hd_quota)"
+t_eq 'hd_unlimited 未被改成 1（老 bug：会被无条件写 1 → 升级后静默解封）' '0' "$(cfg_get parentcontrol.@weburl[0].hd_unlimited)"
+t_eq 'hd 时段未被改成 00:00:00-23:59:59' '08:00:00-20:00:00' "$(cfg_get parentcontrol.@weburl[0].hd_qstart)-$(cfg_get parentcontrol.@weburl[0].hd_qend)"
+t_eq '未凭空造出平日档案（sd_quota 应为空）' '' "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
+t_eq '未凭空造出平日时段' '-' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)-$(cfg_get parentcontrol.@weburl[0].sd_qend)"
+t_eq 'week 残留已清掉' '' "$(cfg_get parentcontrol.@weburl[0].week)"
 
 t_summary

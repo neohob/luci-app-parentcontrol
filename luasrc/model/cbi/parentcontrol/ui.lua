@@ -2,29 +2,16 @@
 -- 注意：本文件是被 require 的子模块，LuCI 注入的全局（translate 等）在这里不可用，
 -- 必须显式 require。
 local i18n = require "luci.i18n"
-local sys = require "luci.sys"
-local util = require "luci.util"
 local devnames = require "luci.model.cbi.parentcontrol.devnames"
+local tsv = require "luci.model.cbi.parentcontrol.tsv"
 
 local M = {}
 
--- 每请求缓存一次 stats_tsv brief 的结果（列表页只要 meta + entry 两行，不跑历史/计数器）
+-- 每请求缓存一次 stats_tsv brief（列表页只要 meta + entry 两行，不跑历史/计数器）。
+-- 解析一律走 tsv.lua：列定义只有那一份，避免改列后这里静默读错。
 local _usage
 function M.usage_map()
-	if _usage then return _usage end
-	_usage = {}
-	local out = sys.exec("/etc/init.d/parentcontrol stats_tsv brief 2>/dev/null") or ""
-	for _, line in ipairs(util.split(out, "\n")) do
-		local f = util.split(line, "\t")
-		if f[1] == "meta" then
-			_usage.day = { day = f[2], type = f[3], reset = f[4], issued = (f[5] == "1") }
-		elseif f[1] == "entry" then
-			-- entry: key module idx 备注 mac 模式 额度 已用 池 本分钟KB
-			_usage[f[2]] = {
-				mode = f[6] or "", quota = tonumber(f[7]) or 0, used = tonumber(f[8]) or 0,
-			}
-		end
-	end
+	if not _usage then _usage = tsv.read(true) end
 	return _usage
 end
 
@@ -54,10 +41,14 @@ function M.profiles(self, section)
 		local st
 		if get(map, section, sfx .. "_unlimited") == "1" then
 			st = label .. " " .. i18n.translate("不限额度")
-		elseif not q or q == "" then
+		elseif q and q ~= "" then
+			st = label .. " " .. q .. i18n.translate("分钟")
+		elseif not (p and p ~= "") then
 			st = label .. " " .. i18n.translate("不限")
 		else
-			st = label .. " " .. q .. i18n.translate("分钟")
+			-- 自己没填额度但挂了共享池：限制由池负责（与后端 pc_entry_unlimited 同一口径），
+			-- 这里不能写「不限」，否则和实际的池限流互相矛盾。池名在下面统一补 @池名。
+			st = label
 		end
 		-- 时段不是全天时附上，列表里一眼看出"只在几点到几点能用"
 		local ws = get(map, section, sfx .. "_qstart")
@@ -85,7 +76,6 @@ function M.mac(self, section)
 	return table.concat(out, " / ")
 end
 
--- 今天该条目是不是「每日额度」模式：是则返回 "<模块>_<下标>"，否则返回 ""
 -- 列表页「重置」按钮的 key：统一模型下没有模式了，任何条目都能重置当天用量，
 -- 所以恒返回 "<模块>_<下标>"（重置不限额度的条目也无害）。
 function M.quota_key(self, section, typ)
@@ -95,11 +85,13 @@ function M.quota_key(self, section, typ)
 end
 
 -- 今日额度（只对处于额度模式的条目有值；池成员显示池的合计）
+-- 今日额度：不限额度 → 「不限」；否则「已用 / 额度 分钟」（额度 0 = 全禁，显示成 0/0）。
 function M.used(self, section, typ)
 	local u = M.usage_map()
 	local i = M.section_indexes(self.map, typ)[section]
-	local rec = i and u[typ .. "_" .. i]
-	if not rec or rec.mode ~= "quota" then return "-" end
+	local rec = i and u.by_key[typ .. "_" .. i]
+	if not rec then return "-" end
+	if rec.unlimited then return i18n.translate("不限") end
 	if rec.quota > 0 then
 		return string.format("%d / %d %s", rec.used, rec.quota, i18n.translate("分钟"))
 	end

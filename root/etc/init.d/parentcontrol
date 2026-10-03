@@ -426,8 +426,9 @@ block_entry() { # $1=module $2=idx
 	emit_entry_targets "$1" "$2" mangle "$TAGQ" "$TAGQ" "" "-j DROP" all
 }
 
-# 条目生效的额度/已用：池优先；池不存在或没额度则用条目自己的。
-# 输出 "<quota> <used>"（quota=0 表示不限）。封锁与看板共用，保证两者一致。
+# 条目生效的额度/已用：挂了池且池有额度就用池的，否则用条目自己的。
+# 输出 "<额度> <已用> <池名>"。注意 额度 0 = 一分钟都不给（全禁），不是"不限"；
+# 到底受不受额度限制由 pc_entry_unlimited 判定，封锁链/看板/列表页都读同一份。
 entry_effective() { # $1=module $2=idx $3=school|holiday
 	local _pool _pq
 	_pool=$(pc_entry_pool "$1" "$2" "$3")
@@ -598,12 +599,6 @@ prune_usage() {
 	return 0
 }
 
-# 用量看板数据：shell 只输出 TSV，Lua 侧再转 JSON
-# （避免在 shell 里手拼 JSON 的转义问题）。行格式：
-#   day    <日期> <school|holiday> <重置> <0|1已发放>
-#   item   <条目> <已用分钟> <额度分钟,0=不限>
-#   history <YYYYMMDD> <当天总分钟>
-
 # 池成员（"module[idx]" 列表）
 pool_members() { # $1=池名 $2=school|holiday
 	local _m _i
@@ -674,7 +669,7 @@ reset_quota() {
 		_pname=${_arg#pool:}
 		case "$_pname" in ''|*[!A-Za-z0-9_.-]*) elog "reset_quota: 非法池名"; return 1 ;; esac
 		# 池：逐成员清数据，但只在最后重建一次封锁链（原先每个成员重建一次 = O(N²) 条 iptables）
-		for _m in time protocol weburl; do
+		for _m in $PC_MODULES; do
 			for _i in $(pc_ids_on "$_m"); do
 				[ "$(pc_entry_pool "$_m" "$_i" "$(pc_today_type)")" = "$_pname" ] || continue
 				reset_one "${_m}_${_i}" >/dev/null
@@ -697,12 +692,15 @@ reset_quota() {
 	return 0
 }
 
-# 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
+# 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）。
+# 列定义同时写在 luasrc/model/cbi/parentcontrol/tsv.lua（唯一解析器），改列必须两边一起改。
+#   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
 #   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
 #   entry    <key> <module> <idx> <备注> <mac> <额度> <已用> <池> <本分钟KB> <不限额度>
-#   pool     <池名> <额度> <已用> <成员,逗号分隔>
+#   pool     <池名> <额度|空=不限> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
+#   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）
 #   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
 #   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
@@ -725,7 +723,7 @@ stats_tsv() {
 		mkdir -p "$STATE_DIR"; _dump="$STATE_DIR/acct.stats.$$"; dump_acct "$_dump"
 	fi
 	# 所有「已启用」条目（含时段模式，看板需要完整信息）
-	for _m in time protocol weburl; do
+	for _m in $PC_MODULES; do
 		for _i in $(pc_ids_on "$_m"); do
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
@@ -744,7 +742,7 @@ stats_tsv() {
 		# 共享池
 		for _i in $(pc_ids_all quota); do
 			_n=$(pc_uget "@quota[$_i].name"); [ -n "$_n" ] || continue
-			_q=$(pc_quota_positive "$(pc_pool_quota "$_n" "$_tt")")
+			_q=$(pc_pool_quota "$_n" "$_tt")   # 原样输出：空串 = 不限（pc_quota_positive 会把空压成 0=全禁，信息丢失）
 			_u=$(pool_usage "$_n" "$_tt")
 			printf 'pool\t%s\t%s\t%s\t%s\n' "$_n" "$_q" "$_u" \
 				"$(pool_members "$_n" "$_tt" | tr '\n' ',' | sed 's/,$//')"

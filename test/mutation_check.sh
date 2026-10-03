@@ -55,7 +55,7 @@ run_mut 'SNI 端口 80,443→80,8443' "$INIT" \
 
 # 2) 网址 TCP/SNI 那条规则整条不装（就是本次修掉的真 bug 的形态）
 run_mut 'SNI 规则整条删除' "$INIT" \
-	'emit_dev_rule "$_c" "$2" "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"' '' init_test.sh
+	'			emit_dev_rule "$_c" "$1" "$3" weburl "$6" "$4 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$5" "$_dev"' ':' init_test.sh
 
 # 3) PREROUTING 挂载顺序被改（TAGQ 不再最先 → 被封的包会先进计数链）
 run_mut 'PREROUTING 顺序被改' "$INIT" \
@@ -73,9 +73,9 @@ run_mut 'refresh_holiday 永不联网' "$INIT" \
 	'	[ "$1" = "novet" ] && return 0' '	return 0' init_test.sh
 
 # 5) 采样阈值失效（任何增量都记 1 分钟）
-run_mut '采样阈值失效' "$INIT" \
-	'			[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' \
-	'			pc_usage_add "$_key" 1' init_test.sh
+run_mut '采样阈值失效（任何非零增量都记 1 分钟）' "$INIT" \
+	'		[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' \
+	'		[ "$_d" -gt 0 ] && pc_usage_add "$_key" 1' init_test.sh
 
 # 6) 池额度被忽略（一律按私有额度）
 run_mut '共享池口径失效' "$INIT" \
@@ -97,20 +97,19 @@ run_mut '可用时段被忽略' "$COMMON" \
 run_mut 'isOffDay 判反' "$COMMON" \
 	'		true)  echo 1; return 0 ;;' '		true)  echo 0; return 0 ;;' common_test.sh
 
-# 10) 迁移：节假日档案不该设时也设成 time
-run_mut '迁移 hd_mode 恒为 time' "$COMMON" \
-	'				uci -q set "$PC_CONF.@$_m[$_i].hd_mode=off"' \
-	'				uci -q set "$PC_CONF.@$_m[$_i].hd_mode=time"' migrate_test.sh
+# 10) 迁移：不再写可用时段（week=1-5 的老条目本应拿到 09:00-21:00）
+run_mut '迁移不写可用时段' "$COMMON" \
+	'					_pcset "@$_m[$_i].${_sfx}_qstart=$_ws"' \
+	'					:' migrate_test.sh
 
-# 11) pc_quota_keys 不再过滤模式
-run_mut '额度遍历不再过滤模式' "$COMMON" \
-	'			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"' \
-	'			echo "${_m}_${_i}"' common_test.sh
+# 11) pc_active_keys 输出的 key 必须是唯一的一份（重复会让封锁链下发两遍）
+run_mut '额度遍历输出重复 key' "$COMMON" \
+	'			echo "${_m}_${_i}"' \
+	'			echo "${_m}_${_i}"; echo "${_m}_${_i}"' init_test.sh
 
 # 12b) 额度计数不再计入字符串（DNS/SNI）命中
-run_mut '计数不计字符串命中' "$INIT" \
-	'emit_weburl_targets "$TAGA" "$TAGA" "" "-j PCA_$_key" "$_i" single ;;' \
-	':' init_test.sh
+run_mut '计数不计 DNS 字符串命中' "$INIT" \
+	'			emit_dev_rule "$_c" "$1" "$3" weburl "$6" "$4 -p UDP --dport 53 -m string --algo $_algos --string $_pat" "$5" "$_dev"' ':' init_test.sh
 
 # 12c) 计数/封锁装到错误的表（filter 而非 mangle）
 run_mut '计数装错表(filter)' "$INIT" \
@@ -118,9 +117,10 @@ run_mut '计数装错表(filter)' "$INIT" \
 	'emit_entry_targets "$_m" "$_i" filter "$TAGA" "$TAGA" "" "-j PCA_$_key" single' init_test.sh
 
 # 12d) 首次采样又变回「只写基线」（丢开机后那段用量）
-run_mut '首次采样不计数' "$INIT" \
-	'\t\t\t_d=$_v\n\t\tfi\n\t\t[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' \
-	'\t\t\t_d=0\n\t\tfi\n\t\t[ "$_d" -ge "$_thr" ] && pc_usage_add "$_key" 1' init_test.sh
+run_mut '首次采样不计数（丢掉开机后那段用量）' "$INIT" \
+	'			_d=$_v
+		fi' '			_d=0
+		fi' init_test.sh
 
 # 12) 拆除时不清理 mangle 链
 run_mut '拆除残留 mangle 链' "$INIT" \
