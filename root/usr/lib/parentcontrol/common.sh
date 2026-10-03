@@ -249,11 +249,6 @@ pc_lan_nets() {
 		done
 }
 
-# 只在 uci 里没设过该项时才写。迁移幂等的关键：绝不覆盖用户已经设过的值。
-_pcset() { # $1=@type[idx].option=value
-	[ -n "$(pc_uget "${1%%=*}")" ] || uci -q set "$PC_CONF.$1"
-}
-
 # 额度的唯一归一器：非纯数字（空/"abc"/"-1"/"+5"/" 5"/"00"）一律归 0，纯数字原样输出。
 # 这是老版本（c4fe179..a1ae0e9）就在用的口径，迁移端也读它 —— 迁移与运行必须用
 # 同一套解析，否则同一个脏值会在两边得出不同结论（B1′/S1′ 的教训）。
@@ -348,27 +343,31 @@ pc_migrate_config() {
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0"
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 照抄老运行时的判定（c4fe179..a1ae0e9 的 build_quota_blocks）：
-					#   勾了不限(unlimited=1)                    → 不封
-					#   否则 entry_effective 的额度（归一后）<= 0 → 也不封（同一个意思：不限）
-					#   两者都不满足                              → 有限额
-					# 注意 entry_effective 是**池优先**（挂了池且池有额度 → 用池的额度）。
-					# 新语义里 0 = 全禁，所以「老=不限」必须**强制**写成 unlimited=1：
-					# 老配置里往往已经带着一个无意义的 unlimited=0，若只在没设过时才写，
-					# 就会把「不限」翻译成全天全禁（B1″）。
-					_unl=0
-					[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
-					if [ "$_unl" = 0 ]; then
-						if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
-						_eq=""
-						_p=$(pc_entry_pool "$_m" "$_i" "$_dt")
-						[ -n "$_p" ] && _eq=$(pc_pool_quota "$_p" "$_dt")
-						[ -n "$_eq" ] || _eq=$(pc_entry_quota "$_m" "$_i" "$_dt")
-						[ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null || _unl=1
-					fi
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=$_unl"
-					[ "$_unl" = 1 ] && \
-						_pclog "migrate: $_m[$_i] ${_sfx}: 老额度非正/非法（老语义=不限）→ 强制 不限额度" ;;
+					# 这里藏着**两种互斥的历史语义**，配置形状一模一样（`mode=quota` + 额度 + unlimited），
+					# 只能靠时代标记区分：
+					#   时代 A（有 week）：这条是从更早的「按星期」配置迁移过来的（c4fe179 那次迁移
+					#     在写 mode/unlimited 的同时**保留** week）。当年运行时的判定是
+					#     「勾了不限 **或** 归一后的有效额度 <= 0 → 不封」，即额度 <= 0 就是"不限"。
+					#   时代 B（没有 week）：这条是后来在双档案界面里配的（a0c7936 起已把
+					#     「额度 0/空」定义为全天禁止）。此时 unlimited=0 就是用户真要全禁。
+					# 所以：有 week 才按时代 A 的语言重算并强制改写（否则那个历史的 unlimited=0
+					# 会把"不限"翻译成全天全禁，B1″）；没有 week 就**完全不碰**，绝不把用户的
+					# 全天禁止静默解除。entry_effective 是**池优先**，判定必须跟着走。
+					if [ -n "$_w" ]; then
+						_unl=0
+						[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
+						if [ "$_unl" = 0 ]; then
+							if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
+							_eq=""
+							_p=$(pc_entry_pool "$_m" "$_i" "$_dt")
+							[ -n "$_p" ] && _eq=$(pc_pool_quota "$_p" "$_dt")
+							[ -n "$_eq" ] || _eq=$(pc_entry_quota "$_m" "$_i" "$_dt")
+							[ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null || _unl=1
+						fi
+						uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=$_unl"
+						[ "$_unl" = 1 ] && \
+							_pclog "migrate: $_m[$_i] ${_sfx}: 时代 A 的额度非正/非法（当年=不限）→ 不限额度"
+					fi ;;
 				off)
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1" ;;
 				'')
@@ -383,9 +382,11 @@ pc_migrate_config() {
 						fi
 					fi ;;
 				esac
-				# 只在确定存在"老时段限制"时才补窗口；其余一律不写时段
-				# （= 全天可用），避免把本来 24h 可用的条目静默收紧。
-				# mode 存在 = 这条一定还没被任何版本迁移过，窗口不会被用户改过 → 直接写
+				# 只在确定存在"老时段限制"时才补窗口；其余一律不写时段（= 全天可用），
+				# 避免把本来 24h 可用的条目静默收紧。mode 还在说明这条还没走完新模式迁移，
+				# 但**不等于**它从没被迁移过（c4fe179 那次迁移就保留了 mode，直到 005f1b1 才删），
+				# 所以这里只写 qstart/qend 这两个「新模式字段」，绝不碰 unlimited 之类的语义字段
+				# —— 那些字段的含义随时代变过，只能按上面的时代判定处理。
 				if [ -n "$_ws" ]; then
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=$_ws"
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=$_we"
