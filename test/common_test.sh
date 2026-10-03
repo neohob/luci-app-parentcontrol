@@ -111,31 +111,53 @@ FAKE_DATE_YMD=2028-06-06 FAKE_DATE_DOW=6
 t_eq '无该年数据 周六 → 降级节假日' holiday "$(pc_today_type)"
 
 # ============================================================
-echo '== pc_suffix / pc_reset_for / pc_allowance_issued =='
+echo '== pc_suffix / 时间换算（HH:MM:SS 秒级）=='
 t_eq 'suffix holiday→hd' hd "$(pc_suffix holiday)"
 t_eq 'suffix school→sd' sd "$(pc_suffix school)"
-cfg_reset
-cfg_set 'parentcontrol.@basic[0].reset_school' '07:30'
-t_eq 'reset 缺省 12:00' '12:00' "$(pc_reset_for holiday)"
-t_eq 'reset 自定义生效' '07:30' "$(pc_reset_for school)"
-FAKE_DATE_HM=07:29; t_eq '07:29 未发放' 1 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
-FAKE_DATE_HM=07:30; t_eq '07:30 恰好发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
-FAKE_DATE_HM=07:31; t_eq '07:31 已发放' 0 "$(pc_allowance_issued 07:30 && echo 0 || echo 1)"
-FAKE_DATE_HM=00:00; t_eq 'reset=00:00 恒已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
 t_eq 'HH:MM→分钟 08:05' 485 "$(pc_hhmm_to_min 08:05)"
-t_eq 'HH:MM→分钟 09:30' 570 "$(pc_hhmm_to_min 09:30)"
-t_eq 'HH:MM→分钟 00:00' 0 "$(pc_hhmm_to_min 00:00)"
 t_eq 'HH:MM→分钟 23:59' 1439 "$(pc_hhmm_to_min 23:59)"
 t_eq 'HH+MM 参数形式' 485 "$(pc_hhmm_to_min 08 05)"
-t_eq '空输入→0' 0 "$(pc_hhmm_to_min '')"
-t_eq '北京→UTC 08:00' '00:00' "$(pc_utc_hhmm 08:00)"
-t_eq '北京→UTC 18:00' '10:00' "$(pc_utc_hhmm 18:00)"
-t_eq '北京→UTC 00:00（跨日）' '16:00' "$(pc_utc_hhmm 00:00)"
-t_eq '北京→UTC 23:59（跨日）' '15:59' "$(pc_utc_hhmm 23:59)"
-t_eq '北京→UTC 12:00' '04:00' "$(pc_utc_hhmm 12:00)"
-FAKE_DATE_HM=08:05; t_eq '08:05 == 08:05 → 已发放' 0 "$(pc_allowance_issued 08:05 && echo 0 || echo 1)"
-FAKE_DATE_HM=08:04; t_eq '08:04 < 08:05 → 未发放' 1 "$(pc_allowance_issued 08:05 && echo 0 || echo 1)"
-FAKE_DATE_HM=23:59; t_eq '23:59 已发放' 0 "$(pc_allowance_issued 00:00 && echo 0 || echo 1)"
+t_eq 'HH:MM:SS→秒 09:00:00' 32400 "$(pc_hhmmss_to_sec 09:00:00)"
+t_eq 'HH:MM:SS→秒 23:59:59' 86399 "$(pc_hhmmss_to_sec 23:59:59)"
+t_eq 'HH:MM→秒（补 0 秒）' 32400 "$(pc_hhmmss_to_sec 09:00)"
+t_eq '秒→HH:MM:SS 09:00:00' '09:00:00' "$(pc_sec_hhmmss 32400)"
+t_eq '秒→HH:MM:SS 23:59:59' '23:59:59' "$(pc_sec_hhmmss 86399)"
+t_eq '非法 x → 空' '' "$(pc_hhmmss_to_sec x)"
+t_eq '24:00:00 → 空' '' "$(pc_hhmmss_to_sec 24:00:00)"
+t_eq '09:99:00 → 空' '' "$(pc_hhmmss_to_sec 09:99:00)"
+
+echo '== pc_utc_ranges：本地秒区间 → UTC（跨零点切两段）=='
+# 本地 00:00:00-08:59:59 → UTC 16:00:00-23:59:59 + 00:00:00-00:59:59
+t_eq '跨 UTC 零点切两段' '57600 86399
+0 3599' "$(pc_utc_ranges 0 32399)"
+t_eq '不跨 UTC 零点一段' '46801 57599' "$(pc_utc_ranges 75601 86399)"
+cfg_reset
+cfg_set 'parentcontrol.@weburl[0].sd_qstart' '09:00:00'
+cfg_set 'parentcontrol.@weburl[0].sd_qend' '21:00:00'
+t_eq '本地 09:00-21:00 → 时段外共 3 段（含跨 UTC 零点那段）' '57600 86399
+0 3599
+46801 57599' "$(pc_qwin_out_ranges weburl 0 school)"
+
+echo '== pc_qwin_sec / pc_entry_unlimited =='
+cfg_reset
+cfg_set 'parentcontrol.@weburl[0].sd_mode' 'quota'
+cfg_set 'parentcontrol.@weburl[0].sd_qstart' '09:00:00'
+cfg_set 'parentcontrol.@weburl[0].sd_qend' '21:00:00'
+t_eq '可用时段→秒' '32400 75600' "$(pc_qwin_sec weburl 0 school)"
+t_eq '未设时段→空（= 不限制）' '' "$(pc_qwin_sec weburl 0 holiday)"
+cfg_set 'parentcontrol.@weburl[0].sd_qstart' '00:00:00'
+cfg_set 'parentcontrol.@weburl[0].sd_qend' '23:59:59'
+t_eq '全天→空（= 不限制）' '' "$(pc_qwin_sec weburl 0 school)"
+cfg_set 'parentcontrol.@weburl[0].sd_qstart' '21:00:00'
+cfg_set 'parentcontrol.@weburl[0].sd_qend' '09:00:00'
+t_eq '起>止（脏数据）→空，按不限制兜底' '' "$(pc_qwin_sec weburl 0 school)"
+cfg_set 'parentcontrol.@weburl[0].sd_qstart' '09:00:00'
+cfg_set 'parentcontrol.@weburl[0].sd_qend' '09:00:00'
+t_eq '起=止（脏数据）→空，按不限制兜底' '' "$(pc_qwin_sec weburl 0 school)"
+cfg_reset
+t_eq '不限额度：未设 → 0' 0 "$(pc_entry_unlimited weburl 0 school)"
+cfg_set 'parentcontrol.@weburl[0].sd_unlimited' '1'
+t_eq '不限额度：设 1 → 1' 1 "$(pc_entry_unlimited weburl 0 school)"
 
 # ============================================================
 echo '== 用量读写 =='
@@ -223,7 +245,7 @@ t_eq '平日 quota' 30 "$(pc_entry_quota weburl 0 school)"
 t_eq '平日 pool' kid1 "$(pc_entry_pool weburl 0 school)"
 t_eq '节假日 pool 为空' '' "$(pc_entry_pool weburl 0 holiday)"
 t_eq '未设 mode → 空' '' "$(pc_entry_mode weburl 1 school)"
-t_eq 'eff_mode 未设 → time(兼容老配置)' time "$(pc_entry_eff_mode weburl 1 school)"
+t_eq 'eff_mode 未设 → off（时段模式已移除）' off "$(pc_entry_eff_mode weburl 1 school)"
 t_eq 'eff_mode quota' quota "$(pc_entry_eff_mode weburl 0 school)"
 
 echo '== pc_quota_keys：唯一额度遍历入口 =='

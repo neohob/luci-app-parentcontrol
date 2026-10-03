@@ -57,16 +57,16 @@ run_mut 'SNI 端口 80,443→80,8443' "$INIT" \
 run_mut 'SNI 规则整条删除' "$INIT" \
 	'emit_dev_rule "$_c" "$2" "$5" "$3 -p TCP -m multiport --dports 80,443 -m string --algo $_algos --string $_pat" "$4" "$_dev"' '' init_test.sh
 
-# 3) PREROUTING 挂载顺序被改（TAGQ 不再最先）
+# 3) PREROUTING 挂载顺序被改（TAGQ 不再最先 → 被封的包会先进计数链）
 run_mut 'PREROUTING 顺序被改' "$INIT" \
 	'		hook_chain "$_ip" mangle PREROUTING "$TAGA"
-		hook_chain "$_ip" mangle PREROUTING "$TAGI"
-		hook_chain "$_ip" mangle PREROUTING "$TAGW"
-		hook_chain "$_ip" mangle PREROUTING "$TAGQ"' \
+		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
+	done
+	build_acct_rules' \
 	'		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 		hook_chain "$_ip" mangle PREROUTING "$TAGA"
-		hook_chain "$_ip" mangle PREROUTING "$TAGI"
-		hook_chain "$_ip" mangle PREROUTING "$TAGW"' init_test.sh
+	done
+	build_acct_rules' init_test.sh
 
 # 4) refresh_holiday 永远不联网（novet 短路被提前）
 run_mut 'refresh_holiday 永不联网' "$INIT" \
@@ -85,14 +85,13 @@ run_mut '共享池口径失效' "$INIT" \
 # 7) 重建时不再 ensure/hook（fw4 reload 后自愈能力丢失）
 run_mut '重建自愈能力丢失' "$INIT" \
 	'		ensure_chain "$_ip" mangle "$TAGA"
-		ensure_chain "$_ip" mangle "$TAGI"
-		ensure_chain "$_ip" mangle "$TAGW"
 		ensure_chain "$_ip" mangle "$TAGQ"
+		hook_chain "$_ip" mangle PREROUTING "$TAGA"
 ' '' init_test.sh
 
-# 8) 额度发放时刻被忽略（永远算已发放）
-run_mut '额度发放时刻被忽略' "$COMMON" \
-	'	[ "$(pc_hhmm_to_min "$(date +%H:%M)")" -ge "$(pc_hhmm_to_min "$1")" ]' '	true' common_test.sh
+# 8) 可用时段被忽略（永远当作"不限制时段"）
+run_mut '可用时段被忽略' "$COMMON" \
+	'	[ "$_ss" -lt "$_ee" ] 2>/dev/null || return 0' '	return 0' common_test.sh
 
 # 9) 节假日解析把 isOffDay 判反
 run_mut 'isOffDay 判反' "$COMMON" \
@@ -125,7 +124,8 @@ run_mut '首次采样不计数' "$INIT" \
 
 # 12) 拆除时不清理 mangle 链
 run_mut '拆除残留 mangle 链' "$INIT" \
-	'		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
+	'		for _ta in "$TAGQ" "$TAGA"; do
+			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done' '' init_test.sh

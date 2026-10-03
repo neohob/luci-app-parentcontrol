@@ -28,6 +28,10 @@ fresh() {
 	mkdir -p "$USAGE_DIR" "$STATE_DIR" "$IPDIR"
 }
 flat() { tr '\n' ' ' | sed 's/ $//'; }
+# 链里「无条件 DROP」条数 = 不带 -m time 的 DROP 规则（额度耗尽那种整条封）
+uncond_drop() { ipt_rules "$1" "$2" "$3" | awk '/-j DROP/ && !/-m time/ {n++} END{print n+0}'; }
+# 链里出现的「时段外区间」去重个数
+win_ranges() { ipt_rules "$1" "$2" "$3" | grep -o -- '--timestart [0-9:]* --timestop [0-9:]*' | sort -u | wc -l | tr -d ' '; }
 
 # 解析 fixture：example.com 与其 www 变体
 put_resolve <<'EOF'
@@ -56,131 +60,10 @@ t_eq '关闭时无 filter 链' '' "$(ipt_chains v4 filter | grep PARENTCONTROL |
 t_eq '关闭时无 mangle 链' '' "$(ipt_chains v4 mangle | grep PARENTCONTROL || true)"
 
 # ============================================================
-echo '== 机器(time) 时段模式 =='
-fresh
-cfg_begin 1
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option mac '00:00:5e:00:53:01'
-	option sd_mode 'time'
-	option sd_start '08:00'
-	option sd_end '18:00'
-	option hd_mode 'off'
-EOF
-cfg_apply
-run_build
-R=$(ipt_rules v4 filter PARENTCONTROL_TIME | flat)
-t_has '时段规则带 -m time 窗口与 REJECT' "$R" \
-	'-m mac --mac-source 00:00:5e:00:53:01 -m time --timestart 00:00 --timestop 10:00 -j REJECT'
-t_eq '普通管控只挂 FORWARD' '' "$(ipt_rules v4 filter INPUT | flat)"
-t_eq '模式=off 的档案不生成规则（TAGP 空）' '' "$(ipt_rules v4 filter PARENTCONTROL_PROTOCOL | flat)"
-
-echo '== 机器 时段：起控=停控 = 全天封（无时间条件）=='
-fresh
-cfg_begin 1
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-	option hd_mode 'off'
-EOF
-cfg_apply
-run_build
-R=$(ipt_rules v4 filter PARENTCONTROL_TIME | flat)
-t_has '全天封 = 无 -m time' "$R" '-m mac --mac-source aa:bb:cc:dd:ee:ff -j REJECT'
-t_hasnt '全天封不含 -m time' "$R" '-m time'
-
-echo '== 机器 强力管控 → 同时挂 INPUT =='
-fresh
-cfg_begin 1 1
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-EOF
-cfg_apply
-run_build
-t_has '强力管控挂 INPUT' "$(ipt_rules v4 filter INPUT | flat)" '-j PARENTCONTROL_TIME'
-
-# 防自锁：无设备条件的条目在 INPUT 里是无条件 REJECT，会把管理员自己也挡在门外
-echo '== 强力管控 + 无设备条件条目 → 不挂 INPUT（防自锁）=='
-fresh
-cfg_begin 1 1
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-EOF
-cfg_apply
-run_build
-t_eq '无设备条件 → 不挂 INPUT' '' "$(ipt_rules v4 filter INPUT | flat)"
-t_has '仍挂 FORWARD（管控局域网上网）' "$(ipt_rules v4 filter FORWARD | flat)" '-j PARENTCONTROL_TIME'
-t_has '日志有防自锁告警' "$(cat "$LOG_FILE" 2>/dev/null)" '跳过「强力管控」的 INPUT 挂载'
-
-# 带设备条件的条目照旧挂 INPUT（不能因为加固把功能关了）
-echo '== 强力管控 + 有设备条件条目 → 照旧挂 INPUT =='
-fresh
-cfg_begin 1 1
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-EOF
-cfg_section <<'EOF'
-config time
-	option enable '1'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-EOF
-cfg_apply
-run_build
-t_eq '只要有一个无设备条件条目，就不挂 INPUT（守卫看整条链）' '' "$(ipt_rules v4 filter INPUT | flat)"
-
-# ============================================================
-echo '== 协议 时段模式 + 端口 =='
-fresh
-cfg_begin 1
-cfg_section <<'EOF'
-config protocol
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option proto 'tcp'
-	option portd '80,443'
-	option sd_mode 'time'
-	option sd_start '09:00'
-	option sd_end '17:00'
-EOF
-cfg_section <<'EOF'
-config protocol
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option proto 'udp'
-	option portd '53'
-	option sd_mode 'time'
-	option sd_start '09:00'
-	option sd_end '17:00'
-EOF
-cfg_apply
-run_build
-R=$(ipt_rules v4 filter PARENTCONTROL_PROTOCOL | flat)
-t_has '多端口用 multiport --dports' "$R" '-p tcp -m multiport --dports 80,443'
-t_has '单端口用 --dport' "$R" '-p udp --dport 53'
-
-# ============================================================
-echo '== 网址 时段模式：IP 链 + 字符串链 =='
+# 统一模型：每个档案 = 可用时段（默认全天）+ 额度（或勾「不限额度」）
+#   封 = 不在可用时段内  或  额度耗尽
+#   时段由内核 -m time 精确到秒执行；额度那份封禁由 tick 每分钟重建
+echo '== 统一模型：可用时段 09:00-21:00 → 生成"时段外"规则（3 段）=='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -188,24 +71,93 @@ config weburl
 	option enable '1'
 	option mac '00:00:5e:00:53:01'
 	option domains 'example.com'
-	option sd_mode 'time'
-	option sd_start '08:00'
-	option sd_end '18:00'
+	option sd_mode 'quota'
+	option sd_quota '30'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
 EOF
 cfg_apply
 run_build
-V4I=$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)
-V6I=$(ipt_rules v6 mangle PARENTCONTROL_IP | flat)
-t_has 'IPv4 封 /24' "$V4I" '-m mac --mac-source 00:00:5e:00:53:01 -m time --timestart 00:00 --timestop 10:00 -d 1.2.3.0/24 -j DROP'
-t_has 'IPv6 封 /64' "$V6I" '-d 2402:4e00:1410:0::/64 -j DROP'
-t_has '字符串串在 WEBURL 链' "$(ipt_rules v4 mangle PARENTCONTROL_WEBURL | flat)" '--string example.com'
-t_has 'DNS(udp53) 规则' "$(ipt_rules v4 mangle PARENTCONTROL_WEBURL | flat)" '-p UDP --dport 53'
-t_has 'SNI(tcp80,443) 规则' "$(ipt_rules v4 mangle PARENTCONTROL_WEBURL | flat)" '-p TCP -m multiport --dports 80,443'
-t_has 'TAGI 已挂 PREROUTING' "$(ipt_jump v4 mangle PREROUTING | flat)" 'PARENTCONTROL_IP'
-t_has 'TAGW 已挂 PREROUTING' "$(ipt_jump v4 mangle PREROUTING | flat)" 'PARENTCONTROL_WEBURL'
+Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA)
+# 「时段外」= 本地 00:00:00-08:59:59（跨 UTC 零点 → 切 2 段）+ 21:00:01-23:59:59
+# 一律正向区间：本机 iptables 明确拒绝「! -m time」（unexpected ! flag before --match）
+t_has '本地 00:00-08:59:59 的前半段' "$(printf '%s' "$Q" | flat)" \
+	'-m time --timestart 16:00:00 --timestop 23:59:59'
+t_has '同一段跨 UTC 零点的后半段' "$(printf '%s' "$Q" | flat)" \
+	'-m time --timestart 00:00:00 --timestop 00:59:59'
+t_has '本地 21:00:01-23:59:59' "$(printf '%s' "$Q" | flat)" \
+	'-m time --timestart 13:00:01 --timestop 15:59:59'
+t_eq '时段外的区间恰好 3 段（去重）' 3 "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '未耗尽：没有任何无条件封' 0 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+t_has '时段规则带设备条件（不是无差别封）' "$(printf '%s' "$Q" | flat)" '-m mac --mac-source 00:00:5e:00:53:01'
 
-# ============================================================
-echo '== 网址 额度模式：计数链 + 未耗尽不封 =='
+echo '== 统一模型：额度耗尽 → 整条无条件封（比时段更强，无需时间条件）=='
+pc_usage_add weburl_0 30
+build_quota_blocks
+Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)
+t_has '耗尽 → 无条件 DROP 目标 IP' "$Q" '-d 1.2.3.0/24 -j DROP'
+t_has '耗尽 → DNS/SNI 串也封' "$Q" '--string example.com'
+t_eq '耗尽 → 出现了无条件封' 1 "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo 1 || echo 0)"
+
+echo '== 统一模型：勾「不限额度」→ 只看时段 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_unlimited '1'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
+EOF
+cfg_apply
+run_build
+pc_usage_add weburl_0 99999
+build_quota_blocks
+t_eq '不限额度 → 仍只有 3 段时段外区间' 3 "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '不限额度 → 额度再大也不封（无无条件封）' 0 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '不限额度但仍计数（统计/池要用）' ok "$(ipt_exists v4 mangle PCA_weburl_0 && echo ok)"
+
+echo '== 可用时段=全天（默认）→ 不产生任何时段规则 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_quota '30'
+	option sd_qstart '00:00:00'
+	option sd_qend '23:59:59'
+EOF
+cfg_apply
+run_build
+t_eq '全天 + 未耗尽 → QUOTA 链全空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+pc_usage_add weburl_0 30
+build_quota_blocks
+t_eq '全天 + 耗尽 → 所有 DROP 都是无条件的' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-j DROP')" "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '全天 + 耗尽 → 不含 -m time' 0 "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-m time')"
+
+echo '== 模式=关闭 → 两条链都不建规则 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'off'
+	option hd_mode 'off'
+EOF
+cfg_apply
+run_build
+t_eq '关闭 → ACCT 链空' '' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)"
+t_eq '关闭 → QUOTA 链空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+
+echo '== 网址目标：计数链（IP + DNS/SNI 串）=='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -226,32 +178,44 @@ t_has 'SNI(80,443) 字符串命中也计入额度' "$A4" '-p TCP -m multiport --
 t_eq '计数链同一目标只出一条（single 不双计）' 1 \
 	"$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -c -- '-d 1.2.3.0/24 -j PCA_weburl_0')"
 t_eq 'PCA 空链已建' ok "$(ipt_exists v4 mangle PCA_weburl_0 && echo ok)"
-t_eq '未耗尽 → QUOTA 链为空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
-t_eq '额度模式不再产生时段封规则' '' "$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)"
-t_eq 'PREROUTING 顺序 QUOTA→WEBURL→IP→ACCT' \
-	'PARENTCONTROL_QUOTA PARENTCONTROL_WEBURL PARENTCONTROL_IP PARENTCONTROL_ACCT' \
+t_eq 'PREROUTING 顺序 QUOTA→ACCT' \
+	'PARENTCONTROL_QUOTA PARENTCONTROL_ACCT' \
 	"$(ipt_jump v4 mangle PREROUTING | flat)"
+t_eq '只挂这两条（老的 WEBURL/IP 链已废弃）' 2 "$(ipt_jump v4 mangle PREROUTING | wc -l | tr -d ' ')"
 
-echo '== 额度三态：未发放(R 之前) → 封 =='
-FAKE_DATE_HM=09:00
+echo '== 协议条目：端口条件走进统一链 =='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config protocol
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option proto 'tcp'
+	option portd '80,443'
+	option sd_mode 'quota'
+	option sd_quota '10'
+EOF
+cfg_section <<'EOF'
+config protocol
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option proto 'udp'
+	option portd '53'
+	option sd_mode 'quota'
+	option sd_quota '10'
+EOF
+cfg_apply
+run_build
+A=$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)
+t_has '多端口用 multiport --dports' "$A" '-p tcp -m multiport --dports 80,443'
+t_has '单端口用 --dport' "$A" '-p udp --dport 53'
+t_eq '未耗尽 → QUOTA 空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+pc_usage_add protocol_0 10
 build_quota_blocks
-Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)
-t_has 'R 之前封目标 IP' "$Q" '-m mac --mac-source 00:00:5e:00:53:01 -d 1.2.3.0/24 -j DROP'
-t_has 'R 之前也封 DNS/SNI 串' "$Q" '--string example.com'
-FAKE_DATE_HM=12:00
-build_quota_blocks
-t_eq '恰好到 R → 放行' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+t_has '该端口耗尽 → 封在 QUOTA 链' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-p tcp -m multiport --dports 80,443'
+t_eq '只封了 1 条（另一个端口不牵连）' 1 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 
-echo '== 额度三态：耗尽 → 封 =='
-FAKE_DATE_HM=13:00
-pc_usage_add weburl_0 29
-build_quota_blocks
-t_eq '未用完(29/30) → 放行' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
-pc_usage_add weburl_0 1
-build_quota_blocks
-t_has '用完(30/30) → 封' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-d 1.2.3.0/24 -j DROP'
-
-echo '== 额度=0/空 → 不限 =='
+echo '== 额度=0/空（老配置遗留）→ 按不限处理，永不封 =='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -267,7 +231,6 @@ pc_usage_add weburl_0 9999
 build_quota_blocks
 t_eq '无额度 → 永不封' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 
-# ============================================================
 echo '== 时间/协议条目的额度模式（补盲区：此前只测 weburl）=='
 fresh
 cfg_begin 1
@@ -405,7 +368,7 @@ t_eq '无网段 → 不封锁（防自锁）' '' "$(ipt_rules v4 mangle PARENTCO
 t_has '日志有告警' "$(cat "$LOG_FILE" 2>/dev/null)" '跳过封锁以防自锁'
 
 # ============================================================
-echo '== 日子类型切换 → 用节假日档案 =='
+echo '== 日子类型切换 → 用节假日档案（两套档案各自独立的额度）=='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -413,21 +376,28 @@ config weburl
 	option enable '1'
 	option mac '00:00:5e:00:53:01'
 	option domains 'example.com'
-	option sd_mode 'time'
-	option sd_start '08:00'
-	option sd_end '18:00'
+	option sd_mode 'quota'
+	option sd_quota '60'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
 	option hd_mode 'quota'
 	option hd_quota '15'
+	option hd_qstart '10:00:00'
+	option hd_qend '20:00:00'
 EOF
 cfg_apply
 FAKE_DATE_YMD=2026-06-06 FAKE_DATE_DOW=6   # 周六 → 节假日
 run_build
-t_eq '节假日走额度：时段 IP 链为空' '' "$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)"
-t_has '节假日走额度：计数链有规则' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)" '-j PCA_weburl_0'
+t_has '节假日：计数链有规则' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)" '-j PCA_weburl_0'
+t_eq '节假日：也有时段规则' 1 "$([ "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo 1 || echo 0)"
+pc_usage_add weburl_0 15
+build_quota_blocks
+t_eq '节假日额度 15 用完 → 封' 1 "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo 1 || echo 0)"
 FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1   # 周一 → 平日
 run_build
-t_has '平日走时段：IP 链有规则' "$(ipt_rules v4 mangle PARENTCONTROL_IP | flat)" '-d 1.2.3.0/24 -j DROP'
-t_eq '平日不再计数' '' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)"
+pc_usage_add weburl_0 15
+build_quota_blocks
+t_eq '平日额度 60：用了 15 没超 → 不封' 0 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 
 # ============================================================
 echo '== 用量采样：字节增量与阈值 =='
@@ -542,10 +512,9 @@ cfg_apply
 run_build
 rm -f "$FAKE_IPT_STATE_DIR"/v4.json "$FAKE_IPT_STATE_DIR"/v6.json   # fw4 把表清空
 refresh_ip_body >/dev/null 2>&1
-t_eq '重建后 TAGI 链回来' ok "$(ipt_exists v4 mangle PARENTCONTROL_IP && echo ok)"
 t_eq '重建后 TAGQ 链回来' ok "$(ipt_exists v4 mangle PARENTCONTROL_QUOTA && echo ok)"
 t_eq '重建后 ACCT 链回来' ok "$(ipt_exists v4 mangle PARENTCONTROL_ACCT && echo ok)"
-t_eq '重建后 PREROUTING 跳转回来' 'PARENTCONTROL_QUOTA PARENTCONTROL_WEBURL PARENTCONTROL_IP PARENTCONTROL_ACCT' \
+t_eq '重建后 PREROUTING 跳转回来' 'PARENTCONTROL_QUOTA PARENTCONTROL_ACCT' \
 	"$(ipt_jump v4 mangle PREROUTING | flat)"
 t_eq '重建后计数规则仍在' ok "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -q PCA_weburl_0 && echo ok)"
 
@@ -611,7 +580,7 @@ FAKE_DATE_YMD=2026-06-08 FAKE_DATE_DOW=1 FAKE_DATE_HM=13:00
 run_build
 pc_usage_add weburl_0 7
 S=$(stats_tsv)
-t_has 'meta 行' "$S" 'meta	2026-06-08	school	12:00	1'
+t_has 'meta 行（日期/类型/阈值/保留天/当前时间）' "$S" 'meta	2026-06-08	school	32	90'
 t_has 'entry 行（key/备注/mac/模式/额度/已用）' "$S" 'entry	weburl_0	weburl	0	测试设备	00:00:5e:00:53:01	quota	30	7'
 t_has 'hist 行' "$S" 'hist	20260608	7'
 t_has 'histkey 行' "$S" 'histkey	20260608	weburl_0	7'
@@ -719,7 +688,7 @@ FAKE_DATE_HM=13:00
 pc_usage_add weburl_0 12
 # 列表页数据源：stats_tsv brief（只出 meta + entry 两行，不跑历史/计数器）
 TSV=$(stats_tsv brief)
-t_has 'brief: meta 行含日期与类型' "$TSV" 'meta	2026-06-08	school	12:00	1	32	90'
+t_has 'brief: meta 行含日期与类型' "$TSV" 'meta	2026-06-08	school	32	90'
 t_has 'brief: entry 行含 key/模式/额度/已用' "$TSV" 'weburl_0	weburl	0		00:00:5e:00:53:01	quota	30	12'
 t_hasnt 'brief: 不输出 hist 行' "$TSV" 'hist	'
 t_hasnt 'brief: 不输出 reset 行' "$TSV" 'reset	'

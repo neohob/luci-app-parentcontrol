@@ -49,21 +49,26 @@ end
 function M.profiles(self, section)
 	local map = self.map
 	local function one(sfx, label)
-		local mode = get(map, section, sfx .. "_mode") or "time"
-		if mode == "off" then
+		local mode = get(map, section, sfx .. "_mode") or "off"
+		if mode ~= "quota" then
 			return label .. " " .. i18n.translate("关闭")
-		elseif mode == "quota" then
-			local q = get(map, section, sfx .. "_quota")
-			local p = get(map, section, sfx .. "_pool")
-			local st = label .. " " .. (q and (q .. i18n.translate("分钟")) or i18n.translate("不限"))
-			if p and p ~= "" then st = st .. " @" .. p end
-			return st
-		else
-			local s = get(map, section, sfx .. "_start") or "00:00"
-			local e = get(map, section, sfx .. "_end") or "00:00"
-			if s == e then return label .. " " .. i18n.translate("全天封") end
-			return label .. " " .. s .. "-" .. e
 		end
+		local q = get(map, section, sfx .. "_quota")
+		local p = get(map, section, sfx .. "_pool")
+		local st
+		if get(map, section, sfx .. "_unlimited") == "1" then
+			st = label .. " " .. i18n.translate("不限额度")
+		else
+			st = label .. " " .. ((q and q ~= "" and (q .. i18n.translate("分钟"))) or i18n.translate("不限"))
+		end
+		-- 时段不是全天时附上，列表里一眼看出"只在几点到几点能用"
+		local ws = get(map, section, sfx .. "_qstart")
+		local we = get(map, section, sfx .. "_qend")
+		if ws and we and ws ~= "" and we ~= "" and not (ws == "00:00:00" and we == "23:59:59") then
+			st = st .. " " .. ws .. "-" .. we
+		end
+		if p and p ~= "" then st = st .. " @" .. p end
+		return st
 	end
 	return one("sd", i18n.translate("平日")) .. "；" .. one("hd", i18n.translate("节假日"))
 end

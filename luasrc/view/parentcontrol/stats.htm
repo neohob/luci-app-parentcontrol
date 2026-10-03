@@ -39,12 +39,7 @@
 		<b><%=pcdata(m.date or "-")%></b>
 		（<%=pcdata(m.daytype == "holiday" and T("节假日") or T("平日"))%>）
 		<span class="muted">·</span>
-		<%=T("额度发放时刻")%> <b><%=pcdata(m.reset or "-")%></b>
-		<% if m.issued then %>
-			<span class="pc-badge ok"><%=T("已发放")%></span>
-		<% else %>
-			<span class="pc-badge bad"><%=T("未发放（当前封住）")%></span>
-		<% end %>
+		<%=T("额度每天 0 点自然重置")%>
 		<span class="muted">·</span>
 		<%=T("现在")%> <b><%=pcdata(m.now or "-")%></b>
 	</div>
@@ -71,7 +66,6 @@
 			<td class="num"><%=(u.quota or 0) > 0 and (u.remain or 0) or "-"%></td>
 			<td>
 				<% if u.status == T("已耗尽") then %><span class="pc-badge bad"><%=pcdata(u.status)%></span>
-				<% elseif u.status == T("未发放") then %><span class="pc-badge off"><%=pcdata(u.status)%></span>
 				<% else %><span class="pc-badge ok"><%=pcdata(u.status)%></span><% end %>
 			</td>
 			<td class="num muted"><%=(u.live_kb or 0) > 0 and (u.live_kb .. " KB") or "-"%></td>
@@ -178,7 +172,7 @@
 			<%=T("每个条目只算「它自己规则命中的流量」：机器条目=该设备全部流量；协议条目=该端口的流量；网址条目=目标 IP + 明文 DNS/SNI 命中的流量。")%>
 		</td></tr>
 		<tr><td><%=T("三态")%></td><td class="muted">
-			<%=T("① 发放时刻前 未发放→封 ② 已发放未用完→放行 ③ 用完→封到当天 24:00。额度按自然日结算、不结转。")%>
+			<%=T("① 可用时段之外→封（时段外的流量不计入额度）② 时段内且额度没用完→放行 ③ 额度用完→封到当天 24:00。额度按自然日结算、不结转。")%>
 		</td></tr>
 		<tr><td><%=T("重置")%></td><td class="muted">
 			<%=T("额度模式的条目可点「重置额度」立刻清零今天的用量（并写入重置记录）。重置不影响已累计的历史与实际用量。")%>

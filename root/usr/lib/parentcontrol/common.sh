@@ -90,18 +90,83 @@ pc_today_type() {
 # 把 school/holiday 映射成配置前缀 sd/hd
 pc_suffix() { [ "$1" = "holiday" ] && echo hd || echo sd; }
 
-# ---------- 重置时刻与额度三态 ----------
-# 全局重置时间（HH:MM），按 Asia/Shanghai 解释（date 已由 wrapper 固定 TZ）
-pc_reset_for() {
-	local _r
-	_r=$(pc_uget "@basic[0].reset_$1")
-	[ -n "$_r" ] || _r="12:00"
-	echo "$_r"
-}
+# ---------- 配额基础 ----------
+# 额度按自然日重置（用量文件按 YYYYMMDD 分文件），不再有「发放时刻」概念。
 
 # 把 "HH:MM"（或 "HH" + 可选 MM 参数）转成分钟数。
 # 注意：busybox ash 不支持 `10#` 进制前缀，"08"/"09" 直接算术也会被当八进制报错，
 # 所以用字符串去前导零。
+# HH:MM[:SS] → 当天秒数（非法/空 → 无输出）
+pc_hhmmss_to_sec() {
+	local _h _m _s
+	case "$1" in
+	*:*:*) _h=${1%%:*}; _m=${1#*:}; _s=${_m#*:}; _m=${_m%%:*} ;;
+	*:*)   _h=${1%%:*}; _m=${1#*:}; _s=0 ;;
+	*)     return 0 ;;
+	esac
+	_h=${_h#0}; [ -z "$_h" ] && _h=0
+	_m=${_m#0}; [ -z "$_m" ] && _m=0
+	_s=${_s#0}; [ -z "$_s" ] && _s=0
+	case "$_h$_m$_s" in *[!0-9]*) return 0 ;; esac
+	[ "$_h" -le 23 ] 2>/dev/null || return 0
+	[ "$_m" -le 59 ] 2>/dev/null || return 0
+	[ "$_s" -le 59 ] 2>/dev/null || return 0
+	echo $((_h * 3600 + _m * 60 + _s))
+}
+
+# 当天秒数 → HH:MM:SS
+pc_sec_hhmmss() {
+	printf '%02d:%02d:%02d' $(( $1 / 3600 )) $(( ($1 % 3600) / 60 )) $(( $1 % 60 ))
+}
+
+# 本地秒区间 [起,止] → -m time 用的 UTC 区间。跨 UTC 零点时切成两段，逐行输出「起 止」。
+# 偏移固定 UTC+8（与渲染层一致），不依赖内核时区（--kerneltz 在 OpenWrt 上不可靠）。
+pc_utc_ranges() { # $1=起秒 $2=止秒
+	local _s _e
+	_s=$(( ($1 - 28800 + 86400) % 86400 ))
+	_e=$(( ($2 - 28800 + 86400) % 86400 ))
+	if [ "$_s" -le "$_e" ]; then
+		echo "$_s $_e"
+	else
+		echo "$_s 86399"
+		echo "0 $_e"
+	fi
+}
+
+# 该条目今天是否勾了「不限额度」
+pc_entry_unlimited() { # $1=module $2=idx $3=school|holiday
+	local _v
+	_v=$(pc_uget "@$1[$2].$(pc_suffix "$3")_unlimited")
+	[ "$_v" = "1" ] && echo 1 || echo 0
+}
+
+# 可用时段（本地秒）「起 止」；未设 / 全天 / 非法 → 无输出（= 不限制时段）
+pc_qwin_sec() { # $1=module $2=idx $3=school|holiday
+	local _s _e _ss _ee _sfx
+	_sfx=$(pc_suffix "$3")
+	_s=$(pc_uget "@$1[$2].${_sfx}_qstart")
+	_e=$(pc_uget "@$1[$2].${_sfx}_qend")
+	[ -n "$_s" ] && [ -n "$_e" ] || return 0
+	_ss=$(pc_hhmmss_to_sec "$_s"); _ee=$(pc_hhmmss_to_sec "$_e")
+	[ -n "$_ss" ] && [ -n "$_ee" ] || return 0
+	# 起必须 < 止（表单已拦，这里兜底）：不合法就按“不限制”处理，绝不因为脏数据把设备整天封死
+	[ "$_ss" -lt "$_ee" ] 2>/dev/null || return 0
+	[ "$_ss" = 0 ] && [ "$_ee" = 86399 ] && return 0
+	echo "$_ss $_ee"
+}
+
+# 可用时段「以外」的 UTC 区间（逐行输出「起秒 止秒」），供 -m time 正向匹配。
+pc_qwin_out_ranges() { # $1=module $2=idx $3=school|holiday
+	local _w _s _e
+	_w=$(pc_qwin_sec "$1" "$2" "$3")
+	[ -n "$_w" ] || return 0
+	set -- $_w
+	_s=$1; _e=$2
+	[ "$_s" -gt 0 ] && pc_utc_ranges 0 $((_s - 1))
+	[ "$_e" -lt 86399 ] && pc_utc_ranges $((_e + 1)) 86399
+	return 0
+}
+
 pc_hhmm_to_min() { # $1=HH:MM 或 HH，$2=MM（可选）
 	local _h _m
 	case "$1" in
@@ -114,17 +179,8 @@ pc_hhmm_to_min() { # $1=HH:MM 或 HH，$2=MM（可选）
 }
 
 # 北京时间 HH:MM → UTC HH:MM（iptables 的 -m time 默认 UTC，用它就不依赖内核时区）
-pc_utc_hhmm() {
-	local _m
-	_m=$(pc_hhmm_to_min "$1")
-	_m=$(( (_m - 480 + 1440) % 1440 ))
-	printf '%02d:%02d\n' $((_m / 60)) $((_m % 60))
-}
 
 # 当前上海时间是否已过当日重置点 → 0(是，额度已发放) / 1(否)
-pc_allowance_issued() {
-	[ "$(pc_hhmm_to_min "$(date +%H:%M)")" -ge "$(pc_hhmm_to_min "$1")" ]
-}
 
 # ---------- 用量读写 ----------
 pc_usage_file() { echo "$USAGE_DIR/$(date +%Y%m%d)"; }
@@ -182,7 +238,7 @@ pc_entry_mode() {
 pc_entry_eff_mode() {
 	local _md
 	_md=$(pc_entry_mode "$1" "$2" "$3")
-	[ -z "$_md" ] && _md=time
+	[ -z "$_md" ] && _md=off
 	echo "$_md"
 }
 
@@ -221,12 +277,11 @@ pc_quota_positive() {
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _ts _te _has_sd _has_hd
+	local _k _i _m _w _d _ts _te _has_sd _has_hd _sfx
 	# 1) 默认值
-	for _k in reset_school reset_holiday usage_keep usage_min_kb; do
+	for _k in usage_keep usage_min_kb; do
 		[ -n "$(pc_uget "@basic[0].$_k")" ] && continue
 		case "$_k" in
-		reset_school|reset_holiday) uci -q set "$PC_CONF.@basic[0].$_k=12:00" ;;
 		usage_keep)                 uci -q set "$PC_CONF.@basic[0].$_k=90" ;;
 		usage_min_kb)               uci -q set "$PC_CONF.@basic[0].$_k=8" ;;
 		esac
@@ -275,4 +330,34 @@ pc_migrate_config() {
 			fi
 		done
 	done
+
+	# 4) 统一模型迁移：老的「时段」模式没有额度、语义是“封某一段”，而新模型只有
+	#    “可用时段”，两者补集跨日、无法无损换算。按既定方案：
+	#      老时段 → 每日额度 + 不限额度 + 09:00:00-21:00:00
+	#      已有额度 → 额度保持不变，仅补上「不限额度=否」与时段
+	#    已有 entries 在档时段的条目也会被补上 09:00-21:00（与迁移方案一致）。
+	for _m in time protocol weburl; do
+		for _i in $(pc_ids_all "$_m"); do
+			for _sfx in sd hd; do
+				case "$(pc_uget "@$_m[$_i].${_sfx}_mode")" in
+				time)
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_mode=quota"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+					_pclog "migrate: $_m[$_i] ${_sfx}: 老「时段」→ 每日额度(不限) + 09:00-21:00" ;;
+				quota)
+					# 只在没设过时才补 0：否则第二次跑迁移会把上一次设的 1 覆盖掉
+					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ] || \
+						uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0" ;;
+				esac
+				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
+				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
+			done
+		done
+	done
+}
+
+# 迁移期的日志：uci-defaults 环境没有 elog（那是 init.d 的），这里自带兜底格式
+_pclog() {
+	mkdir -p /tmp/log 2>/dev/null
+	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >> "${LOG_FILE:-/tmp/log/parentcontrol.log}"
 }
