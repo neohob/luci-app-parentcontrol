@@ -144,8 +144,8 @@ for bad in '' 0 -1 abc 00 +5 ' 5'; do
 		} > "$T_TMP/bad.uci"
 		cfg_load parentcontrol "$T_TMP/bad.uci"
 		pc_migrate_config
-		t_eq "老 quota='$bad'（week=$wk）+ stale unlimited=0 → unlimited=1" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
-		t_eq "老 quota='$bad'（week=$wk）→ 运行时口径也判不限（端到端）" '1' "$(pc_entry_unlimited weburl 0 school)"
+		t_eq "老 quota='$bad'（week=${wk}）+ stale unlimited=0 → unlimited=1" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+		t_eq "老 quota='$bad'（week=${wk}）→ 运行时口径也判不限（端到端）" '1' "$(pc_entry_unlimited weburl 0 school)"
 	done
 done
 
@@ -196,6 +196,21 @@ cfg_load parentcontrol "$T_TMP/hd.uci"
 pc_migrate_config
 t_eq 'hd（额度 0）→ unlimited=1' '1' "$(cfg_get parentcontrol.@weburl[0].hd_unlimited)"
 t_eq 'hd 运行时口径 = 不限（holiday 档案）' '1' "$(pc_entry_unlimited weburl 0 holiday)"
+
+echo '== 记录取舍：a0c7936 那代把「额度 0」当全天禁止的配置，升级后会变成「不限额度」=='
+# 该形状与老配置**完全无法区分**（试过用 week 做标记，两个方向都会误判，已放弃），
+# 统一按「额度模型引入以来的老判据」解释。这条用例把这个取舍钉住：若哪天改策略，这里会红。
+cfg_reset
+cat > "$T_TMP/tradeoff.uci" <<'EOF'
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_unlimited '0'
+	option sd_quota '0'
+EOF
+cfg_load parentcontrol "$T_TMP/tradeoff.uci"
+pc_migrate_config
+t_eq '取舍：额度 0（年代不可判别）→ 按老判据翻成不限' '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 
 echo '== 归一器口径（迁移与运行共用同一套）=='
 t_eq '空 → 0' '0' "$(pc_quota_positive '')"

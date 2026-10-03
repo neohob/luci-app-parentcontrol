@@ -430,15 +430,17 @@ block_entry() { # $1=module $2=idx
 # 输出 "<额度> <已用> <池名>"。注意 额度 0 = 一分钟都不给（全禁），不是"不限"；
 # 到底受不受额度限制由 pc_entry_unlimited 判定，封锁链/看板/列表页都读同一份。
 entry_effective() { # $1=module $2=idx $3=school|holiday
-	local _pool _pq
-	_pool=$(pc_entry_pool "$1" "$2" "$3")
-	_pq=
-	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
-	# 输出「有效额度 已用 池名」——封锁链、看板、列表页共用同一份池优先解析
-	if [ -n "$_pq" ]; then
-		echo "$(pc_quota_positive "$_pq") $(pool_usage "$_pool" "$3") $_pool"
+	local _m _i _t _q _pool
+	_m=$1; _i=$2; _t=$3
+	# 「池优先」的解析只有一份实现（common.sh 的 pc_effective_quota）：
+	# 这里只负责补齐「已用」并把结果整理成「有效额度 已用 池名」。
+	# 注意先存下 $_m/$_i/$_t —— `set --` 会把位置参数冲掉。
+	set -- $(pc_effective_quota "$_m" "$_i" "$_t")
+	_q=$1; _pool=${2:-}
+	if [ -n "$_pool" ]; then
+		echo "$(pc_quota_positive "$_q") $(pool_usage "$_pool" "$_t") $_pool"
 	else
-		echo "$(pc_quota_positive "$(pc_entry_quota "$1" "$2" "$3")") $(pc_usage_get "$(entry_key "$1" "$2")") $_pool"
+		echo "$(pc_quota_positive "$_q") $(pc_usage_get "$(entry_key "$_m" "$_i")")"
 	fi
 }
 

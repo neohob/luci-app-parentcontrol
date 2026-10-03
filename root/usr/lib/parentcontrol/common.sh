@@ -224,6 +224,23 @@ pc_entry_quota() {
 	pc_uget "@$1[$2].${_sfx}_quota"
 }
 
+# 条目今天「生效的额度来源」——全仓唯一一份「池优先」解析，输出 "<原始额度> <池名>"。
+# 挂了池且池有额度 → 用池的额度；否则用条目自己的。封锁链(entry_effective)、配置迁移
+# 都读这一份，避免同一策略在两处各写一遍（历史教训：ui.lua 与 statsdata 各写一份 TSV 解析，
+# 改列时漏改一处就是整列静默错值）。
+# 注意：空额度表示"没有这个额度来源"，它的含义（不限 / 全禁）由调用方按语义决定。
+pc_effective_quota() { # $1=module $2=idx $3=school|holiday
+	local _pool _pq
+	_pool=$(pc_entry_pool "$1" "$2" "$3")
+	_pq=""
+	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
+	if [ -n "$_pq" ]; then
+		echo "$_pq $_pool"
+	else
+		echo "$(pc_entry_quota "$1" "$2" "$3") $_pool"
+	fi
+}
+
 # 所有已启用条目的 key（模块序 time/protocol/weburl）。
 # 统一模型里没有"模式"了：每个条目都有「可用时段 + 额度」，是否真的限制由这两个字段决定
 # （额度 0 = 全禁；勾了不限额度 + 时段全天 = 完全不限制，此时只计数不封锁）。
@@ -296,8 +313,10 @@ pc_migrate_config() {
 	#    映射（既定方案）：
 	#      time  → 不限额度 + 09:00-21:00（老语义是"封某一段"，新模型只有"可用时段"，
 	#              无法无损换算；给 WhatsApp 工作时段、并在日志里留痕）
-	#      quota → 额度原样保留，只补 unlimited=0。老 quota 本来全天 24h 可用，
-	#              不额外加时段，免得把存量用户静默收紧成每天 12 小时
+	#      quota → 额度字段**原样保留**（不动它本身、也不额外加时段：老 quota 本来全天
+	#              24h 可用，加 09:00-21:00 会把存量用户静默收紧成每天 12 小时）。
+	#              但「不限额度」开关必须按老判据重写：老运行时是「归一后有效额度 > 0 才算
+	#              有限额」，所以有效额度 ≤ 0（空/0/负数/非数字）一律**强制**写成 unlimited=1
 	#      block → 额度 0（0 = 一分钟都不给）
 	#      off   → 不限额度（不写时段 = 全天可用）
 	#      week  → 该档案在老模型里生效 = 当年有时段限制 → 不限额度 + 09:00-21:00
@@ -343,9 +362,11 @@ pc_migrate_config() {
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0"
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 老运行时的判据是「归一后的有效额度 > 0 才算有限额」（c4fe179..a1ae0e9 的
-					# build_quota_blocks，也就是上游/发布版一直以来的行为）：额度为空、0、负数、
-					# 非数字在那个语义里**都是"不限"**。所以这里把"老=不限"显式写成 unlimited=1。
+					# 依据：额度模型是 8ab43a2 引入的，**从那一刻到 a0c7936 之前的每一个版本**，
+					# 运行时判据都是「归一后的有效额度 > 0 才算有限额」（build_quota_blocks 里那句
+					# `[ "$1" -gt 0 ] || continue`）。所以在这段历史里额度为空/0/负数/非数字
+					# **都是"不限"**。这里把"老=不限"显式写成 unlimited=1。
+					# （注意：上游原版 sirpdboy 根本没有额度/unlimited 模型，所以不要说"上游一直如此"。）
 					#
 					# 已知的不可判别之处（不要再试图用标记去猜）：我的中间开发版 a0c7936 曾短暂把
 					# 「额度 0/空」定义成"全天禁止"，那种配置与老配置**形状完全一样**，没有任何字段
@@ -358,10 +379,9 @@ pc_migrate_config() {
 					[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
 					if [ "$_unl" = 0 ]; then
 						if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
-						_eq=""
-						_p=$(pc_entry_pool "$_m" "$_i" "$_dt")
-						[ -n "$_p" ] && _eq=$(pc_pool_quota "$_p" "$_dt")
-						[ -n "$_eq" ] || _eq=$(pc_entry_quota "$_m" "$_i" "$_dt")
+						# 池优先的有效额度只有一份实现（common.sh 的 pc_effective_quota）
+						_eq=$(pc_effective_quota "$_m" "$_i" "$_dt")
+						_eq=${_eq%% *}
 						if [ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null; then
 							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
 						else
