@@ -244,11 +244,12 @@ pc_entry_eff_mode() {
 
 # 今天处于「每日额度」模式的条目键（<module>_<idx>），每行一个。
 # 所有额度相关遍历都从这里出发，避免模块清单散落各处。
-pc_quota_keys() { # $1=school|holiday
-	local _m _i
+pc_quota_keys() { # $1=school|holiday [$2=mode，默认 quota]
+	local _m _i _want
+	_want=${2:-quota}
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
-			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"
+			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "$_want" ] && echo "${_m}_${_i}"
 		done
 	done
 }

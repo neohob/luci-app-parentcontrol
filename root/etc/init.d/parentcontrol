@@ -446,9 +446,20 @@ block_entry_window() { # $1=module $2=idx $3=UTC起秒 $4=UTC止秒
 		"-m time --timestart $(pc_sec_hhmmss "$3") --timestop $(pc_sec_hhmmss "$4")" "-j DROP" all
 }
 
-# 额度封锁链，两个条件互不干扰：
-#   ① 可用时段之外 → 一律封（内核 -m time 精确到秒，不依赖 tick 是否活着）
-#   ② 额度用完了 → 整条封（比时段封更强，所以不需要时间条件）
+# 防自锁守卫：无设备条件（= 对全部客户端生效）且拿不到局域网网段时不能封锁 ——
+# 无差别 PREROUTING DROP 会把路由器自己也封死。返回 0 表示"应当跳过这条"。
+block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
+	[ -n "$(pc_uget "@$1[$2].mac")" ] && return 1
+	[ -n "$(pc_uget "@$1[$2].ip")" ] && return 1
+	[ -n "$3" ] && return 1
+	elog "quota: $1[$2] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
+	return 0
+}
+
+# 额度封锁链，三个来源互不干扰：
+#   ⓪ 模式=全天禁止 → 无条件封（不看时段、不看额度）
+#   ① 模式=每日额度 且不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
+#   ② 模式=每日额度 且额度用完 → 整条封（比时段封更强，所以不需要时间条件）
 # 勾了「不限额度」的条目只受 ① 约束。
 build_quota_blocks() {
 	local _tt _key _m _i _ip _lan _a _b
@@ -458,15 +469,15 @@ build_quota_blocks() {
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
 	_lan=$(pc_lan_nets)
+	# ⓪ 全天禁止：无条件封（守卫必须在最前——它是最强的无条件 DROP）
+	for _key in $(pc_quota_keys "$_tt" block); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		block_skip_devless "$_m" "$_i" "$_lan" && continue
+		block_entry "$_m" "$_i"
+	done
 	for _key in $(pc_quota_keys "$_tt"); do
 		_m=${_key%%_*}; _i=${_key#*_}
-		# 防自锁：无设备条件（= 对全部客户端生效）且拿不到局域网网段时，无差别
-		# PREROUTING DROP 会把路由器自己也封死。这条守卫必须在两个分支**之前**：
-		# 时段外的封锁同样是无条件 DROP，一样会把管理员关在门外。
-		if [ -z "$(pc_uget "@$_m[$_i].mac")" ] && [ -z "$(pc_uget "@$_m[$_i].ip")" ] && [ -z "$_lan" ]; then
-			elog "quota: $_m[$_i] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
-			continue
-		fi
+		block_skip_devless "$_m" "$_i" "$_lan" && continue
 		# ① 可用时段之外
 		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
 			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"

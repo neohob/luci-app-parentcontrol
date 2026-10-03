@@ -50,7 +50,9 @@ function M.profiles(self, section)
 	local map = self.map
 	local function one(sfx, label)
 		local mode = get(map, section, sfx .. "_mode") or "off"
-		if mode ~= "quota" then
+		if mode == "block" then
+			return label .. " " .. i18n.translate("全天禁止")
+		elseif mode ~= "quota" then
 			return label .. " " .. i18n.translate("关闭")
 		end
 		local q = get(map, section, sfx .. "_quota")

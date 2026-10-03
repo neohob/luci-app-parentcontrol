@@ -103,7 +103,7 @@ function M.collect()
 				e.projected = math.floor(e.used * 1440 / elapsed)
 			end
 		else
-			e.remain, e.pct, e.status = nil, 0, info("关闭")
+			e.remain, e.pct, e.status = nil, 0, (e.mode == "block" and info("全天禁止") or info("关闭"))
 		end
 	end
 
