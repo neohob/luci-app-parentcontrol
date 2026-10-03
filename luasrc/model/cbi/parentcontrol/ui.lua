@@ -75,7 +75,7 @@ function M.profiles(self, section)
 		elseif qn then
 			st = qn .. i18n.translate("分钟")
 		elseif unl == "0" then
-			st = "0 " .. i18n.translate("分钟")
+			st = "0" .. i18n.translate("分钟")
 		elseif p and p ~= "" then
 			st = i18n.translate("不限")
 		else

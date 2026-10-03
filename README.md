@@ -10,7 +10,9 @@
 </p>
 
 家长控制：按网址/域名过滤某台设备，并支持**可用时段 + 每日累计使用额度**。
-（上游的「时间限制」「协议过滤」两个页面已移除 —— 与本 fork 的「可用时段 + 每日额度」重复。）
+（界面上的「时间限制」「协议过滤」两页已移除：它们的模型与本 fork 的「可用时段 + 每日额度」重叠。
+⚠ 注意：**shell 侧仍然支持这两类条目**，存量配置里若还有**启用中的** time/protocol 条目，它们会被照旧执行、
+但界面上没有入口可改 —— 要彻底停用请把它们关掉或删掉对应的 uci 节。）
 
 本仓库 fork 自 [sirpdboy/luci-app-parentcontrol](https://github.com/sirpdboy/luci-app-parentcontrol)。
 
@@ -29,7 +31,6 @@
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/IP 拦某台设备</sub></td>
 <td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
 </tr>
 <tr>
@@ -152,7 +153,7 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 ### 8. 界面
 
-- 列表只显示摘要：`开启 / 备注 / 设备 / 静态IP / 档案 / 今日额度`，
+- 列表只显示摘要：`开启 / 备注 / 设备 / 静态IP / 域名·IP / 档案 / 今日额度`，
   每行一个 **编辑** 按钮
   - **设备**列显示 `MAC（设备名）`，设备名取自 DHCP 租约/ARP（`luci.sys.net.mac_hints`）
   - **档案**列显示紧凑摘要：两档案一致时只写一次（`两档案相同：60分钟(09:00-21:00)`），
