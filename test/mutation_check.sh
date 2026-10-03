@@ -29,8 +29,9 @@ SKIPPED=0
 run_mut() { # <名字> <文件> <老> <新> <套件>
 	name=$1; file=$2; old=$3; new=$4; suite=$5
 	if ! mutate "$file" "$old" "$new"; then
-		printf '  SKIP  %s（锚点未命中）\n' "$name"
+		printf '  FAIL  %s（锚点未命中：这条防线已失效，必须修锚点）\n' "$name"
 		SKIPPED=$((SKIPPED + 1))
+	FAILED=$((FAILED + 1))
 		return
 	fi
 	if (cd "$WORK/repo" && sh "test/$suite") >"$WORK/out" 2>&1; then
@@ -99,7 +100,7 @@ run_mut 'isOffDay 判反' "$COMMON" \
 
 # 10) 迁移：不再写可用时段（week=1-5 的老条目本应拿到 09:00-21:00）
 run_mut '迁移不写可用时段' "$COMMON" \
-	'					_pcset "@$_m[$_i].${_sfx}_qstart=$_ws"' \
+	'					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=$_ws"' \
 	'					:' migrate_test.sh
 
 # 11) pc_active_keys 输出的 key 必须是唯一的一份（重复会让封锁链下发两遍）
@@ -130,5 +131,5 @@ run_mut '拆除残留 mangle 链' "$INIT" \
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done' '' init_test.sh
 
-printf '\n被杀 %d / 存活 %d / 跳过 %d\n' "$KILLED" "$SURVIVED" "$SKIPPED"
-[ "$SURVIVED" -eq 0 ] || exit 1
+printf '\n被杀 %d / 存活 %d / 锚点失效 %d\n' "$KILLED" "$SURVIVED" "$SKIPPED"
+[ "$SURVIVED" -eq 0 ] && [ "$SKIPPED" -eq 0 ] || exit 1
