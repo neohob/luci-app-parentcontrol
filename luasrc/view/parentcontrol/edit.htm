@@ -3,8 +3,9 @@
 	/* 勾了「不限额度」→ 收起同档案的「每日分钟」和「共享组」两行。
 	   选择器刻意**不引用 input 的 id**：这台机上 Checkbox 的 <input> 拿不到
 	   label[for] 指的那个 id（浏览器会报 "Incorrect use of <label for=FORM_ELEMENT>"），
-	   所以按 input[id$=...] 永远选不中；这里只靠**行 div 的 id**（服务端渲染的，稳定）
-	   + 行内有 checked 的 checkbox。
+	   所以按 input 的 id 找不到那个开关（文本类控件的 id 是有的）；
+	   这里只靠**行 div 的 id**（服务端渲染的，稳定）+ 行内有 checked 的 checkbox，
+	   完全不引用 input 的 id。
 	   为什么用 CSS 而不是 JS：
 	     1) 这台路由器是 LuCI 的新式 JS 控件渲染（字段以 data-ui-widget 形式由前端 js
 	        注入真正的 <input>），JS 里按 id 找控件会有"跑得比控件渲染还早"的时机问题；
@@ -34,9 +35,10 @@
 			var m = /^(\d?\d):(\d\d)(?::(\d\d))?$/.exec(t || '');
 			return m ? (parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0)) : null;
 		}
-		// 一律按 name 找控件：这台 LuCI 的 Checkbox/Textfield 渲染**不给 <input> 设
-		// label[for] 指的那个 id**（浏览器会报 Incorrect use of <label for=FORM_ELEMENT>），
-		// 所以 input[id$=...] 永远选不中；name 属性是稳定存在的。
+		// 一律按 name 找控件（而不是 id）：这台 LuCI 的 **Checkbox** 渲染没有给 <input> 设
+		// label[for] 指的那个 id（浏览器会报 Incorrect use of <label for=FORM_ELEMENT>），
+		// 所以按 id 找**开关**选不中；文本类控件（如 .domains）的 id 是有的。
+		// name 属性对两者都稳定存在，统一用它更省事；checkbox 另加 [type=checkbox]。
 		function val(sfx) {
 			var el = document.querySelector('input[name$=".' + sfx + '"]');
 			return el ? el.value : null;
@@ -55,7 +57,9 @@
 		function check() {
 			var out = ['sd', 'hd'].map(function (sfx) {
 				var qs = val(sfx + '_quota'), ss = val(sfx + '_qstart'), es = val(sfx + '_qend');
-				var uEl = document.querySelector('input[name$=".' + sfx + '_unlimited"]');
+				// 必须带 [type=checkbox]：Flag 会渲染一个同后缀的隐藏伴随 input
+				// （cbi.cbe.<cfg>.<sec>.<opt>，见 HTML 的 hiddenname），只按 name 后缀会撞上它
+				var uEl = document.querySelector('input[type=checkbox][name$=".' + sfx + '_unlimited"]');
 				if (qs === null || ss === null || es === null) return null;
 				var name = (sfx === 'hd') ? '<%=translate("节假日")%>' : '<%=translate("平日")%>';
 				var a = pars(ss), b = pars(es);
