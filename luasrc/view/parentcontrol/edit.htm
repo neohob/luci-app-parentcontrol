@@ -1,14 +1,38 @@
 <% include("cbi/map") %>
+<style type="text/css">
+	/* 勾了「不限额度」→ 收起同档案的「每日分钟」和「共享组」两行。
+	   为什么用 CSS 而不是 JS：
+	     1) 这台路由器是 LuCI 的新式 JS 控件渲染（字段以 data-ui-widget 形式由前端 js
+	        注入真正的 <input>），JS 里按 id 找控件会有"跑得比控件渲染还早"的时机问题；
+	     2) LuCI 在 Flag 改变时会 cbi_d_update() 重渲染字段 DOM，JS 设的行内样式会被冲掉。
+	   :has() 是声明式的：勾上/取消的那一刻立即生效，与渲染时机无关。
+	   ~ 是兄弟选择器：quota/pool 两行都排在该档案「不限额度」那一行之后。 */
+	.cbi-value:has(input[id$=".sd_unlimited"]:checked) ~ .cbi-value[id$="-sd_quota"],
+	.cbi-value:has(input[id$=".sd_unlimited"]:checked) ~ .cbi-value[id$="-sd_pool"],
+	.cbi-value:has(input[id$=".hd_unlimited"]:checked) ~ .cbi-value[id$="-hd_quota"],
+	.cbi-value:has(input[id$=".hd_unlimited"]:checked) ~ .cbi-value[id$="-hd_pool"] {
+		display: none !important;
+	}
+	/* 平日 / 节假日两组的字段原来是一长串堆在一起，看不出分组：
+	   给「节假日」那组的首行加一条分隔线 + 上边距（纯 CSS，不依赖 CBI 的控件渲染）。 */
+	.cbi-value[id$="-hd_qstart"] {
+		border-top: 1px solid rgba(128, 128, 128, .38);
+		margin-top: 16px;
+		padding-top: 12px;
+	}
+	.cbi-value[id$="-sd_pool"] { margin-bottom: 4px; }
+</style>
 <script type="text/javascript">//<![CDATA[
-	// 「额度 ≤ 可用时段长度」+「起必须早于止」的即时提示（软提示，不拦提交）。
-	// 后端只会把脏数据按「不限制时段」兜底，所以这里只是提前告诉用户。
+	// 「起必须早于止」+「额度 ≤ 可用时段长度」的即时软提示（只提示，不拦提交；
+	// 后端另有兜底：脏数据按"不限制时段"处理，绝不会因此把设备整天封死）。
 	(function () {
 		function pars(t) {
 			var m = /^(\d?\d):(\d\d)(?::(\d\d))?$/.exec(t || '');
 			return m ? (parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0)) : null;
 		}
-		function pick(sfx) {
-			return document.querySelector('input[id$=".' + sfx + '_quota"]');
+		function val(sfx) {
+			var el = document.querySelector('input[id$=".' + sfx + '"]');
+			return el ? el.value : null;
 		}
 		function warn() {
 			var el = document.getElementById('pc-warn');
@@ -23,67 +47,33 @@
 		}
 		function check() {
 			var out = ['sd', 'hd'].map(function (sfx) {
-				var q = pick(sfx);
-				var s = document.querySelector('input[id$=".' + sfx + '_qstart"]');
-				var e = document.querySelector('input[id$=".' + sfx + '_qend"]');
-				var u = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
-				if (!q || !s || !e) return null;
+				var qs = val(sfx + '_quota'), ss = val(sfx + '_qstart'), es = val(sfx + '_qend');
+				var uEl = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
+				if (qs === null || ss === null || es === null) return null;
 				var name = (sfx === 'hd') ? '<%=translate("节假日")%>' : '<%=translate("平日")%>';
-				var a = pars(s.value), b = pars(e.value);
+				var a = pars(ss), b = pars(es);
 				if (a === null || b === null) return name + '：<%=translate("时间格式必须为 HH:MM:SS")%>';
 				if (a >= b) return name + '：<%=translate("可用起必须早于可用止（不支持跨日时段）")%>';
-				var qv = parseInt(q.value, 10);
-				if (u && u.checked) return null;          // 勾了不限额度 → 不判额度
-				if (q.value === '' || isNaN(qv)) return name + '：<%=translate("每日额度必填（填 0 = 一分钟都不给）")%>';
+				// 勾了不限额度 → 额度框已由 CSS 收起，也不再判额度
+				if (uEl && uEl.checked) return null;
+				var qv = parseInt(qs, 10);
+				if (qs === '' || isNaN(qv)) return name + '：<%=translate("每日额度必填（填 0 = 一分钟都不给）")%>';
 				var lim = Math.floor((b - a) / 60);
 				if (qv > lim) return name + '：<%=translate("额度超过了可用时段长度")%>（' + lim + ' <%=translate("分钟")%>）';
 				return null;
 			}).filter(function (x) { return x !== null; });
 			warn().innerHTML = out.length ? ('⚠ ' + out.join('；')) : '';
 		}
-		// 勾了「不限额度」→ 收起「每日分钟」和「共享组」两个框。
-		// 不用 CBI 的 depends：Flag 在 depends 里表达不了"未勾选"（未勾的值不是 "0"）。
-		// 注意 LuCI 的 Flag 在 change 时会走 cbi_d_update() **重渲染** DOM，
-		// 所以这里不能只在 boot/change 时设一次样式（会被重渲染冲掉）——
-		// 用 closest('.cbi-value') 定位（不依赖那种 cbi-<conf>-<sec>-<opt> 的 id 形状），
-		// 并且让 MutationObserver 在 DOM 变化后重新施加。
-		function applyUnlimited() {
-			['sd', 'hd'].forEach(function (sfx) {
-				var u = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
-				if (!u) return;
-				[sfx + '_quota', sfx + '_pool'].forEach(function (key) {
-					var i = document.querySelector('input[id$=".' + key + '"]');
-					var row = i && i.closest('.cbi-value');
-					if (!row) return;
-					if (u.checked) {
-						row.style.display = 'none';
-					} else {
-						row.style.display = '';
-					}
-				});
-			});
-		}
-
 		function boot() {
-			applyUnlimited();
 			check();
 			document.addEventListener('keyup', check);
-			document.addEventListener('change', function () { applyUnlimited(); check(); });
-			document.addEventListener('click', function () { applyUnlimited(); check(); });
+			document.addEventListener('change', check);
+			document.addEventListener('click', check);
 		}
 		if (document.readyState === 'loading') {
 			document.addEventListener('DOMContentLoaded', function () { setTimeout(boot, 200); });
 		} else {
 			setTimeout(boot, 200);
-		}
-		// CBI 的 cbi_d_update() 会整块替换字段 DOM，所以每次 DOM 变化后都要重新施加一次
-		if (window.MutationObserver) {
-			var pending = false;
-			new MutationObserver(function () {
-				if (pending) return;
-				pending = true;
-				setTimeout(function () { pending = false; applyUnlimited(); }, 0);
-			}).observe(document.body, { childList: true, subtree: true });
 		}
 	})();
 //]]>
