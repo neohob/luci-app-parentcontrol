@@ -4,7 +4,7 @@ local ui = require "luci.model.cbi.parentcontrol.ui"
 local a, t, e
 a = Map("parentcontrol", translate("家长控制"),
 	translate("网址过滤：按域名/CIDR 管控，支持 IPv4 与 IPv6。</br>\
-列表只显示摘要，点每行的 <b>编辑</b> 进去设置「平日 / 节假日」两套档案（关闭 / 时段 / 每日额度）。"))
+列表只显示摘要，点每行的 <b>编辑</b> 进去设置「平日 / 节假日」两套档案（关闭 / 每日额度）。额度模式下可再限定「可用时段」，只有时段内能用，时段外的流量不计入额度。"))
 
 a.template = "parentcontrol/index"
 
@@ -22,12 +22,6 @@ e = t:option(ListValue, "algos", translate("过滤力度"))
 e:value("bm", "一般过滤")
 e:value("kmp", "强效过滤")
 e.default = "kmp"
-
-e = t:option(ListValue, "control_mode", translate("管控强度"),
-	translate("普通管控：管控国内网站，出国插件的国外网站无法管控"))
-e.rmempty = false
-e:value("0", "普通管控")
-e.default = "0"
 
 e = t:option(Value, "ip_refresh", translate("IP封锁自动更新间隔(分钟)"),
 	translate("定时重新解析域名刷新 IP，0=关闭。"))

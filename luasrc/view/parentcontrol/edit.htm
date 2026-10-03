@@ -1,0 +1,56 @@
+<% include("cbi/map") %>
+<script type="text/javascript">//<![CDATA[
+	// 「额度 ≤ 可用时段长度」+「起必须早于止」的即时提示（软提示，不拦提交）。
+	// 后端只会把脏数据按「不限制时段」兜底，所以这里只是提前告诉用户。
+	(function () {
+		function pars(t) {
+			var m = /^(\d?\d):(\d\d)(?::(\d\d))?$/.exec(t || '');
+			return m ? (parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0)) : null;
+		}
+		function pick(sfx) {
+			return document.querySelector('input[id$=".' + sfx + '_quota"]');
+		}
+		function warn() {
+			var el = document.getElementById('pc-warn');
+			if (el) return el;
+			// cbi/map 自带 header/footer，模板里插 div 会落到 </html> 之后，所以用 JS 插
+			el = document.createElement('div');
+			el.id = 'pc-warn';
+			el.style.cssText = 'color:#c00;font-weight:bold;margin:4px 0';
+			var host = document.querySelector('.cbi-map') || document.body;
+			host.insertBefore(el, host.firstChild);
+			return el;
+		}
+		function check() {
+			var out = ['sd', 'hd'].map(function (sfx) {
+				var q = pick(sfx);
+				var s = document.querySelector('input[id$=".' + sfx + '_qstart"]');
+				var e = document.querySelector('input[id$=".' + sfx + '_qend"]');
+				var u = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
+				if (!q || !s || !e) return null;
+				var name = (sfx === 'hd') ? '<%=translate("节假日")%>' : '<%=translate("平日")%>';
+				var a = pars(s.value), b = pars(e.value);
+				if (a === null || b === null) return name + '：<%=translate("时间格式必须为 HH:MM:SS")%>';
+				if (a >= b) return name + '：<%=translate("可用起必须早于可用止（不支持跨日时段）")%>';
+				var qv = parseInt(q.value, 10);
+				if (u && u.checked) return null;          // 勾了不限额度 → 不判额度
+				if (!qv) return name + '：<%=translate("每日额度必填，且不能填 0")%>';
+				var lim = Math.floor((b - a) / 60);
+				if (qv > lim) return name + '：<%=translate("额度超过了可用时段长度")%>（' + lim + ' <%=translate("分钟")%>）';
+				return null;
+			}).filter(function (x) { return x !== null; });
+			warn().innerHTML = out.length ? ('⚠ ' + out.join('；')) : '';
+		}
+		function boot() {
+			check();
+			document.addEventListener('keyup', check);
+			document.addEventListener('change', check);
+		}
+		if (document.readyState === 'loading') {
+			document.addEventListener('DOMContentLoaded', function () { setTimeout(boot, 200); });
+		} else {
+			setTimeout(boot, 200);
+		}
+	})();
+//]]>
+</script>

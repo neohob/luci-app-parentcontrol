@@ -18,10 +18,9 @@ TICK_LOCK=${TICK_LOCK:-/tmp/lock/${CONFIG}.tick}
 ipt=$(command -v iptables-legacy || command -v iptables)
 ipt6=$(command -v ip6tables-legacy || command -v ip6tables)
 
-TAG="PARENTCONTROL_TIME"
-TAGP="PARENTCONTROL_PROTOCOL"
-TAGW="PARENTCONTROL_WEBURL"
-TAGI="PARENTCONTROL_IP"
+# 统一后只剩两条链（都在 mangle PREROUTING，顺序 TAGQ → TAGA）：
+#   TAGQ 额度/时段封锁、TAGA 用量计数。老版本的 PARENTCONTROL_TIME/PROTOCOL/WEBURL/IP
+#   已废弃，只在 del_rule 里按字面量清理一次。
 TAGA="PARENTCONTROL_ACCT"
 TAGQ="PARENTCONTROL_QUOTA"
 FWI="/var/etc/$CONFIG.include"
@@ -88,17 +87,6 @@ add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=acti
 }
 
 # 时段窗口（禁止时段）。起控=停控 或留空 → 无时间条件（= 全天封，沿用旧语义）
-time_gate() { # $1=module $2=idx $3=school|holiday
-	local _sfx _ts _te
-	_sfx=$(pc_suffix "$3")
-	_ts=$(pc_uget "@$1[$2].${_sfx}_start")
-	_te=$(pc_uget "@$1[$2].${_sfx}_end")
-	[ -z "$_ts" ] && _ts=00:00
-	[ -z "$_te" ] && _te=00:00
-	[ "$_ts" = "$_te" ] && { echo ""; return; }
-	# -m time 默认 UTC；用户填的是北京时间，转 UTC 后就不再依赖路由器内核时区
-	echo "-m time --timestart $(pc_utc_hhmm "$_ts") --timestop $(pc_utc_hhmm "$_te")"
-}
 
 # 协议端口条件（单个用 --sport/--dport；多个/范围用 -m multiport）
 proto_cond() { # $1=idx
@@ -318,45 +306,7 @@ allow_lan_in() { # $1=ipcmd $2=table $3=chain
 	return 0
 }
 
-build_time_rules() { # $1=school|holiday
-	local _cm _ip _i _hookin
-	_cm=$(pc_uget "@basic[0].control_mode")
-	# 「强力管控」= 把时间链也挂进 INPUT，让受控机器连路由器管理页都进不去。
-	# 但无设备条件的条目（mac 和 ip 都空 = 对全部客户端生效）在 INPUT 里是无条件
-	# REJECT：受控窗口内管理员自己也上不了后台。这种条目存在时只保留 FORWARD 管控。
-	# （不能在 TAG 里加 allow_lan_in——受控机器访问管理页的目标就在局域网网段里，
-	#   一放行「强力管控」就永远不生效了，只能从挂载这一侧防。）
-	_hookin=1
-	for _i in $(pc_ids_on time); do
-		[ "$(pc_entry_eff_mode time "$_i" "$1")" = "time" ] || continue
-		if [ -z "$(pc_uget "@time[$_i].mac")" ] && [ -z "$(pc_uget "@time[$_i].ip")" ]; then
-			_hookin=0
-			elog "time[$_i] 无设备条件：为避免 INPUT 被无条件 REJECT 锁死，跳过「强力管控」的 INPUT 挂载"
-			break
-		fi
-	done
-	for _ip in "$ipt" "$ipt6"; do
-		hook_chain "$_ip" filter FORWARD "$TAG"
-		if [ "$_cm" = "1" ] && [ "$_hookin" = "1" ]; then
-			hook_chain "$_ip" filter INPUT "$TAG"
-		else
-			$_ip -D INPUT -j "$TAG" 2>/dev/null
-		fi
-	done
-	for _i in $(pc_ids_on time); do
-		[ "$(pc_entry_eff_mode time $_i "$1")" = "time" ] || continue
-		emit_entry_targets time "$_i" filter "$TAG" "$TAG" "$(time_gate time $_i "$1")" "-j REJECT" all
-	done
-}
 
-build_protocol_rules() { # $1=school|holiday
-	local _ip _i
-	for _ip in "$ipt" "$ipt6"; do hook_chain "$_ip" filter FORWARD "$TAGP"; done
-	for _i in $(pc_ids_on protocol); do
-		[ "$(pc_entry_eff_mode protocol $_i "$1")" = "time" ] || continue
-		emit_entry_targets protocol "$_i" filter "$TAGP" "$TAGP" "$(time_gate protocol $_i "$1")" "-j REJECT" all
-	done
-}
 
 # 网址过滤匹配串（域名/关键词），逐包 -m string 用。
 # 字符集有意不含 *：-m string 是字面匹配，* 不会被当通配符，加进来只会带出
@@ -427,18 +377,6 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 	done
 }
 
-build_weburl_time_rules() { # $1=school|holiday
-	local _i _ip
-	for _i in $(pc_ids_on weburl); do
-		[ "$(pc_entry_eff_mode weburl $_i "$1")" = "time" ] || continue
-		emit_entry_targets weburl "$_i" mangle "$TAGI" "$TAGW" "$(time_gate weburl $_i "$1")" "-j DROP" all
-	done
-	# 网址封锁列表万一填进了局域网网段，也不该把管理员挡在后台外
-	for _ip in "$ipt" "$ipt6"; do
-		allow_lan_in "$_ip" mangle "$TAGI"
-		allow_lan_in "$_ip" mangle "$TAGW"
-	done
-}
 
 clean_pca_chains() {
 	local _c
@@ -500,12 +438,21 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 	fi
 }
 
-# 额度封锁链：按当前状态决定哪些条目要封（未发放 R 之前 / 额度耗尽）
+# 额度封锁链：① 可用时段之外 ② 额度耗尽（详见函数内注释）
+# 可用时段之外的封锁规则（$3/$4 = UTC 秒区间；本机 iptables 不支持「! -m time」取反，
+# 所以「时段外」一律用正向区间表达，跨 UTC 零点时由 pc_utc_ranges 切成两段）
+block_entry_window() { # $1=module $2=idx $3=UTC起秒 $4=UTC止秒
+	emit_entry_targets "$1" "$2" mangle "$TAGQ" "$TAGQ" \
+		"-m time --timestart $(pc_sec_hhmmss "$3") --timestop $(pc_sec_hhmmss "$4")" "-j DROP" all
+}
+
+# 额度封锁链，两个条件互不干扰：
+#   ① 可用时段之外 → 一律封（内核 -m time 精确到秒，不依赖 tick 是否活着）
+#   ② 额度用完了 → 整条封（比时段封更强，所以不需要时间条件）
+# 勾了「不限额度」的条目只受 ① 约束。
 build_quota_blocks() {
-	local _tt _reset _issued _key _m _i _ip _n _lan
+	local _tt _key _m _i _ip _lan _a _b
 	_tt=$(pc_today_type)
-	_reset=$(pc_reset_for "$_tt")
-	_issued=0; pc_allowance_issued "$_reset" && _issued=1
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGQ"
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
@@ -513,17 +460,22 @@ build_quota_blocks() {
 	_lan=$(pc_lan_nets)
 	for _key in $(pc_quota_keys "$_tt"); do
 		_m=${_key%%_*}; _i=${_key#*_}
+		# 防自锁：无设备条件（= 对全部客户端生效）且拿不到局域网网段时，无差别
+		# PREROUTING DROP 会把路由器自己也封死。这条守卫必须在两个分支**之前**：
+		# 时段外的封锁同样是无条件 DROP，一样会把管理员关在门外。
+		if [ -z "$(pc_uget "@$_m[$_i].mac")" ] && [ -z "$(pc_uget "@$_m[$_i].ip")" ] && [ -z "$_lan" ]; then
+			elog "quota: $_m[$_i] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
+			continue
+		fi
+		# ① 可用时段之外
+		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
+			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"
+		done
+		# ② 额度耗尽（勾了「不限额度」= 只看时段，不判额度）
+		[ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" = "1" ] && continue
 		set -- $(entry_effective "$_m" "$_i" "$_tt")
 		[ "$1" -gt 0 ] 2>/dev/null || continue
-		if [ "$_issued" = "0" ] || [ "$2" -ge "$1" ]; then
-			# 无设备条件（= 全部客户端）时，若拿不到局域网网段就不封锁：
-			# 无差别 PREROUTING DROP 会把路由器自己也封掉，宁可只记录不封锁。
-			if [ -z "$(pc_uget "@$_m[$_i].mac")" ] && [ -z "$(pc_uget "@$_m[$_i].ip")" ] && [ -z "$_lan" ]; then
-				elog "quota: $_m[$_i] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
-				continue
-			fi
-			block_entry "$_m" "$_i"
-		fi
+		[ "$2" -ge "$1" ] && block_entry "$_m" "$_i"
 	done
 	# 最后插入「放行到局域网网段」的规则（含路由器自身 IP），SSH/LuCI 才不会被
 	# 自己的封锁断掉。必须排在所有封锁规则之前，而 -I 是插到最前，故放在最后插入。
@@ -578,22 +530,14 @@ build_all() {
 	_tt=$(pc_today_type)
 	elog "build: day=$_tt"
 	for _ip in "$ipt" "$ipt6"; do
-		ensure_chain "$_ip" filter "$TAG";  $_ip -t filter -F "$TAG" 2>/dev/null
-		ensure_chain "$_ip" filter "$TAGP"; $_ip -t filter -F "$TAGP" 2>/dev/null
-		ensure_chain "$_ip" mangle "$TAGW"; $_ip -t mangle -F "$TAGW" 2>/dev/null
-		ensure_chain "$_ip" mangle "$TAGI"; $_ip -t mangle -F "$TAGI" 2>/dev/null
 		ensure_chain "$_ip" mangle "$TAGA"; $_ip -t mangle -F "$TAGA" 2>/dev/null
 		ensure_chain "$_ip" mangle "$TAGQ"; $_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
-	build_time_rules "$_tt"
-	build_protocol_rules "$_tt"
-	build_weburl_time_rules "$_tt"
 	build_acct_rules "$_tt"
-	# PREROUTING 挂载顺序：TAGQ 最先（封了的包不再进计数链）→ TAGW → TAGI → TAGA
+	# PREROUTING 顺序必须是 TAGQ → TAGA（被封的包不再进计数链）。
+	# hook_chain 用 -I 插到链首，所以先挂 TAGA、后挂 TAGQ，最终就是 TAGQ 在前。
 	for _ip in "$ipt" "$ipt6"; do
 		hook_chain "$_ip" mangle PREROUTING "$TAGA"
-		hook_chain "$_ip" mangle PREROUTING "$TAGI"
-		hook_chain "$_ip" mangle PREROUTING "$TAGW"
 		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 	done
 	build_quota_blocks
@@ -604,18 +548,23 @@ build_all() {
 del_rule() {
 	local _ip _ta _c
 	for _ip in "$ipt" "$ipt6"; do
-		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
+		for _ta in "$TAGQ" "$TAGA"; do
 			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
+			$_ip -t mangle -F "$_ta" 2>/dev/null
+			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done
+		# 老版本残留（统一模型之前）：filter 表的时间/协议链、mangle 表的网址/IP 链
 		for _c in INPUT FORWARD OUTPUT; do
-			for _ta in "$TAG" "$TAGP" "$TAGW"; do
+			for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL PARENTCONTROL_WEBURL; do
 				$_ip -D "$_c" -j "$_ta" 2>/dev/null
 			done
 		done
-		for _ta in "$TAG" "$TAGP"; do
-			$_ip -F "$_ta" 2>/dev/null; $_ip -X "$_ta" 2>/dev/null
+		for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL; do
+			$_ip -F "$_ta" 2>/dev/null
+			$_ip -X "$_ta" 2>/dev/null
 		done
-		for _ta in "$TAGQ" "$TAGW" "$TAGI" "$TAGA"; do
+		for _ta in PARENTCONTROL_WEBURL PARENTCONTROL_IP; do
+			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done
@@ -744,30 +693,28 @@ reset_quota() {
 }
 
 # 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
-#   meta     <日期> <school|holiday> <发放时刻> <0|1已发放> <阈值KB> <保留天> <当前HH:MM>
+#   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
 #   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）
 #   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
-#   meta     <日期> <school|holiday> <发放时刻> <0|1已发放> <阈值KB> <保留天> <当前HH:MM>
+#   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
 #   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
-	local _brief _tt _reset _issued _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump
+	local _brief _tt _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
-	_reset=$(pc_reset_for "$_tt")
-	_issued=0; pc_allowance_issued "$_reset" && _issued=1
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac
 	_keep=$(pc_uget "@basic[0].usage_keep")
 	case "$_keep" in ''|*[!0-9]*) _keep=90 ;; esac
-	printf 'meta\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$(pc_today)" "$_tt" "$_reset" "$_issued" "$_min_kb" "$_keep" "$(date +%H:%M)"
+	printf 'meta\t%s\t%s\t%s\t%s\t%s\n' \
+		"$(pc_today)" "$_tt" "$_min_kb" "$_keep" "$(date +%H:%M)"
 	# 计数器 dump 只做一次：逐条目各起 2 个 iptables 会让弱路由器打开页面卡几秒
 	if [ "$_brief" != "brief" ]; then
 		mkdir -p "$STATE_DIR"; _dump="$STATE_DIR/acct.stats.$$"; dump_acct "$_dump"
@@ -861,15 +808,10 @@ rebuild_ip_rules() {
 	_tt=$(pc_today_type)
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGA"
-		ensure_chain "$_ip" mangle "$TAGI"
-		ensure_chain "$_ip" mangle "$TAGW"
 		ensure_chain "$_ip" mangle "$TAGQ"
 		hook_chain "$_ip" mangle PREROUTING "$TAGA"
-		hook_chain "$_ip" mangle PREROUTING "$TAGI"
-		hook_chain "$_ip" mangle PREROUTING "$TAGW"
 		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 	done
-	build_weburl_time_rules "$_tt"
 	build_acct_rules "$_tt"
 	build_quota_blocks
 }

@@ -1,12 +1,8 @@
 config basic
 	option algos 'kmp'
-	option control_mode '0'
 	option enabled '0'
 	option ip_refresh '30'
 	option ip_mask '24'
-	# 额度发放时刻（北京时间）。R 之前当天额度未发放，按“没额度”封住。
-	option reset_school '12:00'
-	option reset_holiday '12:00'
 	# 用量历史保留天数
 	option usage_keep '90'
 	# 一分钟内至少多少 KB 才算“在用”（滤掉后台心跳），0=任何流量都算
@@ -16,32 +12,41 @@ config weburl
 	option remarks 'Example'
 	option enable '0'
 	option domains 'example.com'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-	option hd_mode 'time'
-	option hd_start '00:00'
-	option hd_end '00:00'
+	# 每日额度模式：可用时段内才能用，时段外一律不可用且不计入额度；
+	# 时段不跨日（起必须早于止），00:00:00-23:59:59 = 全天
+	option sd_mode 'quota'
+	option sd_quota '60'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
+	option sd_unlimited '0'
+	option hd_mode 'quota'
+	option hd_quota '120'
+	option hd_qstart '09:00:00'
+	option hd_qend '21:00:00'
+	option hd_unlimited '0'
 
 config protocol
 	option proto 'tcp'
 	option portd '80'
 	option enable '0'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '00:00'
-	option hd_mode 'time'
-	option hd_start '00:00'
-	option hd_end '00:00'
+	option sd_mode 'quota'
+	option sd_quota '60'
+	option sd_qstart '00:00:00'
+	option sd_qend '23:59:59'
+	option sd_unlimited '0'
+	option hd_mode 'off'
 
 config time
 	option enable '0'
-	option sd_mode 'time'
-	option sd_start '00:00'
-	option sd_end '23:59'
-	option hd_mode 'time'
-	option hd_start '00:00'
-	option hd_end '23:59'
+	option sd_mode 'quota'
+	option sd_quota '60'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
+	option sd_unlimited '0'
+	option hd_mode 'quota'
+	option hd_qstart '09:00:00'
+	option hd_qend '21:00:00'
+	option hd_unlimited '1'
 
 # 共享额度池：条目在额度模式里填池名即可并入，组内流量加总、共用额度
 config quota

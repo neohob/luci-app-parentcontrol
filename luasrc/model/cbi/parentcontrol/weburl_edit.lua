@@ -10,8 +10,9 @@ end
 
 local a, t, e
 a = Map("parentcontrol", translate("编辑网址条目"),
-	translate("平日 / 节假日 两套档案各自二选一：<b>时段</b>（只在此时段内封锁，起控=停控 或留空 = 全天封）或 <b>每日额度</b>（每天 N 分钟，用完封到当天重置点；可填共享组名并入额度池）。"))
+	translate("平日 / 节假日 两套档案各自选「关闭」或「每日额度」。</br>选了「每日额度」后：<b>可用时段</b>内才能使用（默认全天 00:00:00-23:59:59；不跨日，起必须早于止），时段外的流量直接被丢弃、<b>不计入额度</b>；时段内累计用满额度也会被封。</br>勾 <b>不限额度</b> 就只受时段限制（额度框会消失）。额度按自然日、每天 0 点重置，可填共享组名并入额度池。"))
 a.redirect = disp.build_url("admin", "control", "parentcontrol", "weburl")
+a.template = "parentcontrol/edit"
 
 if not a:get(arg[1]) then
 	luci.http.redirect(a.redirect)

@@ -51,8 +51,8 @@ function M.collect()
 			local k = f[1]
 			if k == "meta" then
 				d.meta = {
-					date = f[2], daytype = f[3], reset = f[4], issued = (f[5] == "1"),
-					min_kb = num(f[6], 8), keep = num(f[7], 90), now = f[8] or "",
+					date = f[2], daytype = f[3],
+					min_kb = num(f[4], 8), keep = num(f[5], 90), now = f[6] or "",
 				}
 			elseif k == "entry" then
 				d.entries[#d.entries + 1] = {
@@ -91,27 +91,19 @@ function M.collect()
 		if e.mode == "quota" then
 			e.remain = math.max(0, e.quota - e.used)
 			e.pct = (e.quota > 0) and math.min(100, math.floor(e.used * 100 / e.quota)) or 0
-			if not meta.issued then
-				e.status = info("未发放")
-			elseif e.quota > 0 and e.used >= e.quota then
+			if e.quota > 0 and e.used >= e.quota then
 				e.status = info("已耗尽")
 			else
 				e.status = info("放行中")
 			end
-			-- 预测：以「自发放时刻起的已过时间」推算到 24:00
-			local rh, rm = (meta.reset or "12:00"):match("^(%d?%d):(%d%d)$")
+			-- 预测：额度按自然日（每天 0 点重置），用「当天已过分钟」线性外推
 			local nh, nm = (meta.now or "00:00"):match("^(%d?%d):(%d%d)$")
-			if rh and nh then
-				local started = 0
-				if meta.issued then
-					started = (tonumber(nh) * 60 + tonumber(nm)) - (tonumber(rh) * 60 + tonumber(rm))
-				end
-				if started > 5 and e.used > 0 then
-					e.projected = math.floor(e.used * (1440 - tonumber(rh) * 60 - tonumber(rm)) / started)
-				end
+			local elapsed = nh and (tonumber(nh) * 60 + tonumber(nm)) or 0
+			if elapsed > 5 and e.used > 0 then
+				e.projected = math.floor(e.used * 1440 / elapsed)
 			end
 		else
-			e.remain, e.pct, e.status = nil, 0, (e.mode == "off" and info("关闭") or info("时段"))
+			e.remain, e.pct, e.status = nil, 0, info("关闭")
 		end
 	end
 
@@ -125,8 +117,7 @@ function M.collect()
 			name = p.name, kind = "pool", quota = p.quota, used = p.used,
 			members = members, pct = (p.quota > 0) and math.min(100, math.floor(p.used * 100 / p.quota)) or 0,
 			remain = math.max(0, p.quota - p.used),
-			status = (not meta.issued) and info("未发放")
-				or ((p.quota > 0 and p.used >= p.quota) and info("已耗尽") or info("放行中")),
+			status = (p.quota > 0 and p.used >= p.quota) and info("已耗尽") or info("放行中"),
 		}
 	end
 	for _, e in ipairs(d.entries) do
