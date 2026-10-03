@@ -78,9 +78,10 @@ run_mut '采样阈值失效（任何非零增量都记 1 分钟）' "$INIT" \
 	'		[ "$_d" -gt 0 ] && pc_usage_add "$_key" 1' init_test.sh
 
 # 6) 池额度被忽略（一律按私有额度）
-run_mut '共享池口径失效' "$INIT" \
-	'	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")' \
-	'	_pq=' init_test.sh
+run_mut '共享池口径失效（池额度永远读不到）' "$COMMON" \
+	'	_p=$(pc_entry_pool "$1" "$2" "$3")
+	[ -n "$_p" ] && pc_pool_quota "$_p" "$3"' \
+	'	:' init_test.sh
 
 # 7) 重建时不再 ensure/hook（fw4 reload 后自愈能力丢失）
 run_mut '重建自愈能力丢失' "$INIT" \

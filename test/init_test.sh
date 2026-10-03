@@ -410,6 +410,33 @@ pc_usage_add weburl_0 30
 pc_usage_add weburl_1 20
 t_eq '挂「有额度」的池 → 用池的额度/池内合计（60 50 wq）' '60 50 wq' "$(entry_effective weburl 0 school)"
 
+echo '== 第三态：池额度是 0（"池提供了额度"但归一是 0）→ 仍算池提供，用池的额度/池内合计 =='
+# 用来钉住判据形态：如果把"池是否提供额度"漂成 `pc_quota_positive(...) > 0`，
+# 池额度 0/abc 这类就会走错分支（这里是 0 → 会变成用条目自己的额度/用量）。
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config quota
+	option name 'zq'
+	option sd_quota '0'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_quota '30'
+	option sd_pool 'zq'
+config weburl
+	option enable '1'
+	option mac 'aa:bb:cc:dd:ee:ff'
+	option domains 'example.com'
+	option sd_quota '40'
+	option sd_pool 'zq'
+EOF
+cfg_apply
+pc_usage_add weburl_0 30
+pc_usage_add weburl_1 20
+t_eq '池额度 0 → 走池分支（0 50 zq，不是 30 30 zq）' '0 50 zq' "$(entry_effective weburl 0 school)"
+
 echo '== 防自锁：到局域网/路由器自身的流量必须放行 =='
 fresh
 cfg_begin 1
