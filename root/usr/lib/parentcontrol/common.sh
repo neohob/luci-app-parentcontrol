@@ -254,9 +254,12 @@ _pcset() { # $1=@type[idx].option=value
 	[ -n "$(pc_uget "${1%%=*}")" ] || uci -q set "$PC_CONF.$1"
 }
 
-# 把空/非数字额度归一为 0。注意新语义：0 = 一分钟都不给（全禁），不是"不限"。
+# 把额度归一成非负整数（分钟）：空/非数字/负数 → 0（= 全禁，一分钟都不给），
+# 但 "+5" / " 5" / "00" 这类能按数值解释的脏值要保住它原本的数值。
+# 用数值解析而不是字符白名单：老配置里的额度当年是按 `[ "$q" -gt 0 ]` 比较的，
+# 白名单会把 "+5" 一律压成 0，等于把「限 5 分钟」静默变成「全天全禁」。
 pc_quota_positive() {
-	case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac
+	awk -v v="$1" 'BEGIN { n = v + 0; if (n < 0) n = 0; printf "%d\n", n }'
 }
 
 # ============================================================================
@@ -270,7 +273,7 @@ pc_migrate_config() {
 	#    （README 里承诺了这件事，就必须真的做；测试环境没有 /etc/config 时自动跳过。）
 	if [ -f "/etc/config/$PC_CONF" ]; then
 		mkdir -p /etc/parentcontrol/backup 2>/dev/null
-		cp -a "/etc/config/$PC_CONF" 			"/etc/parentcontrol/backup/$PC_CONF.$(date +%Y%m%d%H%M%S).bak" 2>/dev/null
+		cp -a "/etc/config/$PC_CONF" "/etc/parentcontrol/backup/$PC_CONF.$(date +%Y%m%d%H%M%S).bak" 2>/dev/null
 	fi
 	# 1) 默认值
 	for _k in usage_keep usage_min_kb; do
@@ -343,16 +346,15 @@ pc_migrate_config() {
 					_pcset "@$_m[$_i].${_sfx}_quota=0"
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 老配额模式当年的运行判据是 `[ "$q" -gt 0 ] || continue`（c4fe179..a1ae0e9），
-					# 也就是「没填」和「填 0」在老语义里都等于"不限"。新语义里 0 = 全禁，
-					# 所以这两种都必须显式补成不限，否则升级后会静默把设备锁死。
-					case "$(pc_uget "@$_m[$_i].${_sfx}_quota")" in
-					''|0)
+					# 老配额模式的运行判据就是数值比较 `[ "$q" -gt 0 ] || continue`（c4fe179..a1ae0e9）：
+					# 空、0、负数、非数字（"abc"、"00"、"+5"…）在老语义里**一律**是"不限"。
+					# 新语义里 0 = 全禁，所以必须按同一个判据逐个翻译，否则升级会把设备静默锁死。
+					if [ "$(pc_uget "@$_m[$_i].${_sfx}_quota")" -gt 0 ] 2>/dev/null; then
+						_pcset "@$_m[$_i].${_sfx}_unlimited=0"
+					else
 						_pcset "@$_m[$_i].${_sfx}_unlimited=1"
-						_pclog "migrate: $_m[$_i] ${_sfx}: 老配额为空/0（老语义=不限）→ 不限" ;;
-					*)
-						_pcset "@$_m[$_i].${_sfx}_unlimited=0" ;;
-					esac ;;
+						_pclog "migrate: $_m[$_i] ${_sfx}: 老配额非正/非法（老语义=不限）→ 不限"
+					fi ;;
 				off)
 					_pcset "@$_m[$_i].${_sfx}_unlimited=1" ;;
 				'')
