@@ -34,8 +34,11 @@
 			var m = /^(\d?\d):(\d\d)(?::(\d\d))?$/.exec(t || '');
 			return m ? (parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0)) : null;
 		}
+		// 一律按 name 找控件：这台 LuCI 的 Checkbox/Textfield 渲染**不给 <input> 设
+		// label[for] 指的那个 id**（浏览器会报 Incorrect use of <label for=FORM_ELEMENT>），
+		// 所以 input[id$=...] 永远选不中；name 属性是稳定存在的。
 		function val(sfx) {
-			var el = document.querySelector('input[id$=".' + sfx + '"]');
+			var el = document.querySelector('input[name$=".' + sfx + '"]');
 			return el ? el.value : null;
 		}
 		function warn() {
@@ -52,7 +55,7 @@
 		function check() {
 			var out = ['sd', 'hd'].map(function (sfx) {
 				var qs = val(sfx + '_quota'), ss = val(sfx + '_qstart'), es = val(sfx + '_qend');
-				var uEl = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
+				var uEl = document.querySelector('input[name$=".' + sfx + '_unlimited"]');
 				if (qs === null || ss === null || es === null) return null;
 				var name = (sfx === 'hd') ? '<%=translate("节假日")%>' : '<%=translate("平日")%>';
 				var a = pars(ss), b = pars(es);
