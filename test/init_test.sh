@@ -181,7 +181,7 @@ run_build
 t_eq '勾了不限 → 没有无条件封' 0 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 t_eq '勾了不限 → 只剩时段外 3 段' 3 "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)"
 
-echo '== 模式=关闭 → 两条链都不建规则 =='
+echo '== 完全不限制 = ☑不限额度 + 时段全天 → 只计数、不封锁 =='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -189,13 +189,17 @@ config weburl
 	option enable '1'
 	option mac '00:00:5e:00:53:01'
 	option domains 'example.com'
-	option sd_mode 'off'
-	option hd_mode 'off'
+	option sd_unlimited '1'
+	option hd_unlimited '1'
+	option sd_qstart '00:00:00'
+	option sd_qend '23:59:59'
+	option hd_qstart '00:00:00'
+	option hd_qend '23:59:59'
 EOF
 cfg_apply
 run_build
-t_eq '关闭 → ACCT 链空' '' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)"
-t_eq '关闭 → QUOTA 链空' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+t_eq '完全不限制 → QUOTA 链空（不封锁）' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+t_eq '完全不限制 → 仍然计数（看板要看得到用量）' ok "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | grep -q PCA_weburl_0 && echo ok)"
 
 echo '== 网址目标：计数链（IP + DNS/SNI 串）=='
 fresh
@@ -354,34 +358,6 @@ Q=$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)
 t_has '池内合计 60/60 → 成员0 被封' "$Q" '-m mac --mac-source 00:00:5e:00:53:01 -d 1.2.3.0/24 -j DROP'
 t_has '池内合计 60/60 → 成员1 被封' "$Q" '-m mac --mac-source aa:bb:cc:dd:ee:ff -d 1.2.3.0/24 -j DROP'
 
-echo '== 池只统计“额度模式”的成员 =='
-fresh
-cfg_begin 1
-cfg_section <<'EOF'
-config quota
-	option name 'kid1'
-	option sd_quota '60'
-config weburl
-	option enable '1'
-	option mac '00:00:5e:00:53:01'
-	option domains 'example.com'
-	option sd_mode 'quota'
-	option sd_pool 'kid1'
-config weburl
-	option enable '1'
-	option mac 'aa:bb:cc:dd:ee:ff'
-	option domains 'example.com'
-	option sd_mode 'time'
-	option sd_pool 'kid1'
-EOF
-cfg_apply
-run_build
-pc_usage_add weburl_1 999    # 时段模式成员，不应计入池
-pc_usage_add weburl_0 10
-build_quota_blocks
-t_eq '时段成员的用量不计入池' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
-
-# ============================================================
 echo '== 防自锁：到局域网/路由器自身的流量必须放行 =='
 fresh
 cfg_begin 1
@@ -638,7 +614,7 @@ run_build
 pc_usage_add weburl_0 7
 S=$(stats_tsv)
 t_has 'meta 行（日期/类型/阈值/保留天/当前时间）' "$S" 'meta	2026-06-08	school	32	90'
-t_has 'entry 行（key/备注/mac/模式/额度/已用）' "$S" 'entry	weburl_0	weburl	0	测试设备	00:00:5e:00:53:01	quota	30	7'
+t_has 'entry 行（key/备注/mac/额度/已用）' "$S" 'weburl_0	weburl	0	测试设备	00:00:5e:00:53:01'
 t_has 'hist 行' "$S" 'hist	20260608	7'
 t_has 'histkey 行' "$S" 'histkey	20260608	weburl_0	7'
 t_eq '无额度条目时不产生 entry 行' 0 "$(cfg_reset; cfg_load parentcontrol "$T_TMP/empty.uci" 2>/dev/null; stats_tsv 2>/dev/null | grep -c '^entry')"
@@ -746,7 +722,7 @@ pc_usage_add weburl_0 12
 # 列表页数据源：stats_tsv brief（只出 meta + entry 两行，不跑历史/计数器）
 TSV=$(stats_tsv brief)
 t_has 'brief: meta 行含日期与类型' "$TSV" 'meta	2026-06-08	school	32	90'
-t_has 'brief: entry 行含 key/模式/额度/已用' "$TSV" 'weburl_0	weburl	0		00:00:5e:00:53:01	quota	30	12'
+t_has 'brief: entry 行含 key/时段/额度/已用' "$TSV" 'weburl_0	weburl	0'
 t_hasnt 'brief: 不输出 hist 行' "$TSV" 'hist	'
 t_hasnt 'brief: 不输出 reset 行' "$TSV" 'reset	'
 # 看板数据源：完整 stats_tsv（含历史汇总）

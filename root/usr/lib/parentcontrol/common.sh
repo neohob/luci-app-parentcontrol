@@ -228,27 +228,19 @@ pc_entry_quota() {
 }
 
 # 条目今天的模式：off|time|quota（空=off）
-pc_entry_mode() {
-	local _sfx
-	_sfx=$(pc_suffix "$3")
-	pc_uget "@$1[$2].${_sfx}_mode"
-}
 
 # 档案生效模式：off | time | quota（未设=time，兼容老配置）
-pc_entry_eff_mode() {
-	local _md
-	_md=$(pc_entry_mode "$1" "$2" "$3")
-	[ -z "$_md" ] && _md=off
-	echo "$_md"
-}
 
 # 今天处于「每日额度」模式的条目键（<module>_<idx>），每行一个。
 # 所有额度相关遍历都从这里出发，避免模块清单散落各处。
-pc_quota_keys() { # $1=school|holiday
+# 所有已启用条目的 key（模块序 time/protocol/weburl）。
+# 统一模型里没有"模式"了：每个条目都有「可用时段 + 额度」，是否真的限制由这两个字段决定
+# （额度 0 = 全禁；勾了不限额度 + 时段全天 = 完全不限制，此时只计数不封锁）。
+pc_active_keys() {
 	local _m _i
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
-			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"
+			echo "${_m}_${_i}"
 		done
 	done
 }
@@ -301,8 +293,12 @@ pc_migrate_config() {
 	# 3) 老 week 拆到双档案：只含 1-5 → 平日；只含 6,7 → 节假日；* 或混合 → 两者
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_all "$_m"); do
+			# 守卫：已有 mode 键、或已有任一「新模型字段」都算处理过 —— 直接跳过。
+			# （mode 键会被第 4 步删掉，所以不能只靠它当守卫，否则第二次跑会把用户设过的值覆盖。）
 			[ -n "$(pc_uget "@$_m[$_i].sd_mode")" ] && continue
-			[ -n "$(pc_uget "@$_m[$_i].hd_mode")" ] && continue
+			[ -n "$(pc_uget "@$_m[$_i].sd_qstart")" ] && continue
+			[ -n "$(pc_uget "@$_m[$_i].sd_quota")" ] && continue
+			[ -n "$(pc_uget "@$_m[$_i].sd_unlimited")" ] && continue
 			_w=$(pc_uget "@$_m[$_i].week"); [ -z "$_w" ] && _w='*'
 			_ts=$(pc_uget "@$_m[$_i].timestart"); [ -z "$_ts" ] && _ts=00:00
 			_te=$(pc_uget "@$_m[$_i].timeend"); [ -z "$_te" ] && _te=00:00
@@ -339,16 +335,29 @@ pc_migrate_config() {
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_all "$_m"); do
 			for _sfx in sd hd; do
-				case "$(pc_uget "@$_m[$_i].${_sfx}_mode")" in
+				# mode 已废弃：改成由「可用时段 + 额度」表达（不再有模式枚举）
+				_md=$(pc_uget "@$_m[$_i].${_sfx}_mode")
+				case "$_md" in
 				time)
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_mode=quota"
+					# 老「时段」语义是"封某一段"，新模型只有"可用时段"（不跨日），无法无损换算
+					# → 按既定方案统一为 不限额度 + 09:00-21:00
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
-					_pclog "migrate: $_m[$_i] ${_sfx}: 老「时段」→ 每日额度(不限) + 09:00-21:00" ;;
+					_pclog "migrate: $_m[$_i] ${_sfx}: 老「时段」→ 不限额度 + 09:00-21:00" ;;
+				off)
+					# 老「关闭」= 不限制 → 不限额度 + 全天
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=00:00:00"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=23:59:59" ;;
+				block)
+					# 上一版短暂存在过的 block → 额度 0（0 = 一分钟都不给）
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0" ;;
 				quota)
 					# 只在没设过时才补 0：否则第二次跑迁移会把上一次设的 1 覆盖掉
 					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ] || \
 						uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0" ;;
 				esac
+				[ -n "$_md" ] && uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_mode"
 				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
 				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
 				# 老的「额度模式但没填额度」原来等于"不限"。新语义里 0 = 全天禁止，

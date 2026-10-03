@@ -239,18 +239,13 @@ config time
 	option sd_quota '7'
 EOF
 cfg_load parentcontrol "$T_TMP/entry"
-t_eq '平日 mode' quota "$(pc_entry_mode weburl 0 school)"
-t_eq '节假日 mode' time "$(pc_entry_mode weburl 0 holiday)"
 t_eq '平日 quota' 30 "$(pc_entry_quota weburl 0 school)"
 t_eq '平日 pool' kid1 "$(pc_entry_pool weburl 0 school)"
 t_eq '节假日 pool 为空' '' "$(pc_entry_pool weburl 0 holiday)"
-t_eq '未设 mode → 空' '' "$(pc_entry_mode weburl 1 school)"
-t_eq 'eff_mode 未设 → off（时段模式已移除）' off "$(pc_entry_eff_mode weburl 1 school)"
-t_eq 'eff_mode quota' quota "$(pc_entry_eff_mode weburl 0 school)"
 
-echo '== pc_quota_keys：唯一额度遍历入口 =='
-t_eq '只列 enable=1 且额度的条目（模块序 time/protocol/weburl）' 'time_0 weburl_0 weburl_2' \
-	"$(pc_quota_keys school | tr '\n' ' ' | sed 's/ $//')"
-t_eq '该日为非额度模式 → 空' '' "$(pc_quota_keys holiday)"
+echo '== pc_active_keys：唯一的条目遍历入口（不再有"模式"）=='
+t_eq '列出所有 enable=1 的条目（模块序 time/protocol/weburl）' 'time_0 weburl_0 weburl_1 weburl_2' \
+	"$(pc_active_keys | tr '\n' ' ' | sed 's/ $//')"
+t_eq '条目数 = 4（不再按模式过滤）' 4 "$(pc_active_keys | wc -l | tr -d ' ')"
 
 t_summary

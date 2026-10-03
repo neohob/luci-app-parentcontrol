@@ -89,13 +89,10 @@ function M.collect()
 		e.device = M.device_name(e.mac)
 		e.label = (e.name ~= "" and e.name or (e.module .. "[" .. e.idx .. "]"))
 		if e.device ~= "" then e.label2 = e.device end
-		if e.mode == "quota" then
+		if not e.unlimited then
 			e.remain = math.max(0, e.quota - e.used)
 			e.pct = (e.quota > 0) and math.min(100, math.floor(e.used * 100 / e.quota)) or 0
-			if e.quota == 0 and not e.unlimited then
-				e.pct = 100
-				e.status = info("全天禁止")
-			elseif e.quota > 0 and e.used >= e.quota then
+			if e.used >= e.quota then
 				e.status = info("已耗尽")
 			else
 				e.status = info("放行中")
@@ -107,7 +104,8 @@ function M.collect()
 				e.projected = math.floor(e.used * 1440 / elapsed)
 			end
 		else
-			e.remain, e.pct, e.status = nil, 0, (e.mode == "block" and info("全天禁止") or info("关闭"))
+			# 勾了「不限额度」：只判时段，额度不构成限制
+			e.remain, e.pct, e.status = nil, 0, info("不限额度")
 		end
 	end
 
@@ -125,7 +123,7 @@ function M.collect()
 		}
 	end
 	for _, e in ipairs(d.entries) do
-		if e.mode == "quota" and not (e.pool ~= "" and pooled[e.pool]) then
+		if not (e.pool ~= "" and pooled[e.pool]) then
 			d.units[#d.units + 1] = {
 				name = e.label, device = e.device, kind = "entry", quota = e.quota,
 				used = e.used, pct = e.pct, remain = e.remain, status = e.status,

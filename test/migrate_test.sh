@@ -54,32 +54,32 @@ t_eq 'word 已删除（铲除幽灵匹配源）' '' "$(cfg_get parentcontrol.@we
 # 注意：week→双档案会先写 time，随后被「统一模型」一步转成
 #       quota + unlimited=1 + 09:00:00-21:00:00（老的时段语义无法无损换算，按既定方案处理）
 echo '== week=1,2,3,4,5 → 平日=额度(不限)+09:00-21:00；节假日=关闭 =='
-t_eq 'sd_mode 已统一为 quota' quota "$(cfg_get parentcontrol.@weburl[0].sd_mode)"
+t_eq 'sd_mode 已统一为 quota → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[0].sd_mode)"
 t_eq 'sd_unlimited=1（原时段无额度）' 1 "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq 'sd 可用时段 起' '09:00:00' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)"
 t_eq 'sd 可用时段 止' '21:00:00' "$(cfg_get parentcontrol.@weburl[0].sd_qend)"
 t_eq 'sd_start 老字段保留未动' '08:00' "$(cfg_get parentcontrol.@weburl[0].sd_start)"
-t_eq 'hd_mode=off' off "$(cfg_get parentcontrol.@weburl[0].hd_mode)"
+t_eq 'hd_mode=off → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[0].hd_mode)"
 t_eq 'hd 起止未写' '' "$(cfg_get parentcontrol.@weburl[0].hd_start)"
 
 echo '== week=6,7 → 节假日=额度(不限)；平日=关闭 =='
-t_eq 'sd_mode=off' off "$(cfg_get parentcontrol.@weburl[1].sd_mode)"
-t_eq 'hd_mode 已统一为 quota' quota "$(cfg_get parentcontrol.@weburl[1].hd_mode)"
+t_eq 'sd_mode=off → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[1].sd_mode)"
+t_eq 'hd_mode 已统一为 quota → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[1].hd_mode)"
 t_eq 'hd_unlimited=1' 1 "$(cfg_get parentcontrol.@weburl[1].hd_unlimited)"
 t_eq 'hd 可用时段' '09:00:00-21:00:00' "$(cfg_get parentcontrol.@weburl[1].hd_qstart)-$(cfg_get parentcontrol.@weburl[1].hd_qend)"
 
 echo '== week 缺失 → 视作 * → 两侧都设 =='
-t_eq 'time[0] sd_mode' quota "$(cfg_get parentcontrol.@time[0].sd_mode)"
-t_eq 'time[0] hd_mode' quota "$(cfg_get parentcontrol.@time[0].hd_mode)"
+t_eq 'time[0] sd_mode → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@time[0].sd_mode)"
+t_eq 'time[0] hd_mode → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@time[0].hd_mode)"
 
 echo '== week 混合(1,7) → 两侧都设 =='
-t_eq 'time[1] sd_mode' quota "$(cfg_get parentcontrol.@time[1].sd_mode)"
-t_eq 'time[1] hd_mode' quota "$(cfg_get parentcontrol.@time[1].hd_mode)"
+t_eq 'time[1] sd_mode → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@time[1].sd_mode)"
+t_eq 'time[1] hd_mode → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@time[1].hd_mode)"
 
 echo '== 只含工作日(3) → 平日=额度(不限)（协议模块）=='
-t_eq 'protocol sd_mode' quota "$(cfg_get parentcontrol.@protocol[0].sd_mode)"
+t_eq 'protocol sd_mode → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@protocol[0].sd_mode)"
 t_eq 'protocol sd_unlimited' 1 "$(cfg_get parentcontrol.@protocol[0].sd_unlimited)"
-t_eq 'protocol hd_mode=off' off "$(cfg_get parentcontrol.@protocol[0].hd_mode)"
+t_eq 'protocol hd_mode=off → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@protocol[0].hd_mode)"
 
 echo '== 幂等：再跑一次不改动已迁移项 =='
 BEFORE=$(uci -q show parentcontrol)
@@ -99,7 +99,7 @@ config weburl
 EOF
 cfg_load parentcontrol "$T_TMP/new.uci"
 pc_migrate_config
-t_eq '已有 sd_mode → 不覆盖' quota "$(cfg_get parentcontrol.@weburl[0].sd_mode)"
+t_eq '已有 sd_mode → 不覆盖 → 模式键已删除（统一模型没有模式枚举）' '' "$(cfg_get parentcontrol.@weburl[0].sd_mode)"
 t_eq '已有 sd_mode → 不补 hd_mode' '' "$(cfg_get parentcontrol.@weburl[0].hd_mode)"
 t_eq '已有额度 → unlimited 补 0' 0 "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq '已有额度 → 额度不动' 30 "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
