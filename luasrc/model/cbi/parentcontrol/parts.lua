@@ -84,8 +84,10 @@ function M.add_profile(t, sfx, label)
 	q.datatype = "uinteger"
 	q.rmempty = true
 
-	local p = t:option(cbi.Value, sfx .. "_pool", label .. " " .. i18n.translate("共享组"))
-	p.placeholder = i18n.translate("留空=独立额度")
+	-- 提示统一写在标签里（与「每日分钟（0 = 全禁）」同一种风格），不再用 placeholder：
+	-- placeholder 只在输入框为空时可见，填过东西就看不到了。
+	local p = t:option(cbi.Value, sfx .. "_pool",
+		label .. " " .. i18n.translate("共享组（留空 = 独立额度）"))
 	p.rmempty = true
 end
 
