@@ -457,11 +457,10 @@ block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
 	return 0
 }
 
-# 额度封锁链，三个来源互不干扰：
-#   ⓪ 模式=全天禁止 → 无条件封（不看时段、不看额度）
-#   ① 模式=每日额度 且不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
-#   ② 模式=每日额度 且额度用完 → 整条封（比时段封更强，所以不需要时间条件）
-# 勾了「不限额度」的条目只受 ① 约束。
+# 额度封锁链，两个来源：
+#   ① 不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
+#   ② 额度用完 → 整条封（比时段封更强，所以不需要时间条件）
+# 额度 0 = 全天禁止（② 恒成立）；勾了「不限额度」的条目只受 ① 约束。
 build_quota_blocks() {
 	local _tt _key _m _i _ip _lan _a _b
 	_tt=$(pc_today_type)
@@ -470,12 +469,6 @@ build_quota_blocks() {
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
 	_lan=$(pc_lan_nets)
-	# ⓪ 全天禁止：无条件封（守卫必须在最前——它是最强的无条件 DROP）
-	for _key in $(pc_quota_keys "$_tt" block); do
-		_m=${_key%%_*}; _i=${_key#*_}
-		block_skip_devless "$_m" "$_i" "$_lan" && continue
-		block_entry "$_m" "$_i"
-	done
 	for _key in $(pc_quota_keys "$_tt"); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		block_skip_devless "$_m" "$_i" "$_lan" && continue
@@ -483,10 +476,10 @@ build_quota_blocks() {
 		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
 			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"
 		done
-		# ② 额度耗尽（勾了「不限额度」= 只看时段，不判额度）
+		# ② 额度耗尽。额度 0 = 全天禁止（0 >= 0 恒成立，不需要专门分支）；
+		#    勾了「不限额度」则只受 ① 约束。
 		[ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" = "1" ] && continue
 		set -- $(entry_effective "$_m" "$_i" "$_tt")
-		[ "$1" -gt 0 ] 2>/dev/null || continue
 		[ "$2" -ge "$1" ] && block_entry "$_m" "$_i"
 	done
 	# 最后插入「放行到局域网网段」的规则（含路由器自身 IP），SSH/LuCI 才不会被
@@ -706,7 +699,7 @@ reset_quota() {
 
 # 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
 #   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
-#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB>
+#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB> <不限额度>
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
@@ -718,7 +711,7 @@ reset_quota() {
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
-	local _brief _tt _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump
+	local _brief _tt _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump _unl
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
@@ -737,6 +730,7 @@ stats_tsv() {
 			_mode=$(pc_entry_eff_mode "$_m" "$_i" "$_tt")
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
+			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")
 			_mac=$(pc_uget "@$_m[$_i].mac")
 			_q=0; _u=0; _pool=""
 			if [ "$_mode" = "quota" ]; then
@@ -745,8 +739,8 @@ stats_tsv() {
 			fi
 			_live=0
 			[ -z "$_dump" ] || _live=$(quota_live_kb "$_key" "$_dump")
-			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_mode" "$_q" "$_u" "$_pool" "$_live"
+			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_mode" "$_q" "$_u" "$_pool" "$_live" "$_unl"
 		done
 	done
 	if [ "$_brief" != "brief" ]; then

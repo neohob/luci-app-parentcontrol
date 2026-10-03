@@ -50,9 +50,7 @@ function M.profiles(self, section)
 	local map = self.map
 	local function one(sfx, label)
 		local mode = get(map, section, sfx .. "_mode") or "off"
-		if mode == "block" then
-			return label .. " " .. i18n.translate("全天禁止")
-		elseif mode ~= "quota" then
+		if mode ~= "quota" then
 			return label .. " " .. i18n.translate("关闭")
 		end
 		local q = get(map, section, sfx .. "_quota")
@@ -60,8 +58,12 @@ function M.profiles(self, section)
 		local st
 		if get(map, section, sfx .. "_unlimited") == "1" then
 			st = label .. " " .. i18n.translate("不限额度")
+		elseif not q or q == "" then
+			st = label .. " " .. i18n.translate("不限")
+		elseif tonumber(q) == 0 then
+			st = label .. " " .. i18n.translate("全天禁止")
 		else
-			st = label .. " " .. ((q and q ~= "" and (q .. i18n.translate("分钟"))) or i18n.translate("不限"))
+			st = label .. " " .. q .. i18n.translate("分钟")
 		end
 		-- 时段不是全天时附上，列表里一眼看出"只在几点到几点能用"
 		local ws = get(map, section, sfx .. "_qstart")

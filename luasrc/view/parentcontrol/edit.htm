@@ -34,7 +34,7 @@
 				if (a >= b) return name + '：<%=translate("可用起必须早于可用止（不支持跨日时段）")%>';
 				var qv = parseInt(q.value, 10);
 				if (u && u.checked) return null;          // 勾了不限额度 → 不判额度
-				if (!qv) return name + '：<%=translate("每日额度必填，且不能填 0")%>';
+				if (q.value === '' || isNaN(qv)) return name + '：<%=translate("每日额度必填（填 0 = 全天禁止）")%>';
 				var lim = Math.floor((b - a) / 60);
 				if (qv > lim) return name + '：<%=translate("额度超过了可用时段长度")%>（' + lim + ' <%=translate("分钟")%>）';
 				return null;

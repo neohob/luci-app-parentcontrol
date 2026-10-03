@@ -141,7 +141,7 @@ build_quota_blocks
 t_eq '全天 + 耗尽 → 所有 DROP 都是无条件的' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-j DROP')" "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 t_eq '全天 + 耗尽 → 不含 -m time' 0 "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-m time')"
 
-echo '== 模式=全天禁止 → 无条件封（不看时段、不看额度）=='
+echo '== 额度 0 = 全天禁止（不需要第三种模式：0 >= 0 恒成立）=='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -149,17 +149,37 @@ config weburl
 	option enable '1'
 	option mac '00:00:5e:00:53:01'
 	option domains 'example.com'
-	option sd_mode 'block'
+	option sd_mode 'quota'
+	option sd_quota '0'
+	option sd_qstart '00:00:00'
+	option sd_qend '23:59:59'
+	option sd_unlimited '0'
 EOF
 cfg_apply
 run_build
-t_eq '全天禁止 → 出现无条件封' ok "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo ok || echo no)"
-t_has '全天禁止 → 封的是该条目目标' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-d 1.2.3.0/24 -j DROP'
-t_eq '全天禁止 → 完全不带 -m time（与时段无关）' 0 "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-m time')"
-t_eq '全天禁止 → 不计数（mode!=quota 不进 ACCT）' '' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)"
-t_eq '全天禁止 → 无量可用额度也不受影响（对照：额度模式同配置下 QUOTA 为空）' \
-	"$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-j DROP')" \
-	"$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '额度 0 → 出现无条件封' ok "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo ok || echo no)"
+t_has '额度 0 → 封的是该条目目标' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-d 1.2.3.0/24 -j DROP'
+t_eq '额度 0 + 时段全天 → 一条时段规则都没有（全靠额度 0 全封）' 0 "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '额度 0 → 仍照常计数（便于看板显示）' ok "$(ipt_exists v4 mangle PCA_weburl_0 && echo ok)"
+
+echo '== 额度 0 + 勾了不限额度 → 反过来只判时段（复选框优先）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_quota '0'
+	option sd_qstart '09:00:00'
+	option sd_qend '21:00:00'
+	option sd_unlimited '1'
+EOF
+cfg_apply
+run_build
+t_eq '勾了不限 → 没有无条件封' 0 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+t_eq '勾了不限 → 只剩时段外 3 段' 3 "$(win_ranges v4 mangle PARENTCONTROL_QUOTA)"
 
 echo '== 模式=关闭 → 两条链都不建规则 =='
 fresh
@@ -235,7 +255,7 @@ build_quota_blocks
 t_has '该端口耗尽 → 封在 QUOTA 链' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-p tcp -m multiport --dports 80,443'
 t_eq '只封了 1 条（另一个端口不牵连）' 1 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 
-echo '== 额度=0/空（老配置遗留）→ 按不限处理，永不封 =='
+echo '== 额度没填（未勾不限）→ 按 0 处理 = 全禁 =='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -244,12 +264,29 @@ config weburl
 	option mac '00:00:5e:00:53:01'
 	option domains 'example.com'
 	option sd_mode 'quota'
+	option sd_qstart '00:00:00'
+	option sd_qend '23:59:59'
+EOF
+cfg_apply
+run_build
+t_eq '没填额度 + 未勾不限 → 恒封' ok "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo ok || echo no)"
+
+echo '== 额度没填 + 勾了不限 → 永不封（迁移会把这种老条目补成显式不限）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'quota'
+	option sd_unlimited '1'
 EOF
 cfg_apply
 run_build
 pc_usage_add weburl_0 9999
 build_quota_blocks
-t_eq '无额度 → 永不封' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
+t_eq '不限额度 → 永不封' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 
 echo '== 时间/协议条目的额度模式（补盲区：此前只测 weburl）=='
 fresh

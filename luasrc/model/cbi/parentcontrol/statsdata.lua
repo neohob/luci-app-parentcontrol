@@ -59,6 +59,7 @@ function M.collect()
 					key = f[2], module = f[3], idx = f[4], name = f[5] or "",
 					mac = f[6] or "", mode = f[7] or "", quota = num(f[8]),
 					used = num(f[9]), pool = f[10] or "", live_kb = num(f[11]),
+					unlimited = (f[12] == "1"),
 				}
 			elseif k == "pool" then
 				d.pools[#d.pools + 1] = {
@@ -91,7 +92,10 @@ function M.collect()
 		if e.mode == "quota" then
 			e.remain = math.max(0, e.quota - e.used)
 			e.pct = (e.quota > 0) and math.min(100, math.floor(e.used * 100 / e.quota)) or 0
-			if e.quota > 0 and e.used >= e.quota then
+			if e.quota == 0 and not e.unlimited then
+				e.pct = 100
+				e.status = info("全天禁止")
+			elseif e.quota > 0 and e.used >= e.quota then
 				e.status = info("已耗尽")
 			else
 				e.status = info("放行中")
