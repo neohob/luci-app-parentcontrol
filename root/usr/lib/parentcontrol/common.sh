@@ -244,12 +244,11 @@ pc_entry_eff_mode() {
 
 # 今天处于「每日额度」模式的条目键（<module>_<idx>），每行一个。
 # 所有额度相关遍历都从这里出发，避免模块清单散落各处。
-pc_quota_keys() { # $1=school|holiday [$2=mode，默认 quota]
-	local _m _i _want
-	_want=${2:-quota}
+pc_quota_keys() { # $1=school|holiday
+	local _m _i
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
-			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "$_want" ] && echo "${_m}_${_i}"
+			[ "$(pc_entry_mode "$_m" "$_i" "$1")" = "quota" ] && echo "${_m}_${_i}"
 		done
 	done
 }
@@ -352,6 +351,22 @@ pc_migrate_config() {
 				esac
 				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
 				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
+				# 老的「额度模式但没填额度」原来等于"不限"。新语义里 0 = 全天禁止，
+				# 不显式标一下就会在升级后被静默全禁 —— 这里补成"不限"（只在没设过时补，幂等）。
+				# 想全禁请显式填 0。
+				if [ "$(pc_uget "@$_m[$_i].${_sfx}_mode")" = "quota" ] && \
+				   [ -z "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ] && \
+				   [ -z "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ]; then
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+					_pclog "migrate: $_m[$_i] ${_sfx}: 额度模式但没填额度 → 显式「不限额度」（新语义 0=全禁）"
+				fi
+				# 上一版短暂存在过的 block 模式 → 每日额度 + 额度 0
+				if [ "$(pc_uget "@$_m[$_i].${_sfx}_mode")" = "block" ]; then
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_mode=quota"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0"
+					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
+					_pclog "migrate: $_m[$_i] ${_sfx}: block 模式 → 每日额度 + 0 分钟（全天禁止）"
+				fi
 			done
 		done
 	done

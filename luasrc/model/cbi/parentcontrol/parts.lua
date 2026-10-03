@@ -3,8 +3,8 @@
 --
 -- 统一模型（每个档案）：关闭 / 每日额度；额度模式下有「可用时段」+「额度」：
 --   封 = (不在可用时段内) 或 (额度用完了)
---   勾「不限额度」→ 额度框隐藏，只判时段；不勾 → 额度必填、不能为 0
---   「全天禁止」= 无条件封（不分时段、不看额度），适合彻底禁掉某 App/设备
+--   勾「不限额度」→ 额度框隐藏，只判时段；不勾 → 额度必填
+--   额度填 0 = 全天禁止（不需要第三种模式：封 = 不在时段内 或 已用≥额度，N=0 时恒成立）
 --   时段不跨日，起必须早于止；默认 00:00:00-23:59:59（全天）
 --   额度按自然日重置（用量文件按天分文件），没有「发放时刻」了
 --
@@ -61,20 +61,11 @@ function M.validate_window(self, value)
 	return value
 end
 
--- 额度不能填 0：0 会让「用完封」和「不限额度」两种含义打架（要不限请勾复选框）
-function M.validate_quota(self, value)
-	if value ~= nil and value ~= "" and tonumber(value) == 0 then
-		return nil, "额度不能填 0；要不限请勾选「不限额度」"
-	end
-	return value
-end
-
 -- mode_label 必须是字面量（翻译键要求字面量，不能拼接）。
 function M.add_profile(t, sfx, mode_label)
 	local m = t:option(cbi.ListValue, sfx .. "_mode", mode_label)
 	m:value("off", i18n.translate("关闭"))
 	m:value("quota", i18n.translate("每日额度"))
-	m:value("block", i18n.translate("全天禁止"))
 	m.default = "off"
 	m.rmempty = true
 
@@ -100,11 +91,11 @@ function M.add_profile(t, sfx, mode_label)
 	-- 只依赖 mode（单条件）——"勾了不限额度就收起额度框"由前端 JS 做（view/parentcontrol/edit.htm）。
 	-- 原因：CBI 的 depends 对 Flag（复选框）未勾选态的取值跟字符串对不上，双条件依赖会把额度框
 	-- 永久藏起来（实测踩到）。少一个特例，前端自己控制显隐更可靠。
-	local q = t:option(cbi.Value, sfx .. "_quota", i18n.translate("每日分钟"))
-	q.placeholder = i18n.translate("必填，如 60")
+	local q = t:option(cbi.Value, sfx .. "_quota", i18n.translate("每日分钟"),
+		i18n.translate("必填；填 <b>0</b> = 全天禁止（时段内也一分钟不给）"))
+	q.placeholder = i18n.translate("必填，如 60；0=全天禁止")
 	q.default = "60"
 	q.datatype = "uinteger"
-	q.validate = M.validate_quota
 	q:depends(sfx .. "_mode", "quota")
 	q.rmempty = true
 
