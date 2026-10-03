@@ -269,7 +269,7 @@ pc_quota_positive() {
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _ts _te _has_sd _has_hd _sfx
+	local _k _i _m _w _d _ts _te _has_sd _has_hd _sfx _md
 	# 1) 默认值
 	for _k in usage_keep usage_min_kb; do
 		[ -n "$(pc_uget "@basic[0].$_k")" ] && continue
