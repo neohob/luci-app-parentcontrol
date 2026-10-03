@@ -153,4 +153,34 @@ pc_migrate_config
 t_eq '老 quota=30 → unlimited=0' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq '额度不动' '30' "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
 
+echo '== B1′ 防线：老额度是负数/非数字/00 等脏值（老判据 [ "$q" -gt 0 ] 下都=不限）=='
+# 注意：老判据是 [ "$q" -gt 0 ]，ash 认 "+5" 是正数，所以 +5 当年确实是"限 5 分钟"，
+# 迁移必须保持"有限额"（不能因为它是脏值就压成不限）；而 -1/abc/00 当年都=不限。
+for bad in -1 abc 00; do
+	cfg_reset
+	cat > "$T_TMP/bad.uci" <<EOF
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '$bad'
+EOF
+	cfg_load parentcontrol "$T_TMP/bad.uci"
+	pc_migrate_config
+	t_eq "老 quota=$bad → 不限（不得判成全禁）" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+done
+cfg_reset
+cat > "$T_TMP/bad2.uci" <<'EOF'
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+	option sd_quota '+5'
+EOF
+cfg_load parentcontrol "$T_TMP/bad2.uci"
+pc_migrate_config
+t_eq '老 quota=+5 → 仍按有限额（老判据认它是正数）' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+t_eq 'pc_quota_positive 保住 +5 的数值（不得压成 0=全禁）' '5' "$(pc_quota_positive '+5')"
+t_eq 'pc_quota_positive 对 abc → 0' '0' "$(pc_quota_positive 'abc')"
+t_eq 'pc_quota_positive 对 -3 → 0' '0' "$(pc_quota_positive '-3')"
+t_eq 'pc_quota_positive 对 30 → 30' '30' "$(pc_quota_positive '30')"
+
 t_summary

@@ -54,19 +54,22 @@ function M.profiles(self, section)
 		local q = get(map, section, sfx .. "_quota")
 		local p = get(map, section, sfx .. "_pool")
 		local unl = get(map, section, sfx .. "_unlimited")
+		local pq = pool_quota(map, p, sfx)          -- nil / "" = 池没额度（含根本没挂池）
 		local st
+		-- 判定顺序必须与后端 pc_entry_unlimited + entry_effective 完全一致：
+		--   ① 勾了不限 → 不限；② 挂了池且池有额度 → 池优先（entry_effective 就是池优先）；
+		--   ③ 自填额度；④ 显式关掉不限且没有任何额度来源 → 后端判 0 分钟 = 全天全禁；
+		--   ⑤ 挂了池但池没额度 → 不限；⑥ 什么都没有 → 不限
 		if unl == "1" then
 			st = label .. " " .. i18n.translate("不限额度")
+		elseif pq and pq ~= "" then
+			st = label .. " " .. pq .. i18n.translate("分钟")
 		elseif q and q ~= "" then
 			st = label .. " " .. q .. i18n.translate("分钟")
-		elseif p and p ~= "" then
-			-- 额度交给共享池：池有额度 → 只显示 @池名（下面统一补）；池没额度 → 不限额
-			local pq = pool_quota(map, p, sfx)
-			if pq and pq ~= "" then st = label
-			else st = label .. " " .. i18n.translate("不限额度") end
 		elseif unl == "0" then
-			-- 显式关掉「不限额度」又没有任何额度来源 → 后端判 0 分钟 = 全天全禁
 			st = label .. " 0 " .. i18n.translate("分钟")
+		elseif p and p ~= "" then
+			st = label .. " " .. i18n.translate("不限额度")
 		else
 			st = label .. " " .. i18n.translate("不限")
 		end
@@ -104,8 +107,7 @@ function M.quota_key(self, section, typ)
 	return typ .. "_" .. idx
 end
 
--- 今日额度（只对处于额度模式的条目有值；池成员显示池的合计）
--- 今日额度：不限额度 → 「不限」；否则「已用 / 额度 分钟」（额度 0 = 全禁，显示成 0/0）。
+-- 今日额度：不限额度 → 「不限」；否则「已用 / 额度 分钟」（额度 0 = 全禁，显示成 已用/0）。
 function M.used(self, section, typ)
 	local u = M.usage_map()
 	local i = M.section_indexes(self.map, typ)[section]

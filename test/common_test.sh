@@ -189,11 +189,11 @@ cfg_reset
 t_eq '无 network 配置 → 空' '' "$(pc_lan_nets)"
 
 echo '== 配额归一 / 池 =='
-t_eq '空 → 不限(0)' 0 "$(pc_quota_positive '')"
-t_eq '非数字 → 不限(0)' 0 "$(pc_quota_positive abc)"
-t_eq '0 → 不限(0)' 0 "$(pc_quota_positive 0)"
+t_eq '空 → 0（新语义 0 = 全禁；是否真的不限由 pc_entry_unlimited 决定）' 0 "$(pc_quota_positive '')"
+t_eq '非数字 → 0（新语义 0 = 全禁）' 0 "$(pc_quota_positive abc)"
+t_eq '0 → 0（全禁）' 0 "$(pc_quota_positive 0)"
 t_eq '正常数字' 60 "$(pc_quota_positive 60)"
-t_eq '带空格 → 不限(0)' 0 "$(pc_quota_positive ' 60')"
+t_eq '带空格 → 按数值解析成 60（别压成 0=全禁）' 60 "$(pc_quota_positive ' 60')"
 cfg_reset
 cat > "$T_TMP/pool" <<'EOF'
 config quota

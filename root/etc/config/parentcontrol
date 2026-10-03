@@ -43,7 +43,7 @@ config time
 	option hd_qend '21:00:00'
 	option hd_unlimited '1'
 
-# 共享额度池：条目在额度模式里填池名即可并入，组内流量加总、共用额度
+# 共享额度池：条目在档案里填池名即可并入，组内流量加总、共用额度
 config quota
 	option name 'kid1'
 	option sd_quota '60'
