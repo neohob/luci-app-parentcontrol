@@ -33,8 +33,7 @@
 <td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享池</sub></td>
-<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：共享额度池、寒暑假区间</sub></td>
+<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享额度池</sub></td>
 </tr>
 </table>
 
