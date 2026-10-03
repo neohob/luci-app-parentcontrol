@@ -4,7 +4,7 @@ local ui = require "luci.model.cbi.parentcontrol.ui"
 local a, t, e
 a = Map("parentcontrol", translate("家长控制"),
 	translate("协议过滤：按 MAC/IP 控制指定端口/协议，含 IPv4 与 IPv6。</br>\
-列表只显示摘要，点每行的 <b>编辑</b> 进去设置「平日 / 节假日」两套档案（关闭 / 每日额度）。额度模式下可再限定「可用时段」，只有时段内能用，时段外的流量不计入额度。"))
+列表只显示摘要，点每行的 <b>编辑</b> 进去给「平日 / 节假日」两套档案各自设「可用时段」+「每日额度」。只有时段内能用，时段外的流量不计入额度；额度 <b>0</b> = 一分钟都不给（全禁）。"))
 
 a.template = "parentcontrol/index"
 

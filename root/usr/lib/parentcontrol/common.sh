@@ -95,9 +95,6 @@ pc_suffix() { [ "$1" = "holiday" ] && echo hd || echo sd; }
 # ---------- 配额基础 ----------
 # 额度按自然日重置（用量文件按 YYYYMMDD 分文件），不再有「发放时刻」概念。
 
-# 把 "HH:MM"（或 "HH" + 可选 MM 参数）转成分钟数。
-# 注意：busybox ash 不支持 `10#` 进制前缀，"08"/"09" 直接算术也会被当八进制报错，
-# 所以用字符串去前导零。
 # HH:MM[:SS] → 当天秒数（非法/空 → 无输出）
 pc_hhmmss_to_sec() {
 	local _h _m _s
@@ -135,19 +132,24 @@ pc_utc_ranges() { # $1=起秒 $2=止秒
 	fi
 }
 
-# 该条目今天是否勾了「不限额度」
+# 该条目今天是否勾了「不限额度」（输出 1=不限）。
+# 这是全仓唯一的「谁受额度限制」判定口径：build_quota_blocks / pool_usage / stats_tsv / 列表页 都读它。
 pc_entry_unlimited() { # $1=module $2=idx $3=school|holiday
-	local _v _q _p
+	local _v _q _p _pq
 	_v=$(pc_uget "@$1[$2].$(pc_suffix "$3")_unlimited")
 	[ "$_v" = "1" ] && { echo 1; return 0; }
 	[ -n "$_v" ] && { echo 0; return 0; }          # 显式写了 0 → 按有限额处理
-	# _unlimited 没设：只有当额度也完全没填时才算"不限"（fail-open）。
-	# 否则"新条目还没配额度""老配置漏了额度"都会被静默当成 0 分钟 = 全禁。想全禁请显式填 0。
+	# _unlimited 没设：看额度/共享池来决定。凡是「没有任何额度来源」都算不限（fail-open）——
+	# 否则“新条目还没配额度”“老配置漏了额度”“挂了池但池没额度”都会被静默当成 0 分钟 = 全天全禁。
 	_q=$(pc_uget "@$1[$2].$(pc_suffix "$3")_quota")
-	[ -z "$_q" ] || { echo 0; return 0; }
-	# 没填自己的额度：如果挂进了共享池，限制由池负责 → 仍算"有限额"，不能当不限
+	[ -n "$_q" ] && { echo 0; return 0; }
+	# 没填自己的额度：挂了池且池确实有额度 → 限制由池负责，算“有限额”
 	_p=$(pc_entry_pool "$1" "$2" "$3")
-	[ -z "$_p" ] && echo 1 || echo 0
+	if [ -n "$_p" ]; then
+		_pq=$(pc_pool_quota "$_p" "$3")
+		[ -n "$_pq" ] && { echo 0; return 0; }
+	fi
+	echo 1
 }
 
 # 可用时段（本地秒）「起 止」；未设 / 全天 / 非法 → 无输出（= 不限制时段）
@@ -176,11 +178,6 @@ pc_qwin_out_ranges() { # $1=module $2=idx $3=school|holiday
 	[ "$_e" -lt 86399 ] && pc_utc_ranges $((_e + 1)) 86399
 	return 0
 }
-
-
-# 北京时间 HH:MM → UTC HH:MM（iptables 的 -m time 默认 UTC，用它就不依赖内核时区）
-
-# 当前上海时间是否已过当日重置点 → 0(是，额度已发放) / 1(否)
 
 # ---------- 用量读写 ----------
 pc_usage_file() { echo "$USAGE_DIR/$(date +%Y%m%d)"; }
@@ -227,12 +224,6 @@ pc_entry_quota() {
 	pc_uget "@$1[$2].${_sfx}_quota"
 }
 
-# 条目今天的模式：off|time|quota（空=off）
-
-# 档案生效模式：off | time | quota（未设=time，兼容老配置）
-
-# 今天处于「每日额度」模式的条目键（<module>_<idx>），每行一个。
-# 所有额度相关遍历都从这里出发，避免模块清单散落各处。
 # 所有已启用条目的 key（模块序 time/protocol/weburl）。
 # 统一模型里没有"模式"了：每个条目都有「可用时段 + 额度」，是否真的限制由这两个字段决定
 # （额度 0 = 全禁；勾了不限额度 + 时段全天 = 完全不限制，此时只计数不封锁）。
@@ -258,18 +249,23 @@ pc_lan_nets() {
 		done
 }
 
-# 把非数字/空额度归一：输出 0 表示不限，>0 表示分钟上限
+# 只在 uci 里没设过该项时才写。迁移幂等的关键：绝不覆盖用户已经设过的值。
+_pcset() { # $1=@type[idx].option=value
+	[ -n "$(pc_uget "${1%%=*}")" ] || uci -q set "$PC_CONF.$1"
+}
+
+# 把空/非数字额度归一为 0。注意新语义：0 = 一分钟都不给（全禁），不是"不限"。
 pc_quota_positive() {
 	case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac
 }
 
 # ============================================================================
 # 配置迁移（安装/升级时调用一次，幂等）：
-#   1) 补 basic 默认值；2) 老 word(关键词) → domains；3) 老 week → 平日/节假日双档案
+#   1) 补 basic 默认值；2) 老 word(关键词) → domains；3) 统一为「可用时段 + 额度」模型
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _ts _te _has_sd _has_hd _sfx _md
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual
 	# 1) 默认值
 	for _k in usage_keep usage_min_kb; do
 		[ -n "$(pc_uget "@basic[0].$_k")" ] && continue
@@ -290,104 +286,92 @@ pc_migrate_config() {
 		[ -n "$_w" ] && uci -q delete "$PC_CONF.@weburl[$_i].word"
 	done
 
-	# 3) 老 week 拆到双档案：只含 1-5 → 平日；只含 6,7 → 节假日；* 或混合 → 两者
-	for _m in time protocol weburl; do
+	# 3) 统一为「可用时段 + 额度」模型。老配置有两代：
+	#      a) 双档案时代：<sfx>_mode ∈ off|time|quota|block（另有 <sfx>_start/<sfx>_end）
+	#      b) 更早的「按星期」时代：week + timestart/timeend（由 week 决定哪个档案生效）
+	#    映射（既定方案）：
+	#      time  → 不限额度 + 09:00-21:00（老语义是"封某一段"，新模型只有"可用时段"，
+	#              无法无损换算；给 WhatsApp 工作时段、并在日志里留痕）
+	#      quota → 额度原样保留，只补 unlimited=0。老 quota 本来全天 24h 可用，
+	#              不额外加时段，免得把存量用户静默收紧成每天 12 小时
+	#      block → 额度 0（0 = 一分钟都不给）
+	#      off   → 不限额度（不写时段 = 全天可用）
+	#      week  → 该档案在老模型里生效 = 当年有时段限制 → 不限额度 + 09:00-21:00
+	#              没生效 → 不限额度（不写时段）
+	#    幂等的关键：所有写入都走 _pcset（只在没设过时写），重跑绝不覆盖用户改过的值；
+	#    老键（mode/start/end/week/timestart/timeend）一次性清掉，断掉重跑触发源。
+	for _m in $PC_MODULES; do
 		for _i in $(pc_ids_all "$_m"); do
-			# 守卫：已有 mode 键、或已有任一「新模型字段」都算处理过 —— 直接跳过。
-			# （mode 键会被第 4 步删掉，所以不能只靠它当守卫，否则第二次跑会把用户设过的值覆盖。）
-			[ -n "$(pc_uget "@$_m[$_i].sd_mode")" ] && continue
-			[ -n "$(pc_uget "@$_m[$_i].sd_qstart")" ] && continue
-			[ -n "$(pc_uget "@$_m[$_i].sd_quota")" ] && continue
-			[ -n "$(pc_uget "@$_m[$_i].sd_unlimited")" ] && continue
-			_w=$(pc_uget "@$_m[$_i].week"); [ -z "$_w" ] && _w='*'
-			_ts=$(pc_uget "@$_m[$_i].timestart"); [ -z "$_ts" ] && _ts=00:00
-			_te=$(pc_uget "@$_m[$_i].timeend"); [ -z "$_te" ] && _te=00:00
-			_has_sd=0; _has_hd=0
-			case "$_w" in
-			*'*'*) _has_sd=1; _has_hd=1 ;;
-			*)
-				for _d in $(echo "$_w" | tr ',' ' '); do
-					case "$_d" in 6|7) _has_hd=1 ;; *) _has_sd=1 ;; esac
-				done ;;
-			esac
-			if [ "$_has_sd" = 1 ]; then
-				uci -q set "$PC_CONF.@$_m[$_i].sd_mode=time"
-				uci -q set "$PC_CONF.@$_m[$_i].sd_start=$_ts"
-				uci -q set "$PC_CONF.@$_m[$_i].sd_end=$_te"
-			else
-				uci -q set "$PC_CONF.@$_m[$_i].sd_mode=off"
-			fi
-			if [ "$_has_hd" = 1 ]; then
-				uci -q set "$PC_CONF.@$_m[$_i].hd_mode=time"
-				uci -q set "$PC_CONF.@$_m[$_i].hd_start=$_ts"
-				uci -q set "$PC_CONF.@$_m[$_i].hd_end=$_te"
-			else
-				uci -q set "$PC_CONF.@$_m[$_i].hd_mode=off"
-			fi
-		done
-	done
-
-	# 4) 统一模型迁移：老的「时段」模式没有额度、语义是“封某一段”，而新模型只有
-	#    “可用时段”，两者补集跨日、无法无损换算。按既定方案：
-	#      老时段 → 每日额度 + 不限额度 + 09:00:00-21:00:00
-	#      已有额度 → 额度保持不变，仅补上「不限额度=否」与时段
-	#    已有 entries 在档时段的条目也会被补上 09:00-21:00（与迁移方案一致）。
-	for _m in time protocol weburl; do
-		for _i in $(pc_ids_all "$_m"); do
+			# 这个条目属于哪个时代？有 <sfx>_mode（双档案时代）或任一新模型字段 → 已经是新模型，
+			# 此时残留的 week 只是垃圾：删掉即可，绝不能用它给没配过的档案凭空造出一条限制。
+			_had_dual=0
 			for _sfx in sd hd; do
-				# mode 已废弃：改成由「可用时段 + 额度」表达（不再有模式枚举）
+				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_mode")" ] && _had_dual=1
+				for _f in unlimited qstart qend quota pool; do
+					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_$_f")" ] && _had_dual=1
+				done
+			done
+			# 老 week：决定哪几个档案在老模型里是"生效"的（没设 week = 不是"按星期"时代）
+			_w=$(pc_uget "@$_m[$_i].week")
+			_has_sd=1; _has_hd=1
+			if [ -n "$_w" ]; then
+				case "$_w" in
+				*'*'*) ;;
+				*)
+					_has_sd=0; _has_hd=0
+					for _d in $(echo "$_w" | tr ',' ' '); do
+						case "$_d" in 6|7) _has_hd=1 ;; *) _has_sd=1 ;; esac
+					done ;;
+				esac
+			fi
+			for _sfx in sd hd; do
 				_md=$(pc_uget "@$_m[$_i].${_sfx}_mode")
+				_ws=; _we=
 				case "$_md" in
 				time)
-					# 老「时段」语义是"封某一段"，新模型只有"可用时段"（不跨日），无法无损换算
-					# → 按既定方案统一为 不限额度 + 09:00-21:00
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+					_pcset "@$_m[$_i].${_sfx}_unlimited=1"
+					_ws=09:00:00; _we=21:00:00
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「时段」→ 不限额度 + 09:00-21:00" ;;
-				off)
-					# 老「关闭」= 不限制 → 不限额度 + 全天
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=00:00:00"
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=23:59:59" ;;
 				block)
-					# 上一版短暂存在过的 block → 额度 0（0 = 一分钟都不给）
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0" ;;
+					_pcset "@$_m[$_i].${_sfx}_unlimited=0"
+					_pcset "@$_m[$_i].${_sfx}_quota=0"
+					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 只在没设过时才补；且「没填额度」的老语义是不限 → 补 1 而不是 0
-					if [ -z "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ]; then
-						if [ -n "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ]; then
-							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
-						else
-							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
-							_pclog "migrate: $_m[$_i] ${_sfx}: 额度模式但没填额度 → 不限（否则会被当成 0 分钟全禁）"
+					# 老配额模式但没填额度 → 老语义是"不限"。新语义里 0 = 全禁，
+					# 所以必须显式补成不限，否则升级后会静默全天全禁。
+					if [ -n "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ]; then
+						_pcset "@$_m[$_i].${_sfx}_unlimited=0"
+					else
+						_pcset "@$_m[$_i].${_sfx}_unlimited=1"
+						_pclog "migrate: $_m[$_i] ${_sfx}: 配额模式但没填额度 → 不限（新语义 0=全禁）"
+					fi ;;
+				off)
+					_pcset "@$_m[$_i].${_sfx}_unlimited=1" ;;
+				'')
+					# 只有真的处在「按星期」时代的老条目才推窗口；已经是新模型的条目
+					# 完全不动（这样"只配了某一边档案"的条目不会被造出另一边）
+					if [ "$_had_dual" = 0 ]; then
+						eval "_on=\$_has_$_sfx"
+						_pcset "@$_m[$_i].${_sfx}_unlimited=1"
+						if [ -n "$_w" ] && [ "$_on" = 1 ]; then
+							_ws=09:00:00; _we=21:00:00
+							_pclog "migrate: $_m[$_i] ${_sfx}: 老「按星期 + 时段」→ 不限额度 + 09:00-21:00"
 						fi
 					fi ;;
 				esac
-				[ -n "$_md" ] && uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_mode"
-				# 只有确实在迁移某个老 mode 时才补时段。若 _md 为空（例如出厂默认配置里
-				# 只配了 sd_* 的条目），**整个 suffix 不动**——否则会凭空给它 09:00-21:00 +
-				# 空额度 → 被当成 0 分钟全禁（B4）。
-				if [ -n "$_md" ]; then
-					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
-					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
+				# 只在确定存在"老时段限制"时才补窗口；其余一律不写时段
+				# （= 全天可用），避免把本来 24h 可用的条目静默收紧。
+				if [ -n "$_ws" ]; then
+					_pcset "@$_m[$_i].${_sfx}_qstart=$_ws"
+					_pcset "@$_m[$_i].${_sfx}_qend=$_we"
 				fi
-				# 老的「额度模式但没填额度」原来等于"不限"。新语义里 0 = 全天禁止，
-				# 不显式标一下就会在升级后被静默全禁 —— 这里补成"不限"（只在没设过时补，幂等）。
-				# 想全禁请显式填 0。
-				if [ "$(pc_uget "@$_m[$_i].${_sfx}_mode")" = "quota" ] && \
-				   [ -z "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ] && \
-				   [ -z "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ]; then
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
-					_pclog "migrate: $_m[$_i] ${_sfx}: 额度模式但没填额度 → 显式「不限额度」（新语义 0=全禁）"
-				fi
-				# 上一版短暂存在过的 block 模式 → 每日额度 + 额度 0
-				if [ "$(pc_uget "@$_m[$_i].${_sfx}_mode")" = "block" ]; then
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_mode=quota"
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0"
-					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
-					_pclog "migrate: $_m[$_i] ${_sfx}: block 模式 → 每日额度 + 0 分钟（全天禁止）"
-				fi
+				uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_mode"
+				uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_start"
+				uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_end"
 			done
+			uci -q delete "$PC_CONF.@$_m[$_i].week"
+			uci -q delete "$PC_CONF.@$_m[$_i].timestart"
+			uci -q delete "$PC_CONF.@$_m[$_i].timeend"
 		done
 	done
 }

@@ -1,17 +1,10 @@
--- 使用统计：读 shell 的 stats_tsv，解析并做分析，供看板模板渲染。
+-- 使用统计：读 shell 的 stats_tsv（解析走 tsv.lua），做分析，供看板模板渲染。
 -- 本文件是被 require 的子模块 —— 不能用 LuCI 注入的全局（translate 等），必须显式 require。
 local i18n = require "luci.i18n"
-local sys = require "luci.sys"
-local util = require "luci.util"
+local tsv = require "luci.model.cbi.parentcontrol.tsv"
 local devnames = require "luci.model.cbi.parentcontrol.devnames"
 
 local M = {}
-
-local function num(s, def)
-	local n = tonumber(s)
-	if n == nil then return def or 0 end
-	return n
-end
 
 function M.device_name(mac)
 	return devnames.name(mac)
@@ -39,46 +32,9 @@ end
 
 -- 采集 + 分析
 function M.collect()
-	local raw = sys.exec("/etc/init.d/parentcontrol stats_tsv 2>/dev/null") or ""
-	local d = {
-		meta = {}, entries = {}, pools = {}, hist = {}, hist_key = {},
-		resets = {}, reset_by_day = {}, reset_by_key = {},
-		units = {}, key_totals = {}, dev_totals = {}, days = {},
-	}
-	for _, line in ipairs(util.split(raw, "\n")) do
-		if line ~= "" then
-			local f = util.split(line, "\t")
-			local k = f[1]
-			if k == "meta" then
-				d.meta = {
-					date = f[2], daytype = f[3],
-					min_kb = num(f[4], 8), keep = num(f[5], 90), now = f[6] or "",
-				}
-			elseif k == "entry" then
-				d.entries[#d.entries + 1] = {
-					key = f[2], module = f[3], idx = f[4], name = f[5] or "",
-					mac = f[6] or "", quota = num(f[7]),
-					used = num(f[8]), pool = f[9] or "", live_kb = num(f[10]),
-					unlimited = (f[11] == "1"),
-				}
-			elseif k == "pool" then
-				d.pools[#d.pools + 1] = {
-					name = f[2], quota = num(f[3]), used = num(f[4]), members = f[5] or "",
-				}
-			elseif k == "hist" then
-				d.hist[f[2]] = num(f[3])
-			elseif k == "reset" then
-				local dt, tm, key, before = f[2], f[3], f[4], num(f[5])
-				d.resets[#d.resets + 1] = { date = dt, time = tm, key = key, before = before }
-				d.reset_by_day[dt] = (d.reset_by_day[dt] or 0) + before
-				d.reset_by_key[key] = (d.reset_by_key[key] or 0) + before
-			elseif k == "histkey" then
-				local dt, key = f[2], f[3]
-				d.hist_key[dt] = d.hist_key[dt] or {}
-				d.hist_key[dt][key] = num(f[4])
-			end
-		end
-	end
+	local d = tsv.read(false)
+	d.reset_by_day, d.reset_by_key = {}, {}
+	d.units, d.key_totals, d.dev_totals, d.days = {}, {}, {}, {}
 
 	-- ---------- 分析 ----------
 	local meta = d.meta
@@ -115,12 +71,19 @@ function M.collect()
 		pooled[p.name] = true
 		local members = {}
 		for m in (p.members or ""):gmatch("[^,]+") do members[#members + 1] = m end
-		d.units[#d.units + 1] = {
+		local pu = {
 			name = p.name, kind = "pool", quota = p.quota, used = p.used,
-			members = members, pct = (p.quota > 0) and math.min(100, math.floor(p.used * 100 / p.quota)) or 0,
-			remain = math.max(0, p.quota - p.used),
-			status = (p.used >= p.quota) and info("已耗尽") or info("放行中"),
+			members = members, unlimited = p.unlimited,
 		}
+		if p.unlimited then
+			-- 池没填额度 = 不限额（成员各自不受池约束，与后端 pc_entry_unlimited 同一口径）
+			pu.pct, pu.remain, pu.status = 0, nil, info("不限额度")
+		else
+			pu.pct = (p.quota > 0) and math.min(100, math.floor(p.used * 100 / p.quota)) or 0
+			pu.remain = math.max(0, p.quota - p.used)
+			pu.status = (p.used >= p.quota) and info("已耗尽") or info("放行中")
+		end
+		d.units[#d.units + 1] = pu
 	end
 	for _, e in ipairs(d.entries) do
 		if not (e.pool ~= "" and pooled[e.pool]) then
@@ -128,6 +91,7 @@ function M.collect()
 				name = e.label, device = e.device, kind = "entry", quota = e.quota,
 				used = e.used, pct = e.pct, remain = e.remain, status = e.status,
 				projected = e.projected, live_kb = e.live_kb, key = e.key,
+				unlimited = e.unlimited,
 			}
 		end
 	end
