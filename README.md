@@ -94,7 +94,7 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 **结论：IPv4 转发流量只能按目标 IP（报文头）来封。** 于是：
 
-- `PARENTCONTROL_IP` 链（挂在 mangle PREROUTING）按解析出的目标 IP 封锁
+- 按解析出的目标 IP 封锁（规则进 `PARENTCONTROL_QUOTA` 链，mangle PREROUTING —— 本 fork 已把旧的独立 `PARENTCONTROL_IP` / `PARENTCONTROL_WEBURL` 链统一掉）
 - 网址行的「关键词/域名」列写域名即可：既当子串匹配明文 DNS / TLS SNI（apex 天然覆盖子域），
   也会被解析成 IP 一起封
 - IPv4 默认封整个 `/24`（`basic.ip_mask` 可改 `32` 只封精确 IP）；IPv6 封 `/64`
@@ -161,6 +161,23 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 - 新增「**使用限额**」页：共享额度池、寒暑假区间
 - 插件内所有文案都是**中文字面量**（不受 LuCI 界面语言影响）
 
+## 开发流程
+
+本仓库用多 agent 流水线开发，每阶段有 gate，产物落在 `docs/superpowers/specs/`（`{task-brief}-*.md`）：
+
+| 阶段 | 角色 | 产物 | 关卡 |
+|------|------|------|------|
+| 1 需求 | 调度者 | `design.md`（含编号验收标准） | 用户确认 |
+| 2 对峙 | 调度者 | `adr.md` + `glossary.md` | 有挑战-回应记录 |
+| 3 计划 + 测试设计 | 调度者 | `plan.md` + `testplan.md`（白盒 W* + 上线黑盒 B*，逐条覆盖验收标准 + 覆盖矩阵） | 矩阵无空格 |
+| 4 实现 | code pane | 代码 + 白盒全绿 + `progress.md` | 白盒全绿 |
+| 5 复审 | review pane | `review.md`（`/thermos` 双路复审） | 无 Blocker/Should-fix |
+| 6 测试 | test pane | `test-report.md`（白盒复核 + 上线黑盒） | 全绿 |
+
+- 调度者只写文档与决策，**不写实现代码**；实现 handoff 给独立 pane。
+- code / review / test pane 开始新一轮前**按需清空上下文**（`/new` / `/clear`），保证独立、纯净。
+- 跨 pane 通信是**推送式回调**（做完主动通知，不轮询）。
+
 ## 测试
 
 仓库自带一套白盒测试（无需路由器，`sh` + `python3` 即可跑）：
@@ -173,7 +190,7 @@ sh test/migrate_test.sh    # 配置迁移：week→双档案 / word→domains / 
 sh test/mutation_check.sh  # 变异测试（故意改坏源码，断言测试确实会失败）
 ```
 
-`run.sh` 还会跑三个静态检查，都是**真机上踩过、主机测不出来**的坑：
+`run.sh` 还会跑几条静态检查，都是**真机上踩过、主机测不出来**的坑：
 
 - `lint_locals.py` —— shell 函数里赋值的 `_xxx` 必须 `local`。busybox ash 的变量默认全局，
   helper 里写 `_ip=$(...)` 会静默覆盖调用方的同名循环变量（真机上曾导致网址条目的
@@ -182,11 +199,32 @@ sh test/mutation_check.sh  # 变异测试（故意改坏源码，断言测试确
   会 `arithmetic syntax error`，曾导致 `start` 崩、锁文件残留、crontab 永远写不进去）。
 - `lint_luci_globals.py` —— 被 `require` 的 CBI 子模块不能直接用注入的全局类名 / `translate`
   （否则页面 500：`class must be a descendant of AbstractValue`）。
+- （`run.sh` 里的结构检查）`stats_tsv` 的列**只允许 `tsv.lua` 解析**。历史上 `ui.lua`/`statsdata.lua`
+  各写了一份按下标解析，shell 侧改了列之后漏改一处，那一整列就**静默显示错值**。
 
 `test/fakes/` 下是桩：状态化 `iptables`/`ip6tables`（`-N/-F/-X/-C/-I/-A/-D/-S/-L` + 计数器）、
 文件后端的 `uci`、可控的 `date`/`resolveip`/`wget`/`jsonfilter`/`crontab`。
 关键路径（链名、挂载顺序、时限/额度阈值、跨天换档、采样记账、重建自愈、防自锁放行顺序）
 都是直接断言生成的规则文本，而不是“跑通就算过”。
+
+### 上线黑盒验收（真机）
+
+白盒测试跑在主机上；**上线前还要在真机上按「用户可观测行为」验收**（不看实现细节）。验收清单：
+
+| # | 验收项 | 期望 |
+|---|--------|------|
+| 1 | 部署后 `reload` | `rc=0`；`mangle` 两条链（`PARENTCONTROL_QUOTA` 封锁 / `PARENTCONTROL_ACCT` 计数）建好，顺序 `TAGQ→TAGA` |
+| 2 | 连续 `start` 3 次 | 规则不重复（链存在时先 flush） |
+| 3 | 开启软件加速时拦网址 | 受管设备仍被拦住（有受管设备即停用 flow offloading） |
+| 4 | 额度计时 | 每分钟 tick 采样；用满即封；次日 0 点重置 |
+| 5 | 时段 | 改路由器系统时区不影响（一律 UTC+8 口径），秒级生效 |
+| 6 | 防自锁 | 「未填 MAC」的额度条目耗尽后，SSH / LuCI 仍可连 |
+| 7 | 节假日 | 有网时拉当年+明年；成功后 7 天不重拉；无数据降级周中/周末 |
+| 8 | 配置迁移 | 老配置首启自动迁移 + 备份到 `/etc/parentcontrol/backup/`；重复执行幂等 |
+| 9 | 界面 | 列表摘要 / 编辑页 / 使用统计页渲染正常；文案中文；改文案后清 `/tmp/luci-indexcache*` |
+| 10 | 域名封锁 + IP 刷新 | 解析出 IP 并封锁；`ip_refresh` 到点重建 |
+
+> 参考真机环境：ImmortalWrt 23.05 x86/64，iptables-legacy 1.8.8（**无 `addrtype` 模块**），LuCI + ucode。
 
 ## 已知限制
 
