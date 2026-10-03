@@ -144,11 +144,8 @@ pc_entry_unlimited() { # $1=module $2=idx $3=school|holiday
 	_q=$(pc_uget "@$1[$2].$(pc_suffix "$3")_quota")
 	[ -n "$_q" ] && { echo 0; return 0; }
 	# 没填自己的额度：挂了池且池确实有额度 → 限制由池负责，算“有限额”
-	_p=$(pc_entry_pool "$1" "$2" "$3")
-	if [ -n "$_p" ]; then
-		_pq=$(pc_pool_quota "$_p" "$3")
-		[ -n "$_pq" ] && { echo 0; return 0; }
-	fi
+	# 「池是否提供额度」只有一份判据（见 pc_pool_provided_quota）
+	[ -n "$(pc_pool_provided_quota "$1" "$2" "$3")" ] && { echo 0; return 0; }
 	echo 1
 }
 
@@ -224,16 +221,23 @@ pc_entry_quota() {
 	pc_uget "@$1[$2].${_sfx}_quota"
 }
 
-# 条目今天「生效的原始额度」——shell 侧的池优先取值只此一份：挂了池且池有额度 → 用池的
-# 额度，否则用条目自己的。只输出额度值本身（不夹带池名，避免空格分隔的隐式协议）。
+# 该条目今天从共享池拿到的额度（空 = 池没提供额度）。
+# 「池是否提供额度」这个判据全仓只此一处 —— pc_entry_unlimited / entry_effective /
+# pc_effective_quota 都读它，别再各自内联 `pc_pool_quota && [ -n ... ]`。
+pc_pool_provided_quota() { # $1=module $2=idx $3=school|holiday
+	local _p
+	_p=$(pc_entry_pool "$1" "$2" "$3")
+	[ -n "$_p" ] && pc_pool_quota "$_p" "$3"
+}
+
+# 条目今天「生效的原始额度」——shell 侧的池优先取值只此一份：池提供了额度 → 用池的额度，
+# 否则用条目自己的。只输出额度值本身（不夹带池名，避免空格分隔的隐式协议）。
 # 空 = 没有额度来源，它代表"不限"还是"全禁"由调用方按语义决定。
 # 注意：ui.lua 渲染列表时需要同一份判定，但 Lua 不能调 shell 函数，那边有一份**镜像**
 # （luasrc/model/cbi/parentcontrol/ui.lua 的 qmin/pool_quota）—— 改这里必须同步改它。
 pc_effective_quota() { # $1=module $2=idx $3=school|holiday
-	local _pool _pq
-	_pool=$(pc_entry_pool "$1" "$2" "$3")
-	_pq=""
-	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$3")
+	local _pq
+	_pq=$(pc_pool_provided_quota "$1" "$2" "$3")
 	if [ -n "$_pq" ]; then
 		echo "$_pq"
 	else

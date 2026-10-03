@@ -436,8 +436,7 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 	#   池有额度 → 用了池的额度，报池内合计；否则报条目自己的用量。
 	# 输出「有效额度 已用 池名」——封锁链与看板共用。
 	_pool=$(pc_entry_pool "$_m" "$_i" "$_t")
-	_pq=""
-	[ -n "$_pool" ] && _pq=$(pc_pool_quota "$_pool" "$_t")
+	_pq=$(pc_pool_provided_quota "$_m" "$_i" "$_t")
 	_q=$(pc_quota_positive "$(pc_effective_quota "$_m" "$_i" "$_t")")
 	if [ -n "$_pq" ]; then
 		echo "$_q $(pool_usage "$_pool" "$_t") $_pool"
