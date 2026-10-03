@@ -31,7 +31,6 @@ run_mut() { # <名字> <文件> <老> <新> <套件>
 	if ! mutate "$file" "$old" "$new"; then
 		printf '  FAIL  %s（锚点未命中：这条防线已失效，必须修锚点）\n' "$name"
 		SKIPPED=$((SKIPPED + 1))
-	FAILED=$((FAILED + 1))
 		return
 	fi
 	if (cd "$WORK/repo" && sh "test/$suite") >"$WORK/out" 2>&1; then

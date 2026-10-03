@@ -343,30 +343,31 @@ pc_migrate_config() {
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0"
 					_pclog "migrate: $_m[$_i] ${_sfx}: 老「全天禁止」→ 额度 0" ;;
 				quota)
-					# 这里藏着**两种互斥的历史语义**，配置形状一模一样（`mode=quota` + 额度 + unlimited），
-					# 只能靠时代标记区分：
-					#   时代 A（有 week）：这条是从更早的「按星期」配置迁移过来的（c4fe179 那次迁移
-					#     在写 mode/unlimited 的同时**保留** week）。当年运行时的判定是
-					#     「勾了不限 **或** 归一后的有效额度 <= 0 → 不封」，即额度 <= 0 就是"不限"。
-					#   时代 B（没有 week）：这条是后来在双档案界面里配的（a0c7936 起已把
-					#     「额度 0/空」定义为全天禁止）。此时 unlimited=0 就是用户真要全禁。
-					# 所以：有 week 才按时代 A 的语言重算并强制改写（否则那个历史的 unlimited=0
-					# 会把"不限"翻译成全天全禁，B1″）；没有 week 就**完全不碰**，绝不把用户的
-					# 全天禁止静默解除。entry_effective 是**池优先**，判定必须跟着走。
-					if [ -n "$_w" ]; then
-						_unl=0
-						[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
-						if [ "$_unl" = 0 ]; then
-							if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
-							_eq=""
-							_p=$(pc_entry_pool "$_m" "$_i" "$_dt")
-							[ -n "$_p" ] && _eq=$(pc_pool_quota "$_p" "$_dt")
-							[ -n "$_eq" ] || _eq=$(pc_entry_quota "$_m" "$_i" "$_dt")
-							[ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null || _unl=1
+					# 老运行时的判据是「归一后的有效额度 > 0 才算有限额」（c4fe179..a1ae0e9 的
+					# build_quota_blocks，也就是上游/发布版一直以来的行为）：额度为空、0、负数、
+					# 非数字在那个语义里**都是"不限"**。所以这里把"老=不限"显式写成 unlimited=1。
+					#
+					# 已知的不可判别之处（不要再试图用标记去猜）：我的中间开发版 a0c7936 曾短暂把
+					# 「额度 0/空」定义成"全天禁止"，那种配置与老配置**形状完全一样**，没有任何字段
+					# 能区分（试过用 week 当标记：无 week 会被误判成全禁、有 week 会被误判成不限，
+					# 两个方向都是 bug，已放弃）。这里统一按**发布版**语义解释 —— 对真实用户来说
+					# 那才是历史上一直成立的约定；受影响的只有"用过那个中间开发版、并把额度填 0
+					# 表示全天禁止"的极窄情况，迁移会为这类条目打日志，README 也写明了怎么复核。
+					# 注意 entry_effective 是池优先：判定必须跟着它走。
+					_unl=0
+					[ "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" = "1" ] && _unl=1
+					if [ "$_unl" = 0 ]; then
+						if [ "$_sfx" = "sd" ]; then _dt=school; else _dt=holiday; fi
+						_eq=""
+						_p=$(pc_entry_pool "$_m" "$_i" "$_dt")
+						[ -n "$_p" ] && _eq=$(pc_pool_quota "$_p" "$_dt")
+						[ -n "$_eq" ] || _eq=$(pc_entry_quota "$_m" "$_i" "$_dt")
+						if [ "$(pc_quota_positive "$_eq")" -gt 0 ] 2>/dev/null; then
+							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
+						else
+							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+							_pclog "migrate: $_m[$_i] ${_sfx}: 老额度非正/非法 → 不限（发布版语义）。若你本来要的是「全天禁止」，请在界面上把额度填 0 并取消勾选「不限额度」"
 						fi
-						uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=$_unl"
-						[ "$_unl" = 1 ] && \
-							_pclog "migrate: $_m[$_i] ${_sfx}: 时代 A 的额度非正/非法（当年=不限）→ 不限额度"
 					fi ;;
 				off)
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1" ;;
@@ -383,10 +384,8 @@ pc_migrate_config() {
 					fi ;;
 				esac
 				# 只在确定存在"老时段限制"时才补窗口；其余一律不写时段（= 全天可用），
-				# 避免把本来 24h 可用的条目静默收紧。mode 还在说明这条还没走完新模式迁移，
-				# 但**不等于**它从没被迁移过（c4fe179 那次迁移就保留了 mode，直到 005f1b1 才删），
-				# 所以这里只写 qstart/qend 这两个「新模式字段」，绝不碰 unlimited 之类的语义字段
-				# —— 那些字段的含义随时代变过，只能按上面的时代判定处理。
+				# 避免把本来 24h 可用的条目静默收紧。这里只写 qstart/qend 这两个"新模式字段"，
+				# 语义字段（unlimited/quota）一律由上面的分支按发布版语义决定。
 				if [ -n "$_ws" ]; then
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=$_ws"
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=$_we"

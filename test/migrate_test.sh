@@ -127,25 +127,26 @@ t_eq '未凭空造出平日档案（sd_quota 应为空）' '' "$(cfg_get parentc
 t_eq '未凭空造出平日时段' '-' "$(cfg_get parentcontrol.@weburl[0].sd_qstart)-$(cfg_get parentcontrol.@weburl[0].sd_qend)"
 t_eq 'week 残留已清掉' '' "$(cfg_get parentcontrol.@weburl[0].week)"
 
-echo '== B1′/B1″ 防线：老额度为空/0/负数/非数字/脏值 → 老语义都=不限，迁移后必须真不限 =='
-# 关键：老配置里普遍**已经带着** sd_unlimited='0'（中间版本写的），而迁移这一类必须
-# 强制改写这个开关 —— 只在"没设过"时写的话，就会把「不限」翻译成新语义的全天全禁（B1″）。
-# 判据也不是"原始值 -gt 0"，而是老版本用的归一器 pc_quota_positive（老白名单）：
-# "+5"/" 5"/"00" 这些在老语义里同样被归 0 = 不限（S1′）。
+echo '== B1′/B1″ 防线：老额度为空/0/负数/非数字/脏值 → 发布版语义都是"不限"，迁移必须真不限 =='
+# 关键 1：老配置里普遍已带着 sd_unlimited='0'（中间版本写的），所以必须**强制改写**开关；
+#         只在"没设过"时才写，就会把「不限」翻译成新语义的全天全禁。
+# 关键 2：这条形状**没有可靠的年代标记** —— 评审实测用 week 做标记时两个方向都会误判
+#         （无 week 被误判成全禁、有 week 被误判成不限），所以两种形状都必须得到同一结果。
 for bad in '' 0 -1 abc 00 +5 ' 5'; do
-	cfg_reset
-	cat > "$T_TMP/bad.uci" <<EOF
-config weburl
-	option enable '1'
-	option week '*'
-	option sd_mode 'quota'
-	option sd_unlimited '0'
-	option sd_quota '$bad'
-EOF
-	cfg_load parentcontrol "$T_TMP/bad.uci"
-	pc_migrate_config
-	t_eq "老 quota='$bad' + stale unlimited=0 → unlimited=1" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
-	t_eq "老 quota='$bad' → 运行时口径也判不限（端到端）" '1' "$(pc_entry_unlimited weburl 0 school)"
+	for wk in no yes; do
+		cfg_reset
+		{ echo 'config weburl'
+		  echo "	option enable '1'"
+		  [ "$wk" = yes ] && echo "	option week '*'"
+		  echo "	option sd_mode 'quota'"
+		  echo "	option sd_unlimited '0'"
+		  echo "	option sd_quota '$bad'"
+		} > "$T_TMP/bad.uci"
+		cfg_load parentcontrol "$T_TMP/bad.uci"
+		pc_migrate_config
+		t_eq "老 quota='$bad'（week=$wk）+ stale unlimited=0 → unlimited=1" '1' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
+		t_eq "老 quota='$bad'（week=$wk）→ 运行时口径也判不限（端到端）" '1' "$(pc_entry_unlimited weburl 0 school)"
+	done
 done
 
 echo '== 老额度是正数 → 仍按有限额（不能被"非空即不限"误放）=='
@@ -153,7 +154,6 @@ cfg_reset
 cat > "$T_TMP/ok.uci" <<'EOF'
 config weburl
 	option enable '1'
-	option week '*'
 	option sd_mode 'quota'
 	option sd_unlimited '0'
 	option sd_quota '30'
@@ -164,7 +164,7 @@ t_eq '老 quota=30 → unlimited=0' '0' "$(cfg_get parentcontrol.@weburl[0].sd_u
 t_eq '老 quota=30 → 运行时口径 = 有限额' '0' "$(pc_entry_unlimited weburl 0 school)"
 t_eq '额度值原样保留' '30' "$(cfg_get parentcontrol.@weburl[0].sd_quota)"
 
-echo '== S2′ 防线：老 quota 分支必须照 entry_effective 的池优先 —— 挂了有额度的池 = 有限额 =='
+echo '== S2′ 防线：quota 分支必须照 entry_effective 的池优先 —— 挂了有额度的池 = 有限额 =='
 cfg_reset
 cat > "$T_TMP/poolq.uci" <<'EOF'
 config quota
@@ -173,7 +173,6 @@ config quota
 
 config weburl
 	option enable '1'
-	option week '*'
 	option sd_mode 'quota'
 	option sd_unlimited '0'
 	option sd_quota '0'
@@ -184,33 +183,18 @@ pc_migrate_config
 t_eq '挂了有额度的池 → 仍按有限额（不得静默解封）' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
 t_eq '运行时口径 = 有限额' '0' "$(pc_entry_unlimited weburl 0 school)"
 
-echo '== 时代 B 防线：没有 week（更晚的双档案界面配的，额度 0 就是要全天禁止）→ 不得改写 =='
-cfg_reset
-cat > "$T_TMP/eraB.uci" <<'EOF'
-config weburl
-	option enable '1'
-	option sd_mode 'quota'
-	option sd_unlimited '0'
-	option sd_quota '0'
-EOF
-cfg_load parentcontrol "$T_TMP/eraB.uci"
-pc_migrate_config
-t_eq '无 week → unlimited 保持 0（全天禁止不被静默解除）' '0' "$(cfg_get parentcontrol.@weburl[0].sd_unlimited)"
-t_eq '无 week → 运行时口径 = 有限额（额度 0 = 全禁）' '0' "$(pc_entry_unlimited weburl 0 school)"
-
 echo '== hd 档案也要覆盖（不能只测 sd）=='
 cfg_reset
 cat > "$T_TMP/hd.uci" <<'EOF'
 config weburl
 	option enable '1'
-	option week '*'
 	option hd_mode 'quota'
 	option hd_unlimited '0'
 	option hd_quota '0'
 EOF
 cfg_load parentcontrol "$T_TMP/hd.uci"
 pc_migrate_config
-t_eq 'hd（时代 A、额度 0）→ unlimited=1' '1' "$(cfg_get parentcontrol.@weburl[0].hd_unlimited)"
+t_eq 'hd（额度 0）→ unlimited=1' '1' "$(cfg_get parentcontrol.@weburl[0].hd_unlimited)"
 t_eq 'hd 运行时口径 = 不限（holiday 档案）' '1' "$(pc_entry_unlimited weburl 0 holiday)"
 
 echo '== 归一器口径（迁移与运行共用同一套）=='
