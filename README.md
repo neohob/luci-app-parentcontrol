@@ -9,7 +9,8 @@
 <a href="https://www.mozilla.org/firefox/"><img alt="Firefox" src="https://img.shields.io/badge/Firefox-%E2%89%A5128-FF7138?logo=firefoxbrowser&logoColor=white"></a>
 </p>
 
-家长控制：按时间控制机器、按端口/协议过滤、按网址过滤，并支持**每日累计使用额度**。
+家长控制：按网址/域名过滤某台设备，并支持**可用时段 + 每日累计使用额度**。
+（上游的「时间限制」「协议过滤」两个页面已移除 —— 与本 fork 的「可用时段 + 每日额度」重复。）
 
 
 **上游原版在开启软件加速的 IPv4/IPv6 双栈环境下，「网址过滤」按 MAC 拦某个网站是完全不生效的**
@@ -27,16 +28,16 @@
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="screenshot/1.png" width="100%"><br><sub><b>时间限制</b>：按 MAC/IP 限制机器是否联网</sub></td>
+<td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/IP 拦某台设备</sub></td>
 <td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="screenshot/3.png" width="100%"><br><sub><b>协议过滤</b>：按端口/协议限制</sub></td>
+<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享池</sub></td>
 <td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：共享额度池、寒暑假区间</sub></td>
 </tr>
 </table>
 
-> 三个模块的列表**只显示摘要**：`设备（含设备名） / 档案（平日+节假日一句话） / 今日额度`，
+> 列表**只显示摘要**：`设备（含设备名） / 档案（平日+节假日一句话） / 今日额度`，
 > 点每行的 **编辑** 进独立页做详细设置。
 > 更完整的用量统计（今天进度条、最近 30 天趋势、按条目/设备分析、重置记录）在
 > **「使用统计」** 页 —— 截图 4 里的旧小看板已经移到那里了。
@@ -149,12 +150,13 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 ### 8. 界面
 
-- 三个模块的列表只显示摘要：`开启 / 备注 / 设备 / 静态IP /（协议另加 协议·端口）/ 档案 / 今日额度`，
+- 列表只显示摘要：`开启 / 备注 / 设备 / 静态IP / 档案 / 今日额度`，
   每行一个 **编辑** 按钮
   - **设备**列显示 `MAC（设备名）`，设备名取自 DHCP 租约/ARP（`luci.sys.net.mac_hints`）
-  - **档案**列显示 `平日 30分钟 @kid1；节假日 08:00-18:00` 这样的摘要
+  - **档案**列显示紧凑摘要：两档案一致时只写一次（`两档案相同：60分钟(09:00-21:00)`），
+    否则 `平日 … · 节假日 …`；全天时段不写、秒不写
   - **今日额度**列显示 `12 / 30 分钟`；勾了「不限额度」显示 `不限`；条目不存在时显示 `-`
-- 点 **编辑** 进独立页（`weburl_edit` / `time_edit` / `protocol_edit`），容纳全部详细字段
+- 点 **编辑** 进独立页（`weburl_edit`），容纳全部详细字段
 - 新增「**使用限额**」页：共享额度池、寒暑假区间
 - 插件内所有文案都是**中文字面量**（不受 LuCI 界面语言影响）
 

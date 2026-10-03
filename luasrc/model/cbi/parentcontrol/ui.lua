@@ -56,44 +56,45 @@ end
 
 -- 档案摘要：平日 / 节假日 各自的「可用时段 + 额度」。
 -- 判定必须与后端 pc_entry_unlimited 同源，否则会出现「界面说不限、其实全天全禁」这种反向矛盾。
+-- 显示上尽量短：全天时段不写、秒不写、两档案一样时只写一次（原来两句拼在一起又长又乱）。
 function M.profiles(self, section)
 	local map = self.map
-	local function one(sfx, label)
+	local function one(sfx)
 		local q = get(map, section, sfx .. "_quota")
 		local p = get(map, section, sfx .. "_pool")
 		local unl = get(map, section, sfx .. "_unlimited")
 		local pqn = qmin(pool_quota(map, p, sfx))   -- nil = 池没额度（含根本没挂池）
-		local qn = qmin(q)                         -- nil = 没自填额度
+		local qn = qmin(q)                          -- nil = 没自填额度
 		local st
-		-- 判定顺序必须与后端 pc_entry_unlimited + entry_effective 完全一致：
-		--   ① 勾了不限 → 不限；② 挂了池且池有额度 → 池优先（entry_effective 就是池优先）；
-		--   ③ 自填额度；④ 显式关掉不限且没有任何额度来源 → 后端判 0 分钟 = 全天全禁；
-		--   ⑤ 挂了池但池没额度 → 不限；⑥ 什么都没有 → 不限
-		-- 额度值一律经 qmin 归一后再显示，否则界面会把 "+5" 这类脏值原样显示、
-		-- 而后端其实把它归 0（= 全禁），又变成两套口径。
+		-- 顺序与后端 pc_entry_unlimited + entry_effective 一致：
+		-- 勾不限 → 不限；池有额度 → 池优先；自填额度；显式关不限且无来源 → 0 分钟；挂池无额度 → 不限
 		if unl == "1" then
-			st = label .. " " .. i18n.translate("不限额度")
+			st = i18n.translate("不限")
 		elseif pqn then
-			st = label .. " " .. pqn .. i18n.translate("分钟")
+			st = pqn .. i18n.translate("分钟")
 		elseif qn then
-			st = label .. " " .. qn .. i18n.translate("分钟")
+			st = qn .. i18n.translate("分钟")
 		elseif unl == "0" then
-			st = label .. " 0 " .. i18n.translate("分钟")
+			st = "0 " .. i18n.translate("分钟")
 		elseif p and p ~= "" then
-			st = label .. " " .. i18n.translate("不限额度")
+			st = i18n.translate("不限")
 		else
-			st = label .. " " .. i18n.translate("不限")
+			st = i18n.translate("不限")
 		end
-		-- 时段不是全天时附上，列表里一眼看出"只在几点到几点能用"
+		-- 时段：全天（或没填）不显示，否则显示 09:00-21:00
 		local ws = get(map, section, sfx .. "_qstart")
 		local we = get(map, section, sfx .. "_qend")
 		if ws and we and ws ~= "" and we ~= "" and not (ws == "00:00:00" and we == "23:59:59") then
-			st = st .. " " .. ws .. "-" .. we
+			st = st .. "(" .. ws:sub(1, 5) .. "-" .. we:sub(1, 5) .. ")"
 		end
 		if p and p ~= "" then st = st .. " @" .. p end
 		return st
 	end
-	return one("sd", i18n.translate("平日")) .. "；" .. one("hd", i18n.translate("节假日"))
+	local sd, hd = one("sd"), one("hd")
+	if sd == hd then
+		return i18n.translate("两档案相同") .. "：" .. sd
+	end
+	return i18n.translate("平日") .. " " .. sd .. " · " .. i18n.translate("节假日") .. " " .. hd
 end
 
 -- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示

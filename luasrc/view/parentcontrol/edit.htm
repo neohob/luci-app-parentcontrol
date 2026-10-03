@@ -41,35 +41,49 @@
 			}).filter(function (x) { return x !== null; });
 			warn().innerHTML = out.length ? ('⚠ ' + out.join('；')) : '';
 		}
-		// 勾了「不限额度」→ 收起「每日分钟」和「共享组」两个框（用前端控制，不用 CBI 的 depends）
-		function toggleUnlimited() {
+		// 勾了「不限额度」→ 收起「每日分钟」和「共享组」两个框。
+		// 不用 CBI 的 depends：Flag 在 depends 里表达不了"未勾选"（未勾的值不是 "0"）。
+		// 注意 LuCI 的 Flag 在 change 时会走 cbi_d_update() **重渲染** DOM，
+		// 所以这里不能只在 boot/change 时设一次样式（会被重渲染冲掉）——
+		// 用 closest('.cbi-value') 定位（不依赖那种 cbi-<conf>-<sec>-<opt> 的 id 形状），
+		// 并且让 MutationObserver 在 DOM 变化后重新施加。
+		function applyUnlimited() {
 			['sd', 'hd'].forEach(function (sfx) {
 				var u = document.querySelector('input[id$=".' + sfx + '_unlimited"]');
 				if (!u) return;
 				[sfx + '_quota', sfx + '_pool'].forEach(function (key) {
-					var box = document.querySelector('[id$="-' + key + '"]');
-					if (!box) return;
+					var i = document.querySelector('input[id$=".' + key + '"]');
+					var row = i && i.closest('.cbi-value');
+					if (!row) return;
 					if (u.checked) {
-						box.style.display = 'none';
-						box.setAttribute('data-pc-hidden', '1');
-					} else if (box.getAttribute('data-pc-hidden')) {
-						box.style.display = '';
-						box.removeAttribute('data-pc-hidden');
+						row.style.display = 'none';
+					} else {
+						row.style.display = '';
 					}
 				});
 			});
 		}
+
 		function boot() {
-			toggleUnlimited();
+			applyUnlimited();
 			check();
 			document.addEventListener('keyup', check);
-			document.addEventListener('change', function () { toggleUnlimited(); check(); });
-			document.addEventListener('click', function () { toggleUnlimited(); check(); });
+			document.addEventListener('change', function () { applyUnlimited(); check(); });
+			document.addEventListener('click', function () { applyUnlimited(); check(); });
 		}
 		if (document.readyState === 'loading') {
 			document.addEventListener('DOMContentLoaded', function () { setTimeout(boot, 200); });
 		} else {
 			setTimeout(boot, 200);
+		}
+		// CBI 的 cbi_d_update() 会整块替换字段 DOM，所以每次 DOM 变化后都要重新施加一次
+		if (window.MutationObserver) {
+			var pending = false;
+			new MutationObserver(function () {
+				if (pending) return;
+				pending = true;
+				setTimeout(function () { pending = false; applyUnlimited(); }, 0);
+			}).observe(document.body, { childList: true, subtree: true });
 		}
 	})();
 //]]>

@@ -75,8 +75,10 @@ function M.add_profile(t, sfx, label)
 	u.default = "0"
 	u.rmempty = true
 
-	local q = t:option(cbi.Value, sfx .. "_quota", label .. " " .. i18n.translate("每日分钟"),
-		i18n.translate("必填；填 <b>0</b> = 一分钟都不给（全禁）"))
+	-- 提示写在标签里，不用 cbi-value-description：描述会作为独立一行渲染在字段下方，
+	-- 视觉上容易跟后一个字段（共享组）黏在一起，看起来像它俩是一组。
+	local q = t:option(cbi.Value, sfx .. "_quota",
+		label .. " " .. i18n.translate("每日分钟（0 = 全禁）"))
 	q.placeholder = i18n.translate("如 60")
 	q.default = "60"
 	q.datatype = "uinteger"
