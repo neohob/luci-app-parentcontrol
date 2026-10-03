@@ -96,18 +96,21 @@ function M.add_profile(t, sfx, mode_label)
 	u:depends(sfx .. "_mode", "quota")
 	u.rmempty = true
 
-	-- 额度：默认 60，不能填 0；勾了「不限额度」就隐藏（depends 组内 AND，组间 OR）
+	-- 额度：默认 60，不能填 0。
+	-- 只依赖 mode（单条件）——"勾了不限额度就收起额度框"由前端 JS 做（view/parentcontrol/edit.htm）。
+	-- 原因：CBI 的 depends 对 Flag（复选框）未勾选态的取值跟字符串对不上，双条件依赖会把额度框
+	-- 永久藏起来（实测踩到）。少一个特例，前端自己控制显隐更可靠。
 	local q = t:option(cbi.Value, sfx .. "_quota", i18n.translate("每日分钟"))
 	q.placeholder = i18n.translate("必填，如 60")
 	q.default = "60"
 	q.datatype = "uinteger"
 	q.validate = M.validate_quota
-	q:depends({ [sfx .. "_mode"] = "quota", [sfx .. "_unlimited"] = "0" })
+	q:depends(sfx .. "_mode", "quota")
 	q.rmempty = true
 
 	local p = t:option(cbi.Value, sfx .. "_pool", i18n.translate("共享组"))
 	p.placeholder = i18n.translate("留空=独立额度")
-	p:depends({ [sfx .. "_mode"] = "quota", [sfx .. "_unlimited"] = "0" })
+	p:depends(sfx .. "_mode", "quota")
 	p.rmempty = true
 end
 
