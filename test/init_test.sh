@@ -141,6 +141,26 @@ build_quota_blocks
 t_eq '全天 + 耗尽 → 所有 DROP 都是无条件的' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-j DROP')" "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 t_eq '全天 + 耗尽 → 不含 -m time' 0 "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-m time')"
 
+echo '== 模式=全天禁止 → 无条件封（不看时段、不看额度）=='
+fresh
+cfg_begin 1
+cfg_section <<'EOF'
+config weburl
+	option enable '1'
+	option mac '00:00:5e:00:53:01'
+	option domains 'example.com'
+	option sd_mode 'block'
+EOF
+cfg_apply
+run_build
+t_eq '全天禁止 → 出现无条件封' ok "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo ok || echo no)"
+t_has '全天禁止 → 封的是该条目目标' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-d 1.2.3.0/24 -j DROP'
+t_eq '全天禁止 → 完全不带 -m time（与时段无关）' 0 "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-m time')"
+t_eq '全天禁止 → 不计数（mode!=quota 不进 ACCT）' '' "$(ipt_rules v4 mangle PARENTCONTROL_ACCT | flat)"
+t_eq '全天禁止 → 无量可用额度也不受影响（对照：额度模式同配置下 QUOTA 为空）' \
+	"$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | grep -c -- '-j DROP')" \
+	"$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
+
 echo '== 模式=关闭 → 两条链都不建规则 =='
 fresh
 cfg_begin 1

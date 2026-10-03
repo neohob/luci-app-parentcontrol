@@ -253,4 +253,26 @@ t_eq '只列 enable=1 且额度的条目（模块序 time/protocol/weburl）' 't
 	"$(pc_quota_keys school | tr '\n' ' ' | sed 's/ $//')"
 t_eq '该日为非额度模式 → 空' '' "$(pc_quota_keys holiday)"
 
+echo '== pc_quota_keys 按模式取（默认 quota）=='
+cfg_reset
+cat > "$T_TMP/mode.uci" <<'EOF'
+config time
+	option enable '1'
+	option sd_mode 'block'
+config weburl
+	option enable '1'
+	option sd_mode 'quota'
+config weburl
+	option enable '1'
+	option sd_mode 'block'
+config protocol
+	option enable '1'
+	option sd_mode 'off'
+EOF
+cfg_load parentcontrol "$T_TMP/mode.uci"
+t_eq '默认只取 quota' 'weburl_0' "$(pc_quota_keys school | tr '\n' ' ' | sed 's/ $//')"
+t_eq '显式取 block' 'time_0 weburl_1' "$(pc_quota_keys school block | tr '\n' ' ' | sed 's/ $//')"
+t_eq '取 off（不会出现在封锁里）' 'protocol_0' "$(pc_quota_keys school off | tr '\n' ' ' | sed 's/ $//')"
+
+
 t_summary

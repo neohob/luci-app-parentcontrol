@@ -4,6 +4,7 @@
 -- 统一模型（每个档案）：关闭 / 每日额度；额度模式下有「可用时段」+「额度」：
 --   封 = (不在可用时段内) 或 (额度用完了)
 --   勾「不限额度」→ 额度框隐藏，只判时段；不勾 → 额度必填、不能为 0
+--   「全天禁止」= 无条件封（不分时段、不看额度），适合彻底禁掉某 App/设备
 --   时段不跨日，起必须早于止；默认 00:00:00-23:59:59（全天）
 --   额度按自然日重置（用量文件按天分文件），没有「发放时刻」了
 --
@@ -73,6 +74,7 @@ function M.add_profile(t, sfx, mode_label)
 	local m = t:option(cbi.ListValue, sfx .. "_mode", mode_label)
 	m:value("off", i18n.translate("关闭"))
 	m:value("quota", i18n.translate("每日额度"))
+	m:value("block", i18n.translate("全天禁止"))
 	m.default = "off"
 	m.rmempty = true
 
