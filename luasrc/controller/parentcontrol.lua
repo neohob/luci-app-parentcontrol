@@ -24,7 +24,7 @@ end
 
 function status()
     local e = {}
-    -- 网址过滤链在 mangle 表，时间/端口链在 filter 表，两个表都要查。
+    -- 所有链都在 mangle 表（统一模型：QUOTA 封锁 + ACCT 计数）。
     -- 只判断「链是否存在」，不要求有匹配规则：开启状态下即使列表全空也应显示运行中。
     e.status = luci.sys.call("iptables -t mangle -S 2>/dev/null | grep -q PARENTCONTROL || iptables -S 2>/dev/null | grep -q PARENTCONTROL") == 0
     luci.http.prepare_content("application/json")

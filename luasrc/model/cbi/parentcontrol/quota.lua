@@ -1,5 +1,3 @@
-local parts = require "luci.model.cbi.parentcontrol.parts"
-
 local a, t, e
 
 a = Map("parentcontrol", translate("使用限额"),
