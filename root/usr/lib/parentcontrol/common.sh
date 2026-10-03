@@ -4,6 +4,8 @@
 # 测试（test/common_test.sh）只给 date 与 uci 打桩，其余走真实命令。
 
 PC_CONF=${PC_CONF:-parentcontrol}
+# 三个模块的固定顺序（唯一来源，别在各处再硬编码）
+PC_MODULES=${PC_MODULES:-"time protocol weburl"}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
 USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
 
@@ -135,9 +137,17 @@ pc_utc_ranges() { # $1=起秒 $2=止秒
 
 # 该条目今天是否勾了「不限额度」
 pc_entry_unlimited() { # $1=module $2=idx $3=school|holiday
-	local _v
+	local _v _q _p
 	_v=$(pc_uget "@$1[$2].$(pc_suffix "$3")_unlimited")
-	[ "$_v" = "1" ] && echo 1 || echo 0
+	[ "$_v" = "1" ] && { echo 1; return 0; }
+	[ -n "$_v" ] && { echo 0; return 0; }          # 显式写了 0 → 按有限额处理
+	# _unlimited 没设：只有当额度也完全没填时才算"不限"（fail-open）。
+	# 否则"新条目还没配额度""老配置漏了额度"都会被静默当成 0 分钟 = 全禁。想全禁请显式填 0。
+	_q=$(pc_uget "@$1[$2].$(pc_suffix "$3")_quota")
+	[ -z "$_q" ] || { echo 0; return 0; }
+	# 没填自己的额度：如果挂进了共享池，限制由池负责 → 仍算"有限额"，不能当不限
+	_p=$(pc_entry_pool "$1" "$2" "$3")
+	[ -z "$_p" ] && echo 1 || echo 0
 }
 
 # 可用时段（本地秒）「起 止」；未设 / 全天 / 非法 → 无输出（= 不限制时段）
@@ -167,16 +177,6 @@ pc_qwin_out_ranges() { # $1=module $2=idx $3=school|holiday
 	return 0
 }
 
-pc_hhmm_to_min() { # $1=HH:MM 或 HH，$2=MM（可选）
-	local _h _m
-	case "$1" in
-	*:*) _h=${1%%:*}; _m=${1##*:} ;;
-	*)   _h=$1; _m=${2:-0} ;;
-	esac
-	_h=${_h#0}; [ -z "$_h" ] && _h=0
-	_m=${_m#0}; [ -z "$_m" ] && _m=0
-	echo $((_h * 60 + _m))
-}
 
 # 北京时间 HH:MM → UTC HH:MM（iptables 的 -m time 默认 UTC，用它就不依赖内核时区）
 
@@ -238,7 +238,7 @@ pc_entry_quota() {
 # （额度 0 = 全禁；勾了不限额度 + 时段全天 = 完全不限制，此时只计数不封锁）。
 pc_active_keys() {
 	local _m _i
-	for _m in time protocol weburl; do
+	for _m in $PC_MODULES; do
 		for _i in $(pc_ids_on "$_m"); do
 			echo "${_m}_${_i}"
 		done
@@ -353,13 +353,24 @@ pc_migrate_config() {
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
 					uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_quota=0" ;;
 				quota)
-					# 只在没设过时才补 0：否则第二次跑迁移会把上一次设的 1 覆盖掉
-					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ] || \
-						uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0" ;;
+					# 只在没设过时才补；且「没填额度」的老语义是不限 → 补 1 而不是 0
+					if [ -z "$(pc_uget "@$_m[$_i].${_sfx}_unlimited")" ]; then
+						if [ -n "$(pc_uget "@$_m[$_i].${_sfx}_quota")" ]; then
+							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=0"
+						else
+							uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_unlimited=1"
+							_pclog "migrate: $_m[$_i] ${_sfx}: 额度模式但没填额度 → 不限（否则会被当成 0 分钟全禁）"
+						fi
+					fi ;;
 				esac
 				[ -n "$_md" ] && uci -q delete "$PC_CONF.@$_m[$_i].${_sfx}_mode"
-				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
-				[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
+				# 只有确实在迁移某个老 mode 时才补时段。若 _md 为空（例如出厂默认配置里
+				# 只配了 sd_* 的条目），**整个 suffix 不动**——否则会凭空给它 09:00-21:00 +
+				# 空额度 → 被当成 0 分钟全禁（B4）。
+				if [ -n "$_md" ]; then
+					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qstart")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qstart=09:00:00"
+					[ -n "$(pc_uget "@$_m[$_i].${_sfx}_qend")" ] || uci -q set "$PC_CONF.@$_m[$_i].${_sfx}_qend=21:00:00"
+				fi
 				# 老的「额度模式但没填额度」原来等于"不限"。新语义里 0 = 全天禁止，
 				# 不显式标一下就会在升级后被静默全禁 —— 这里补成"不限"（只在没设过时补，幂等）。
 				# 想全禁请显式填 0。

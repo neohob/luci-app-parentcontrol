@@ -414,6 +414,8 @@ pool_usage() { # $1=池名 $2=school|holiday
 	for _key in $(pc_active_keys "$2"); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		[ "$(pc_entry_pool "$_m" "$_i" "$2")" = "$1" ] || continue
+		# 勾了「不限额度」的成员不该消耗共享池（否则会把同池的人提前封掉）
+		[ "$(pc_entry_unlimited "$_m" "$_i" "$2")" = "1" ] && continue
 		_sum=$((_sum + $(pc_usage_get "$_key")))
 	done
 	echo "$_sum"
@@ -605,7 +607,7 @@ prune_usage() {
 # 池成员（"module[idx]" 列表）
 pool_members() { # $1=池名 $2=school|holiday
 	local _m _i
-	for _m in time protocol weburl; do
+	for _m in $PC_MODULES; do
 		for _i in $(pc_ids_on "$_m"); do
 			[ "$(pc_entry_pool "$_m" "$_i" "$2")" = "$1" ] && echo "${_m}[${_i}]"
 		done
@@ -697,7 +699,7 @@ reset_quota() {
 
 # 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
 #   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
-#   entry    <key> <module> <idx> <备注> <mac> <-（模式已废弃，保留空列）> <额度> <已用> <池> <本分钟KB> <不限额度>
+#   entry    <key> <module> <idx> <备注> <mac> <额度> <已用> <池> <本分钟KB> <不限额度>
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
@@ -709,7 +711,7 @@ reset_quota() {
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 stats_tsv() {
-	local _brief _tt _min_kb _keep _m _i _key _mode _name _mac _q _u _pool _live _f _t _n _dump _unl
+	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
@@ -725,20 +727,17 @@ stats_tsv() {
 	# 所有「已启用」条目（含时段模式，看板需要完整信息）
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
-			_mode=""   # 模式已废弃（统一模型 = 可用时段 + 额度），保留空列不破坏 TSV 契约
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
 			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")
 			_mac=$(pc_uget "@$_m[$_i].mac")
 			_q=0; _u=0; _pool=""
-			if [ "$_mode" = "quota" ]; then
 				set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
 				_q=$1; _u=$2; _pool=${3:-}
-			fi
 			_live=0
 			[ -z "$_dump" ] || _live=$(quota_live_kb "$_key" "$_dump")
-			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_mode" "$_q" "$_u" "$_pool" "$_live" "$_unl"
+			printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$_key" "$_m" "$_i" "$_name" "$_mac" "$_q" "$_u" "$_pool" "$_live" "$_unl"
 		done
 	done
 	if [ "$_brief" != "brief" ]; then

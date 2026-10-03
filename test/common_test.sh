@@ -114,9 +114,6 @@ t_eq '无该年数据 周六 → 降级节假日' holiday "$(pc_today_type)"
 echo '== pc_suffix / 时间换算（HH:MM:SS 秒级）=='
 t_eq 'suffix holiday→hd' hd "$(pc_suffix holiday)"
 t_eq 'suffix school→sd' sd "$(pc_suffix school)"
-t_eq 'HH:MM→分钟 08:05' 485 "$(pc_hhmm_to_min 08:05)"
-t_eq 'HH:MM→分钟 23:59' 1439 "$(pc_hhmm_to_min 23:59)"
-t_eq 'HH+MM 参数形式' 485 "$(pc_hhmm_to_min 08 05)"
 t_eq 'HH:MM:SS→秒 09:00:00' 32400 "$(pc_hhmmss_to_sec 09:00:00)"
 t_eq 'HH:MM:SS→秒 23:59:59' 86399 "$(pc_hhmmss_to_sec 23:59:59)"
 t_eq 'HH:MM→秒（补 0 秒）' 32400 "$(pc_hhmmss_to_sec 09:00)"
@@ -155,9 +152,11 @@ cfg_set 'parentcontrol.@weburl[0].sd_qstart' '09:00:00'
 cfg_set 'parentcontrol.@weburl[0].sd_qend' '09:00:00'
 t_eq '起=止（脏数据）→空，按不限制兜底' '' "$(pc_qwin_sec weburl 0 school)"
 cfg_reset
-t_eq '不限额度：未设 → 0' 0 "$(pc_entry_unlimited weburl 0 school)"
+t_eq '不限/额度都没设 → 1（fail-open，避免静默全禁）' 1 "$(pc_entry_unlimited weburl 0 school)"
+cfg_set 'parentcontrol.@weburl[0].sd_quota' '60'
+t_eq '写了额度 → 0（按有限额处理）' 0 "$(pc_entry_unlimited weburl 0 school)"
 cfg_set 'parentcontrol.@weburl[0].sd_unlimited' '1'
-t_eq '不限额度：设 1 → 1' 1 "$(pc_entry_unlimited weburl 0 school)"
+t_eq '显式勾选不限 → 1' 1 "$(pc_entry_unlimited weburl 0 school)"
 
 # ============================================================
 echo '== 用量读写 =='

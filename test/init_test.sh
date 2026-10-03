@@ -259,7 +259,7 @@ build_quota_blocks
 t_has '该端口耗尽 → 封在 QUOTA 链' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)" '-p tcp -m multiport --dports 80,443'
 t_eq '只封了 1 条（另一个端口不牵连）' 1 "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)"
 
-echo '== 额度没填（未勾不限）→ 按 0 处理 = 全禁 =='
+echo '== 额度没填（未勾不限）→ 视为不限（fail-open，防静默全禁；全禁请显式填 0）=='
 fresh
 cfg_begin 1
 cfg_section <<'EOF'
@@ -273,7 +273,7 @@ config weburl
 EOF
 cfg_apply
 run_build
-t_eq '没填额度 + 未勾不限 → 恒封' ok "$([ "$(uncond_drop v4 mangle PARENTCONTROL_QUOTA)" -gt 0 ] && echo ok || echo no)"
+t_eq '没填额度 + 未勾不限 → 不封（fail-open）' '' "$(ipt_rules v4 mangle PARENTCONTROL_QUOTA | flat)"
 
 echo '== 额度没填 + 勾了不限 → 永不封（迁移会把这种老条目补成显式不限）=='
 fresh
@@ -614,7 +614,9 @@ run_build
 pc_usage_add weburl_0 7
 S=$(stats_tsv)
 t_has 'meta 行（日期/类型/阈值/保留天/当前时间）' "$S" 'meta	2026-06-08	school	32	90'
-t_has 'entry 行（key/备注/mac/额度/已用）' "$S" 'weburl_0	weburl	0	测试设备	00:00:5e:00:53:01'
+t_has 'entry 行（key/备注/mac）' "$S" 'weburl_0	weburl	0	测试设备	00:00:5e:00:53:01'
+# 防线：额度/已用必须是真实解析出来的值（曾经因为一个恒假的 if，这里恒为 0 → 看板全错）
+t_has 'entry 行带真实额度与已用（额度 30 / 已用 7）' "$S" '00:00:5e:00:53:01	30	7'
 t_has 'hist 行' "$S" 'hist	20260608	7'
 t_has 'histkey 行' "$S" 'histkey	20260608	weburl_0	7'
 t_eq '无额度条目时不产生 entry 行' 0 "$(cfg_reset; cfg_load parentcontrol "$T_TMP/empty.uci" 2>/dev/null; stats_tsv 2>/dev/null | grep -c '^entry')"

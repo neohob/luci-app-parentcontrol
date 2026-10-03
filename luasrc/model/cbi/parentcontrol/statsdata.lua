@@ -57,9 +57,9 @@ function M.collect()
 			elseif k == "entry" then
 				d.entries[#d.entries + 1] = {
 					key = f[2], module = f[3], idx = f[4], name = f[5] or "",
-					mac = f[6] or "", mode = f[7] or "", quota = num(f[8]),
-					used = num(f[9]), pool = f[10] or "", live_kb = num(f[11]),
-					unlimited = (f[12] == "1"),
+					mac = f[6] or "", quota = num(f[7]),
+					used = num(f[8]), pool = f[9] or "", live_kb = num(f[10]),
+					unlimited = (f[11] == "1"),
 				}
 			elseif k == "pool" then
 				d.pools[#d.pools + 1] = {
@@ -119,7 +119,7 @@ function M.collect()
 			name = p.name, kind = "pool", quota = p.quota, used = p.used,
 			members = members, pct = (p.quota > 0) and math.min(100, math.floor(p.used * 100 / p.quota)) or 0,
 			remain = math.max(0, p.quota - p.used),
-			status = (p.quota > 0 and p.used >= p.quota) and info("已耗尽") or info("放行中"),
+			status = (p.used >= p.quota) and info("已耗尽") or info("放行中"),
 		}
 	end
 	for _, e in ipairs(d.entries) do
