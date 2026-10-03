@@ -49,10 +49,6 @@ end
 function M.profiles(self, section)
 	local map = self.map
 	local function one(sfx, label)
-		local mode = get(map, section, sfx .. "_mode") or "off"
-		if mode ~= "quota" then
-			return label .. " " .. i18n.translate("关闭")
-		end
 		local q = get(map, section, sfx .. "_quota")
 		local p = get(map, section, sfx .. "_pool")
 		local st
@@ -60,8 +56,6 @@ function M.profiles(self, section)
 			st = label .. " " .. i18n.translate("不限额度")
 		elseif not q or q == "" then
 			st = label .. " " .. i18n.translate("不限")
-		elseif tonumber(q) == 0 then
-			st = label .. " " .. i18n.translate("全天禁止")
 		else
 			st = label .. " " .. q .. i18n.translate("分钟")
 		end

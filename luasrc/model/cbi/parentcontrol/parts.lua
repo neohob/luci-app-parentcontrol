@@ -1,20 +1,15 @@
 -- 三个模块表（time / protocol / weburl）共用的「平日/节假日档案」字段与校验。
--- 放在这里而不是各文件各抄一份，避免三张表字段漂移。
 --
--- 统一模型（每个档案）：关闭 / 每日额度；额度模式下有「可用时段」+「额度」：
---   封 = (不在可用时段内) 或 (额度用完了)
---   勾「不限额度」→ 额度框隐藏，只判时段；不勾 → 额度必填
---   额度填 0 = 全天禁止（不需要第三种模式：封 = 不在时段内 或 已用≥额度，N=0 时恒成立）
---   时段不跨日，起必须早于止；默认 00:00:00-23:59:59（全天）
---   额度按自然日重置（用量文件按天分文件），没有「发放时刻」了
+-- 统一模型：**没有"模式"枚举**。每个档案只回答两件事：什么时候能用、能用多少
+--     封 = (不在可用时段内)  或  (已用 ≥ 额度)
+--   · 可用时段：默认 00:00:00-23:59:59（全天），不跨日、起必须早于止
+--   · 额度：分钟数；填 0 = 一分钟都不给（即全禁）；勾「不限额度」则只判时段
+--   · 不限制 = ☑不限额度 + 时段全天（此时一条封锁规则都不会生成，只计数）
+--   条目是否生效由列表页的「开启」开关决定。
 --
--- 注意：CBI 模型文件里可以直接用 ListValue/Value/translate/...（加载时由 LuCI 注入），
--- 但本文件是被 require 的子模块，环境里没有这些全局名 —— 必须从 luci.cbi 取，
--- 否则 t:option(nil, ...) 会报 "class must be a descendant of AbstractValue"。
---
--- 另外：这里所有字段都保持 rmempty 默认（可选）。CBI 的「必填」(rmempty=false) 在字段
--- 被 depends 隐藏时照样会报 missing，那会让「关闭」模式的条目根本存不了盘。
--- 「必填 / 不能为 0 / 起<止」用下面的自定义 validate 实现，前端另有即时提示。
+-- 注意：本文件是被 require 的子模块，LuCI 注入的全局（translate 等）在这里不可用，必须显式 require。
+-- 另外：所有字段保持 rmempty 默认（可选）。CBI 的「必填」(rmempty=false) 在字段被 depends 隐藏时
+-- 照样报 missing，会让页面存不了盘；「起<止」「必填」用下面的自定义 validate + 前端提示实现。
 local cbi = require "luci.cbi"
 local i18n = require "luci.i18n"
 local http = require "luci.http"
@@ -36,13 +31,12 @@ function M.validate_time(self, value)
 	return value
 end
 
--- 读同一 section 里另一个字段「本次提交」的值。
--- CBI 的 validate 看不到兄弟字段，只能自己按 cbid 从表单里取。
+-- 读同一 section 里另一个字段「本次提交」的值（CBI 的 validate 看不到兄弟字段）
 local function submitted(self, key)
 	return http.formvalue(("cbid.%s.%s.%s"):format(self.map.config, self.section, key))
 end
 
--- 可用时段：格式 + 起必须早于止（本插件不支持跨日）
+-- 可用时段：格式 + 起必须早于止（不支持跨日）
 function M.validate_window(self, value)
 	local ok, err = M.validate_time(self, value)
 	if not ok then return nil, err end
@@ -61,47 +55,31 @@ function M.validate_window(self, value)
 	return value
 end
 
--- mode_label 必须是字面量（翻译键要求字面量，不能拼接）。
-function M.add_profile(t, sfx, mode_label)
-	local m = t:option(cbi.ListValue, sfx .. "_mode", mode_label)
-	m:value("off", i18n.translate("关闭"))
-	m:value("quota", i18n.translate("每日额度"))
-	m.default = "off"
-	m.rmempty = true
-
-	local s = t:option(cbi.Value, sfx .. "_qstart", i18n.translate("可用起"))
+-- label 是 "平日" / "节假日"（必须是字面量翻译键，不能拼接）；拼在字段标题前做区分。
+function M.add_profile(t, sfx, label)
+	local s = t:option(cbi.Value, sfx .. "_qstart", label .. " " .. i18n.translate("可用起"))
 	s.placeholder = '00:00:00'; s.default = '00:00:00'
 	s.validate = M.validate_window
-	s:depends(sfx .. "_mode", "quota")
 	s.rmempty = true
 
-	local e = t:option(cbi.Value, sfx .. "_qend", i18n.translate("可用止"))
+	local e = t:option(cbi.Value, sfx .. "_qend", label .. " " .. i18n.translate("可用止"))
 	e.placeholder = '23:59:59'; e.default = '23:59:59'
 	e.validate = M.validate_window
-	e:depends(sfx .. "_mode", "quota")
 	e.rmempty = true
 
-	-- 勾上 = 不限额（额度框隐藏），只判可用时段
-	local u = t:option(cbi.Flag, sfx .. "_unlimited", i18n.translate("不限额度"))
+	local u = t:option(cbi.Flag, sfx .. "_unlimited", label .. " " .. i18n.translate("不限额度"))
 	u.default = "0"
-	u:depends(sfx .. "_mode", "quota")
 	u.rmempty = true
 
-	-- 额度：默认 60，不能填 0。
-	-- 只依赖 mode（单条件）——"勾了不限额度就收起额度框"由前端 JS 做（view/parentcontrol/edit.htm）。
-	-- 原因：CBI 的 depends 对 Flag（复选框）未勾选态的取值跟字符串对不上，双条件依赖会把额度框
-	-- 永久藏起来（实测踩到）。少一个特例，前端自己控制显隐更可靠。
-	local q = t:option(cbi.Value, sfx .. "_quota", i18n.translate("每日分钟"),
-		i18n.translate("必填；填 <b>0</b> = 全天禁止（时段内也一分钟不给）"))
-	q.placeholder = i18n.translate("必填，如 60；0=全天禁止")
+	local q = t:option(cbi.Value, sfx .. "_quota", label .. " " .. i18n.translate("每日分钟"),
+		i18n.translate("必填；填 <b>0</b> = 一分钟都不给（全禁）"))
+	q.placeholder = i18n.translate("如 60")
 	q.default = "60"
 	q.datatype = "uinteger"
-	q:depends(sfx .. "_mode", "quota")
 	q.rmempty = true
 
-	local p = t:option(cbi.Value, sfx .. "_pool", i18n.translate("共享组"))
+	local p = t:option(cbi.Value, sfx .. "_pool", label .. " " .. i18n.translate("共享组"))
 	p.placeholder = i18n.translate("留空=独立额度")
-	p:depends(sfx .. "_mode", "quota")
 	p.rmempty = true
 end
 

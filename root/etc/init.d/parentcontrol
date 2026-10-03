@@ -396,7 +396,7 @@ build_acct_rules() { # $1=school|holiday
 	sample_counters
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
-	for _key in $(pc_quota_keys "$1"); do
+	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		ensure_chain "$ipt" mangle "PCA_$_key"
 		ensure_chain "$ipt6" mangle "PCA_$_key"
@@ -410,7 +410,7 @@ build_acct_rules() { # $1=school|holiday
 pool_usage() { # $1=池名 $2=school|holiday
 	local _key _m _i _sum
 	_sum=0
-	for _key in $(pc_quota_keys "$2"); do
+	for _key in $(pc_active_keys "$2"); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		[ "$(pc_entry_pool "$_m" "$_i" "$2")" = "$1" ] || continue
 		_sum=$((_sum + $(pc_usage_get "$_key")))
@@ -438,7 +438,7 @@ entry_effective() { # $1=module $2=idx $3=school|holiday
 	fi
 }
 
-# 额度封锁链：① 可用时段之外 ② 额度耗尽（详见函数内注释）
+# 封锁链：① 可用时段之外 ② 额度耗尽（额度 0 即全禁）
 # 可用时段之外的封锁规则（$3/$4 = UTC 秒区间；本机 iptables 不支持「! -m time」取反，
 # 所以「时段外」一律用正向区间表达，跨 UTC 零点时由 pc_utc_ranges 切成两段）
 block_entry_window() { # $1=module $2=idx $3=UTC起秒 $4=UTC止秒
@@ -456,10 +456,10 @@ block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
 	return 0
 }
 
-# 额度封锁链，两个来源：
+# 封锁链，两个来源（每个已启用条目都有「可用时段 + 额度」）：
 #   ① 不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
 #   ② 额度用完 → 整条封（比时段封更强，所以不需要时间条件）
-# 额度 0 = 全天禁止（② 恒成立）；勾了「不限额度」的条目只受 ① 约束。
+# 额度 0 = 一分钟都不给（② 恒成立）；勾了「不限额度」的条目只受 ① 约束。
 build_quota_blocks() {
 	local _tt _key _m _i _ip _lan _a _b
 	_tt=$(pc_today_type)
@@ -468,14 +468,14 @@ build_quota_blocks() {
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
 	_lan=$(pc_lan_nets)
-	for _key in $(pc_quota_keys "$_tt"); do
+	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		block_skip_devless "$_m" "$_i" "$_lan" && continue
 		# ① 可用时段之外
 		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
 			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"
 		done
-		# ② 额度耗尽。额度 0 = 全天禁止（0 >= 0 恒成立，不需要专门分支）；
+		# ② 额度耗尽。额度 0 时 0>=0 恒成立 → 全禁，不需要专门分支；
 		#    勾了「不限额度」则只受 ① 约束。
 		[ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" = "1" ] && continue
 		set -- $(entry_effective "$_m" "$_i" "$_tt")
@@ -489,9 +489,7 @@ build_quota_blocks() {
 }
 
 # 额度计数链名（供 sample 读取）
-active_acct_keys() {
-	pc_quota_keys "$(pc_today_type)"
-}
+active_acct_keys() { pc_active_keys; }
 
 # ============================================================================
 # 用量采样：每分钟对比计数增量，超阈值记 1 分钟
@@ -698,7 +696,7 @@ reset_quota() {
 
 # 看板数据：结构化 TSV（Lua 侧解析并做分析、渲染）
 #   meta     <日期> <school|holiday> <阈值KB> <保留天> <当前HH:MM>
-#   entry    <key> <module> <idx> <备注> <mac> <模式> <额度> <已用> <池> <本分钟KB> <不限额度>
+#   entry    <key> <module> <idx> <备注> <mac> <-（模式已废弃，保留空列）> <额度> <已用> <池> <本分钟KB> <不限额度>
 #   pool     <池名> <额度> <已用> <成员,逗号分隔>
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
@@ -726,7 +724,7 @@ stats_tsv() {
 	# 所有「已启用」条目（含时段模式，看板需要完整信息）
 	for _m in time protocol weburl; do
 		for _i in $(pc_ids_on "$_m"); do
-			_mode=$(pc_entry_eff_mode "$_m" "$_i" "$_tt")
+			_mode=""   # 模式已废弃（统一模型 = 可用时段 + 额度），保留空列不破坏 TSV 契约
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
 			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")

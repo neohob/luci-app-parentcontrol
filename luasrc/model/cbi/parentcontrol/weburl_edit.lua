@@ -36,7 +36,7 @@ e = t:option(Value, "domains", translate("关键词/域名<font color=\"green\">
 	translate("填域名（apex 覆盖子域），或直接填 CIDR。"))
 e.rmempty = true
 
-parts.add_profile(t, "sd", translate("平日模式"))
-parts.add_profile(t, "hd", translate("节假日模式"))
+parts.add_profile(t, "sd", translate("平日"))
+parts.add_profile(t, "hd", translate("节假日"))
 
 return a

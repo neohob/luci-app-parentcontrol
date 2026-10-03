@@ -12,14 +12,13 @@ config weburl
 	option remarks 'Example'
 	option enable '0'
 	option domains 'example.com'
-	# 每日额度模式：可用时段内才能用，时段外一律不可用且不计入额度；
+	# 每个档案 = 可用时段 + 额度：时段外一律不可用且不计入额度；额度 0 = 一分钟都不给；
+	# unlimited=1 = 只判时段（配合时段全天 = 完全不限制）
 	# 时段不跨日（起必须早于止），00:00:00-23:59:59 = 全天
-	option sd_mode 'quota'
 	option sd_quota '60'
 	option sd_qstart '09:00:00'
 	option sd_qend '21:00:00'
 	option sd_unlimited '0'
-	option hd_mode 'quota'
 	option hd_quota '120'
 	option hd_qstart '09:00:00'
 	option hd_qend '21:00:00'
@@ -29,21 +28,17 @@ config protocol
 	option proto 'tcp'
 	option portd '80'
 	option enable '0'
-	option sd_mode 'quota'
 	option sd_quota '60'
 	option sd_qstart '00:00:00'
 	option sd_qend '23:59:59'
 	option sd_unlimited '0'
-	option hd_mode 'off'
 
 config time
 	option enable '0'
-	option sd_mode 'quota'
 	option sd_quota '60'
 	option sd_qstart '09:00:00'
 	option sd_qend '21:00:00'
 	option sd_unlimited '0'
-	option hd_mode 'quota'
 	option hd_qstart '09:00:00'
 	option hd_qend '21:00:00'
 	option hd_unlimited '1'

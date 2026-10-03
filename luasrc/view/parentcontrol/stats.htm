@@ -62,7 +62,7 @@
 			<td class="muted"><%=pcdata(u.device or "")%></td>
 			<td><%=bar(u.pct, cls)%></td>
 			<td class="num"><%=u.used or 0%></td>
-			<td class="num"><%=(u.quota or 0) > 0 and u.quota or T("不限")%></td>
+			<td class="num"><%=u.unlimited and T("不限") or (u.quota or 0)%></td>
 			<td class="num"><%=(u.quota or 0) > 0 and (u.remain or 0) or "-"%></td>
 			<td>
 				<% if u.status == T("已耗尽") then %><span class="pc-badge bad"><%=pcdata(u.status)%></span>
