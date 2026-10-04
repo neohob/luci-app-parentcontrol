@@ -562,13 +562,13 @@ del_rule() {
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done
-		# 老版本残留（统一模型之前）：filter 表的时间/协议链、mangle 表的网址/IP 链
+		# 老版本残留（统一模型之前）：filter 表的时间/协议/网址链、mangle 表的网址/IP 链
 		for _c in INPUT FORWARD OUTPUT; do
 			for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL PARENTCONTROL_WEBURL; do
 				$_ip -D "$_c" -j "$_ta" 2>/dev/null
 			done
 		done
-		for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL; do
+		for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL PARENTCONTROL_WEBURL; do
 			$_ip -F "$_ta" 2>/dev/null
 			$_ip -X "$_ta" 2>/dev/null
 		done
