@@ -4,10 +4,12 @@
 # 测试（test/common_test.sh）只给 date 与 uci 打桩，其余走真实命令。
 
 PC_CONF=${PC_CONF:-parentcontrol}
+PC_CONF_DIR=${PC_CONF_DIR:-/etc/config}
 # 三个模块的固定顺序（唯一来源，别在各处再硬编码）
 PC_MODULES=${PC_MODULES:-"time protocol weburl"}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
 USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
+BACKUP_DIR=${BACKUP_DIR:-/etc/parentcontrol/backup}
 
 # ---------- 基础 ----------
 pc_uget() { uci -q get "$PC_CONF.$1"; }
@@ -287,10 +289,12 @@ pc_quota_positive() {
 pc_migrate_config() {
 	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
-	#    （README 里承诺了这件事，就必须真的做；测试环境没有 /etc/config 时自动跳过。）
-	if [ -f "/etc/config/$PC_CONF" ]; then
-		mkdir -p /etc/parentcontrol/backup 2>/dev/null
-		cp -a "/etc/config/$PC_CONF" "/etc/parentcontrol/backup/$PC_CONF.$(date +%Y%m%d%H%M%S).bak" 2>/dev/null
+	#    （README 里承诺了这件事，就必须真的做；$PC_CONF_DIR 下没有配置文件时自动跳过。
+	#      PC_CONF_DIR / BACKUP_DIR 是可覆盖钩子（默认值 = 生产路径），供白盒测试把
+	#      备份分支指到临时目录。）
+	if [ -f "$PC_CONF_DIR/$PC_CONF" ]; then
+		mkdir -p "$BACKUP_DIR" 2>/dev/null
+		cp -a "$PC_CONF_DIR/$PC_CONF" "$BACKUP_DIR/$PC_CONF.$(date +%Y%m%d%H%M%S).bak" 2>/dev/null
 	fi
 	# 1) 默认值
 	for _k in usage_keep usage_min_kb; do
