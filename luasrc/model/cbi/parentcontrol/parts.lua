@@ -31,9 +31,17 @@ function M.validate_time(self, value)
 	return value
 end
 
--- 读同一 section 里另一个字段「本次提交」的值（CBI 的 validate 看不到兄弟字段）
+-- 读同一 section 里另一个字段「本次提交」的值（CBI 的 validate 看不到兄弟字段）。
+-- 注意 self.section 是 AbstractSection **对象**（NamedSection 等），不是名字字符串；
+-- uci 名字在它的 .section 属性里。曾直接把对象喂给 string.format("%s")：
+-- Lua 5.1 对 %s 不做 tostring，抛 "string expected, got table" —— ucode bridge 真机
+-- 上保存编辑页直接 500（B16/A36，HEAD 既有缺陷，非本轮引入）。
 local function submitted(self, key)
-	return http.formvalue(("cbid.%s.%s.%s"):format(self.map.config, self.section, key))
+	local name = type(self.section) == "table" and self.section.section or self.section
+	if type(name) ~= "string" or name == "" then
+		return nil
+	end
+	return http.formvalue(("cbid.%s.%s.%s"):format(self.map.config, name, key))
 end
 
 -- 可用时段：格式 + 起必须早于止（不支持跨日）
