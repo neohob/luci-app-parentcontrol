@@ -56,6 +56,21 @@ clean_log() {
 # ============================================================================
 # 小工具
 # ============================================================================
+# 规则下发的唯一出口（$1=ipcmd，其余原样照传）。
+# PC_RENDER 指向文件时只把“本次会下发什么”记进文件、不碰内核 —— 供
+# build_quota_blocks 判断规则集有没有变（见那里的说明）。
+ipt_do() {
+	if [ -n "$PC_RENDER" ]; then
+		case "$1" in
+		"$ipt6") printf 'v6|%s\n' "$*" >> "$PC_RENDER" ;;
+		*)       printf 'v4|%s\n' "$*" >> "$PC_RENDER" ;;
+		esac
+		return 0
+	fi
+	"$@" 2>/dev/null
+	return 0
+}
+
 ensure_chain() { # $1=ipcmd $2=table $3=chain
 	$1 -t $2 -N $3 2>/dev/null || $1 -t $2 -F $3 2>/dev/null
 }
@@ -64,25 +79,46 @@ hook_chain() { # $1=ipcmd $2=table $3=parent $4=chain
 }
 entry_key() { echo "$1_$2"; }
 
-# 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），都没有=全部客户端
-devcount() {
-	local _ip _mac
-	_ip=$(pc_uget "@$1[$2].ip")
-	_mac=$(pc_uget "@$1[$2].mac")
-	if [ -n "$_ip" ]; then echo "-s $_ip"
+# 地址是否属于某协议族（$2=1 → IPv6 族）
+addr_is_family() {
+	case "$1" in
+	*:*) [ "$2" = 1 ] ;;
+	*)   [ "$2" = 0 ] ;;
+	esac
+}
+
+# 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），但地址必须与协议族匹配 ——
+# ip6tables 里 `-s <IPv4>` 是非法语句（静默失败，该条目的 v6 流量就完全不计额度了），
+# 所以条目只填了 IPv4 时 v6 链回退到 mac。两族各自独立统计，同族内不会重复计数。
+# 输出：条件串 / ALL（条目没有任何设备条件 = 对全部客户端计数）/ 空（本族无法识别）
+devcount() { # $1=ipcmd $2=module $3=idx
+	local _ip _mac _fam6
+	_ip=$(pc_uget "@$2[$3].ip")
+	_mac=$(pc_uget "@$2[$3].mac")
+	_fam6=0
+	[ "$1" = "$ipt6" ] && _fam6=1
+	if [ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6"; then echo "-s $_ip"
 	elif [ -n "$_mac" ]; then echo "-m mac --mac-source $_mac"
+	elif [ -n "$_ip" ]; then return 0
+	else echo "ALL"
 	fi
 }
 
 # 封锁/时段用：对条目的每个设备身份各加一条规则（mac 与 ip 任一命中即生效）
 add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
-	local _mac _ip _n
+	local _mac _ip _n _fam6
 	_mac=$(pc_uget "@$4[$5].mac")
 	_ip=$(pc_uget "@$4[$5].ip")
+	_fam6=0
+	[ "$1" = "$ipt6" ] && _fam6=1
 	_n=0
-	[ -n "$_mac" ] && { $1 -t $2 -I $3 -m mac --mac-source "$_mac" $6 $7 2>/dev/null; _n=1; }
-	[ -n "$_ip" ]  && { $1 -t $2 -I $3 -s "$_ip" $6 $7 2>/dev/null; _n=1; }
-	[ "$_n" = 0 ] && $1 -t $2 -I $3 $6 $7 2>/dev/null
+	[ -n "$_mac" ] && { ipt_do "$1" -t "$2" -I "$3" -m mac --mac-source "$_mac" $6 $7; _n=1; }
+	# 静态 IP 只对同族链有意义（往 ip6tables 里塞 IPv4 地址只会静默失败）
+	[ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6" && { ipt_do "$1" -t "$2" -I "$3" -s "$_ip" $6 $7; _n=1; }
+	# 只有「条目本身没有任何设备条件」才退化成对全部客户端 —— 否则会变成无条件 DROP
+	if [ "$_n" = 0 ] && [ -z "$_mac" ] && [ -z "$_ip" ]; then
+		ipt_do "$1" -t "$2" -I "$3" $6 $7
+	fi
 	return 0
 }
 
@@ -299,9 +335,14 @@ restore_offload() {
 # 注意必须在所有封锁规则插完之后再调用——-I 是插到链首。
 # 本机没有 addrtype 模块，只能用「目标网段」放行，等价于放行到路由器自身的管理流量。
 allow_lan_in() { # $1=ipcmd $2=table $3=chain
-	local _n
+	local _n _fam6
+	_fam6=0
+	[ "$1" = "$ipt6" ] && _fam6=1
 	for _n in $(pc_lan_nets); do
-		$1 -t $2 -I "$3" -d "$_n" -j RETURN 2>/dev/null
+		# pc_lan_nets 只产出 IPv4 网段；往 ip6tables 里插 IPv4 网段只会静默失败
+		#（顺带会让「规则集没变就不重建」的条数校验永远对不上）
+		addr_is_family "$_n" "$_fam6" || continue
+		ipt_do "$1" -t "$2" -I "$3" -d "$_n" -j RETURN
 	done
 	return 0
 }
@@ -322,8 +363,10 @@ weburl_patterns() {
 # 计数用：单一设备条件（ip 优先）加一条规则——避免 mac+ip 两条都被命中而双计
 add_dev_rule_single() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
 	local _c
-	_c=$(devcount "$4" "$5")
-	$1 -t $2 -I $3 $_c $6 $7 2>/dev/null
+	_c=$(devcount "$1" "$4" "$5")
+	[ -z "$_c" ] && return 0        # 本族无法识别 → 不装规则（装了就成了「全部客户端」）
+	[ "$_c" = "ALL" ] && _c=""
+	ipt_do "$1" -t "$2" -I "$3" $_c $6 $7
 	return 0
 }
 
@@ -463,18 +506,11 @@ block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
 	return 0
 }
 
-# 封锁链，两个来源（每个已启用条目都有「可用时段 + 额度」）：
-#   ① 不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
-#   ② 额度用完 → 整条封（比时段封更强，所以不需要时间条件）
-# 额度 0 = 一分钟都不给（② 恒成立）；勾了「不限额度」的条目只受 ① 约束。
-build_quota_blocks() {
-	local _tt _key _m _i _ip _lan _a _b
-	_tt=$(pc_today_type)
-	for _ip in "$ipt" "$ipt6"; do
-		ensure_chain "$_ip" mangle "$TAGQ"
-		$_ip -t mangle -F "$TAGQ" 2>/dev/null
-	done
-	_lan=$(pc_lan_nets)
+# 封锁链的实际下发动作。渲染（判断规则集有没有变）与真下发共用这一份代码，
+# 保证「记下来的规则」永远等于「下发的规则」。
+_quota_emit_rules() { # $1=daytype $2=局域网网段列表
+	local _key _m _i _a _b _ip _tt _lan
+	_tt=$1; _lan=$2
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		block_skip_devless "$_m" "$_i" "$_lan" && continue
@@ -493,6 +529,60 @@ build_quota_blocks() {
 	for _ip in "$ipt" "$ipt6"; do
 		allow_lan_in "$_ip" mangle "$TAGQ"
 	done
+	return 0
+}
+
+# 把本次「应当下发的规则」渲染成文本（不碰内核；靠 ipt_do 的 PC_RENDER 模式）
+render_quota_spec() { # $1=daytype $2=局域网网段列表
+	local _f
+	mkdir -p "$STATE_DIR"
+	_f="$STATE_DIR/spec.$$"
+	: > "$_f"
+	PC_RENDER="$_f"
+	_quota_emit_rules "$1" "$2"
+	unset PC_RENDER
+	cat "$_f"
+	rm -f "$_f"
+	return 0
+}
+
+# 规则文本里各协议族的条数（输出 "v4数 v6数"）
+spec_rule_counts() {
+	printf '%s\n' "$1" | awk -F'|' '/ -I /{n[$1]++} END{printf "%d %d", n["v4"]+0, n["v6"]+0}'
+}
+
+live_rule_count() { # $1=ipcmd $2=链名 → 链内规则条数
+	$1 -t mangle -S "$2" 2>/dev/null | grep -c '^-A'
+}
+
+# 封锁链，两个来源（每个已启用条目都有「可用时段 + 额度」）：
+#   ① 不在可用时段内 → 封（内核 -m time 精确到秒，不依赖 tick）
+#   ② 额度用完 → 整条封（比时段封更强，所以不需要时间条件）
+# 额度 0 = 一分钟都不给（② 恒成立）；勾了「不限额度」的条目只受 ① 约束。
+#
+# 每分钟 tick 都会走这里，而「先 -F 再逐条重建」会让封锁链短暂为空
+#（实测约 1.3s／分钟，那段窗口里 iPad 的时段封与额度封全部失效）。
+# 所以先把规则集渲染一遍：和上次一致、且链里条数也对得上，就一个 iptables 都不动。
+# 条数必须一起校验 —— 链被外部清空（fw4 reload）时只有它能发现。
+build_quota_blocks() {
+	local _tt _lan _spec _old _ccnt _lcnt _ip
+	_tt=$(pc_today_type)
+	_lan=$(pc_lan_nets)
+	_spec=$(render_quota_spec "$_tt" "$_lan")
+	_ccnt=$(spec_rule_counts "$_spec")
+	_old=$(cat "$STATE_DIR/quotaspec" 2>/dev/null)
+	_lcnt="$(live_rule_count "$ipt" "$TAGQ") $(live_rule_count "$ipt6" "$TAGQ")"
+	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
+		return 0
+	fi
+	mkdir -p "$STATE_DIR"
+	for _ip in "$ipt" "$ipt6"; do
+		ensure_chain "$_ip" mangle "$TAGQ"
+		$_ip -t mangle -F "$TAGQ" 2>/dev/null
+	done
+	_quota_emit_rules "$_tt" "$_lan"
+	printf '%s' "$_spec" > "$STATE_DIR/quotaspec"
+	return 0
 }
 
 # 额度计数链名（供 sample 读取）
@@ -540,7 +630,9 @@ build_all() {
 	elog "build: day=$_tt"
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGA"; $_ip -t mangle -F "$TAGA" 2>/dev/null
-		ensure_chain "$_ip" mangle "$TAGQ"; $_ip -t mangle -F "$TAGQ" 2>/dev/null
+		# TAGQ 不在这里 -F：封锁链的清空/重建由 build_quota_blocks 统一负责，
+		# 它在规则集没变时完全不动链（否则每次 reload 都要开一个封锁空窗）
+		ensure_chain "$_ip" mangle "$TAGQ"
 	done
 	build_acct_rules "$_tt"
 	# PREROUTING 顺序必须是 TAGQ → TAGA（被封的包不再进计数链）。
