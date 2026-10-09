@@ -331,13 +331,18 @@ restore_offload() {
 # 注意必须在所有封锁规则插完之后再调用——-I 是插到链首。
 # 本机没有 addrtype 模块，只能用「目标网段」放行，等价于放行到路由器自身的管理流量。
 allow_lan_in() { # $1=ipcmd $2=table $3=chain
-	local _n _fam6
-	_fam6=0
-	[ "$1" = "$ipt6" ] && _fam6=1
-	for _n in $(pc_lan_nets); do
-		# pc_lan_nets 只产出 IPv4 网段；往 ip6tables 里插 IPv4 网段只会静默失败
-		#（顺带会让「规则集没变就不重建」的条数校验永远对不上）
-		addr_is_family "$_n" "$_fam6" || continue
+	local _nets _n
+	if [ "$1" = "$ipt6" ]; then
+		# v6：家里 on-link 前缀只能问内核路由表（GUA/ULA 都不在 UCI 里，F3 ADR-2）
+		_nets=$(pc_lan_nets6)
+	else
+		# v4：语义冻结（F3 ADR-5），仍走 uci 静态节，一字不改
+		# 但保留改动前的族语义：跳过含 ":" 的值（等价于原 addr_is_family "$_n" 0）——
+		# 静态节里含冒号的 ipaddr 透传进 iptables 是非法规则，且渲染指纹会与实际
+		# 规则永久不一致 → 每分钟无谓全量重建（F3 阶段 5 SF-2）。
+		_nets=$(pc_lan_nets | grep -v ':')
+	fi
+	for _n in $_nets; do
 		ipt_do "$1" -t "$2" -I "$3" -d "$_n" -j RETURN
 	done
 	return 0

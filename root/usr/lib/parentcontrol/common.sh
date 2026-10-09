@@ -328,6 +328,39 @@ pc_lan_nets() {
 		done
 }
 
+# 局域网 on-link IPv6 前缀（一行一个 "<prefix>/<len>"，F3）。
+# 数据源只能是内核路由表：v6 的 GUA 是 ISP 动态委派（UCI 里根本没有）、ULA 在 UCI 里
+# 是 /48 聚合（比 br-lan 实际的 /64 宽，拿去放行会比 v4 还宽）—— F3 ADR-2。
+# 只取「直连（on-link）」路由：直连 = 「这个网段就在这块网卡上」，正是「家里」的定义。
+# loopback 节产出为空是正确结果：其路由行首全是 unreachable；::1 不出主机栈、不经过
+# PREROUTING，无需 v4 127.0.0.0/8 那样的机械移植（F3 ADR-6）。
+pc_lan_nets6() {
+	local _s _dev _pfx _rest
+	uci -q show network 2>/dev/null \
+		| sed -n "s/^network\.\([A-Za-z0-9_-]*\)\.proto='static'$/\1/p" \
+		| while read -r _s; do
+			_dev=$(uci -q get "network.$_s.device")
+			[ -n "$_dev" ] || _dev=$(uci -q get "network.$_s.ifname")
+			[ -n "$_dev" ] || continue
+			ip -6 route show dev "$_dev" 2>/dev/null
+		done \
+		| while read -r _pfx _rest; do
+			# 带 " via " 的转发路由不是直连（哪怕行首是合法前缀——如下游路由器经
+			# br-lan 通告的 "<prefix> via fe80::1 dev br-lan"），必须排除，否则
+			# 会把别家的网段也当「家里」放行（F3 词表/ADR-3）。
+			#（read 吃掉了第 1 个字段后的分隔空格，所以行首就是 via 本身）
+			case "$_rest" in "via "*|*" via "*) continue ;; esac
+			# 零长前缀（::/0、0:0:…:0/0 等）必须排除：进链会生成 "-d ::/0 -j RETURN"
+			# = 放行一切，IPv6 封锁静默失效。行首白名单挡不住数字形式的全零前缀
+			#（它完全匹配上面的格式），故在此单独拒掉一切以 "/0" 结尾的字段
+			#（F3 阶段 5 SF-1 / ADR-3 增补）。
+			case "$_pfx" in */0) continue ;; esac
+			printf '%s\n' "$_pfx"
+		done \
+		| grep -E '^([0-9A-Fa-f]*:)+[0-9A-Fa-f:]*/[0-9]+$' \
+		| sort -u
+}
+
 # shell 侧唯一的额度归一器（ui.lua 有一份必须同步的镜像 qmin）：非纯数字（空/"abc"/"-1"/"+5"/" 5"/"00"）一律归 0，纯数字原样输出。
 # 这是老版本（c4fe179..a1ae0e9）就在用的口径，迁移端也读它 —— 迁移与运行必须用
 # 同一套解析，否则同一个脏值会在两边得出不同结论（B1′/S1′ 的教训）。
