@@ -6,3 +6,14 @@
 .build/
 .build2/
 *.ipk
+
+# AI 协作产物（设计与验收文档、agent 配置），不作为项目内容公开
+docs/superpowers/
+.agents/
+.claude/
+.cursor/
+.opencode/
+.pi/
+AGENTS.md
+CLAUDE.md
+.mcp.json
