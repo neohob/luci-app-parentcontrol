@@ -272,14 +272,10 @@ offload_macs() {
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
 	weburl_macs_all
 }
-weburl_macs_all() {
-	uci show "$PC_CONF" 2>/dev/null | grep 'weburl' | grep '\.mac=' \
-		| sed -n "s/.*\.mac='\(.*\)'/\1/p" | sort -u
-}
-weburl_ips_all() {
-	uci show "$PC_CONF" 2>/dev/null | grep 'weburl' | grep '\.ip=' \
-		| sed -n "s/.*\.ip='\(.*\)'/\1/p" | sort -u
-}
+# 注意：不能用 `grep 'weburl'` 找 —— 命名节的行是 `parentcontrol.kids.mac='…'`，
+# 整行不含 "weburl"，会被漏掉（同一类 F5 缺陷）。改按「节类型」判定。
+weburl_macs_all() { pc_opts_all weburl mac; }
+weburl_ips_all() { pc_opts_all weburl ip; }
 offload_handle() {
 	nft -a list chain inet fw4 forward 2>/dev/null \
 		| grep 'flow add @ft' | head -1 \

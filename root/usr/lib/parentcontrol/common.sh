@@ -14,16 +14,71 @@ BACKUP_DIR=${BACKUP_DIR:-/etc/parentcontrol/backup}
 # ---------- 基础 ----------
 pc_uget() { uci -q get "$PC_CONF.$1"; }
 
-# 某模块全部 section 下标（不论是否勾选）
-pc_ids_all() {
-	uci show "$PC_CONF" 2>/dev/null \
-		| sed -n "s/^${PC_CONF}\.@$1\[\([0-9][0-9]*\)\]\..*=.*/\1/p" | sort -un
+# 把 uci show 规范化成 `类型|下标|字段|值` 流（节行输出 `类型|下标||类型`）。
+#
+# 为什么需要它：条目可以是匿名节（uci show 输出 `parentcontrol.@weburl[3]=weburl`）或命名节
+# （输出 `parentcontrol.kids=weburl`）。真机实测：**命名节在 @weburl[N] 下标空间里同样占位**
+# ——「匿名 / kids / 匿名」三节依次可用 @weburl[0] / [1] / [2] 取到；但 uci show 对命名节只打印
+# 它的名字。所以必须自己编号，否则该条目会被整条链路静默跳过：不下规则、不计数、不执行配额，
+# 且不报任何错（F5）。
+#
+# 下标口径：匿名节用 uci 自己打印的位置下标（权威）；命名节用「已见同类型节数」补位。
+# 兼容老行为：匿名节的选项行即使没有对应节行，也能凭地址取到下标。
+pc_uci_scan() {
+	uci show "$PC_CONF" 2>/dev/null | awk -F= -v c="$PC_CONF" '
+		{
+			k = $1
+			if (index(k, c ".") != 1) next
+			k = substr(k, length(c) + 2)
+			if (k == "") next
+			v = $2
+			gsub(/\047/, "", v)
+			gsub(/"/, "", v)
+			is_sec = 0
+			if (index(k, "@") == 1) {              # 匿名节地址 @type[N][.opt]
+				p = index(k, "]")
+				if (p == 0) next
+				addr = substr(k, 1, p)
+				opt = ""
+				if (p < length(k)) {
+					if (substr(k, p + 1, 1) != ".") next
+					opt = substr(k, p + 2)
+				}
+				typ = substr(addr, 2, index(addr, "[") - 2)
+				idx = substr(addr, index(addr, "[") + 1)
+				sub(/\]$/, "", idx)
+				if (opt == "") is_sec = 1
+			} else {                                # 命名节 addr[.opt]
+				q = index(k, ".")
+				addr = (q == 0) ? k : substr(k, 1, q - 1)
+				opt = (q == 0) ? "" : substr(k, q + 1)
+				if (opt == "") {
+					is_sec = 1
+					typ = v
+					idx = cnt[typ] + 0
+				} else {
+					typ = name2typ[addr]
+					idx = idx_of[addr]
+				}
+			}
+			if (typ == "") next
+			if (is_sec) {
+				cnt[typ]++
+				if (index(k, "@") != 1) { name2typ[addr] = typ; idx_of[addr] = idx }
+			}
+			print typ "|" idx "|" opt "|" v
+		}'
 }
 
-# 某模块已勾选 enable='1' 的 section 下标
-pc_ids_on() {
-	uci show "$PC_CONF" 2>/dev/null \
-		| sed -n "s/^${PC_CONF}\.@$1\[\([0-9][0-9]*\)\]\.enable='1'$/\1/p" | sort -un
+# 某模块全部 section 下标（不论是否勾选）
+pc_ids_all() { pc_uci_scan | awk -F'|' -v t="$1" '$1 == t { print $2 }' | sort -un; }
+
+# 某模块已勾选 enable='1' 的 section 下标（匿名/命名节等价）
+pc_ids_on() { pc_uci_scan | awk -F'|' -v t="$1" '$1 == t && $3 == "enable" && $4 == "1" { print $2 }' | sort -un; }
+
+# 某模块所有节的某字段取值（匿名/命名节等价），去重。用于收集 mac / ip。
+pc_opts_all() { # $1=模块 $2=字段
+	pc_uci_scan | awk -F'|' -v t="$1" -v o="$2" '$1 == t && $3 == o && $4 != "" { print $4 }' | sort -u
 }
 
 # ---------- 日期 ----------
