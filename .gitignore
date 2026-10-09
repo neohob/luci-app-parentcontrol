@@ -1,3 +1,8 @@
 .DS_Store
 *.orig
 *.rej
+
+# 构建产物（本地组包输出，不入库）
+.build/
+.build2/
+*.ipk
