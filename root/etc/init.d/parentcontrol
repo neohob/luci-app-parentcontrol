@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# 本 fork 新增：每日额度 / 平日-节假日双档案 / 共享额度池 / 节假日数据
+# 本插件新增：每日额度 / 平日-节假日双档案 / 共享额度池 / 节假日数据
 # 设计说明见 README；纯逻辑（日子判定、额度、用量）在 /usr/lib/parentcontrol/common.sh
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
