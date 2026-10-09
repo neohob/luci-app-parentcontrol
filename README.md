@@ -165,14 +165,12 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 ## 更新日志
 
-倒序排列。每个版本的技术记录（需求 / 决策 / 计划 / 测试设计 / 复审 / 测试报告）
-在 `docs/superpowers/specs/` 下按任务名归档。
+倒序排列。
 
 ### 1.8.3（2026-10-09）文档与注释整理
 
 **改动**：整理仓库文档、README 与源码注释里的表述；更新 GitHub 仓库简介。
-**行为**：无变化 —— 本次只动注释与文档，运行逻辑与 1.8.2 完全一致
-（`sh test/run.sh` ALL SUITES PASS；真机 gate 逐项与 1.8.2 相同）。
+**行为**：无变化 —— 本次只动注释与文档，运行逻辑与 1.8.2 完全一致（真机逐项复核与 1.8.2 相同）。
 
 ### 1.8.2（2026-10-09）IPv6 侧的防自锁守卫补齐
 
@@ -204,55 +202,10 @@ IPv4 侧的取网段逻辑与生成的规则**一字未动**。
 - 白盒用例按需求（A1..A46）重写并补盲区；开始产出可直接 `opkg install` 的 `.ipk`
 - 一批界面修正（移除「时间限制」「协议过滤」入口、勾「不限额度」真正收起输入框等）
 
-## 开发流程
-
-本仓库用多 agent 流水线开发，每阶段有 gate，产物落在 `docs/superpowers/specs/`（`{task-brief}-*.md`）：
-
-| 阶段 | 角色 | 产物 | 关卡 |
-|------|------|------|------|
-| 1 需求 | 调度者 | `design.md`（含编号验收标准） | 用户确认 |
-| 2 对峙 | 调度者 | `adr.md` + `glossary.md` | 有挑战-回应记录 |
-| 3 计划 + 测试设计 | 调度者 | `plan.md` + `testplan.md`（白盒 W* + 上线黑盒 B*，逐条覆盖验收标准 + 覆盖矩阵） | 矩阵无空格 |
-| 4 实现 | code pane | 代码 + 白盒全绿 + `progress.md` | 白盒全绿 |
-| 5 复审 | review pane | `review.md`（`/thermos` 双路复审） | 无 Blocker/Should-fix |
-| 6 测试 | test pane | `test-report.md`（白盒复核 + 上线黑盒） | 全绿 |
-
-- 调度者只写文档与决策，**不写实现代码**；实现 handoff 给独立 pane。
-- code / review / test pane 开始新一轮前**按需清空上下文**（`/new` / `/clear`），保证独立、纯净。
-- 跨 pane 通信是**推送式回调**（做完主动通知，不轮询）。
-
 ## 测试
 
-仓库自带一套白盒测试（无需路由器，`sh` + `python3` 即可跑）：
-
-```sh
-sh test/run.sh             # 三个 lint + 三套测试（约 1 分钟）
-sh test/common_test.sh     # 纯逻辑：日子判定/节假日解析/额度/配额/局域网网段
-sh test/init_test.sh       # 规则构建：用状态化假 iptables 断言生成的规则
-sh test/migrate_test.sh    # 配置迁移：week→双档案 / word→domains / 默认值
-sh test/mutation_check.sh  # 变异测试（故意改坏源码，断言测试确实会失败）
-```
-
-`run.sh` 还会跑几条静态检查，都是**真机上踩过、主机测不出来**的坑：
-
-- `lint_locals.py` —— shell 函数里赋值的 `_xxx` 必须 `local`。busybox ash 的变量默认全局，
-  helper 里写 `_ip=$(...)` 会静默覆盖调用方的同名循环变量（真机上曾导致网址条目的
-  **TCP/SNI 规则整条没被安装**）。
-- `lint_ash.sh` —— 禁用 `10#` 等 busybox ash 不支持的写法（主机 bash/dash 支持，路由器上
-  会 `arithmetic syntax error`，曾导致 `start` 崩、锁文件残留、crontab 永远写不进去）。
-- `lint_luci_globals.py` —— 被 `require` 的 CBI 子模块不能直接用注入的全局类名 / `translate`
-  （否则页面 500：`class must be a descendant of AbstractValue`）。
-- （`run.sh` 里的结构检查）`stats_tsv` 的列**只允许 `tsv.lua` 解析**。历史上 `ui.lua`/`statsdata.lua`
-  各写了一份按下标解析，shell 侧改了列之后漏改一处，那一整列就**静默显示错值**。
-
-`test/fakes/` 下是桩：状态化 `iptables`/`ip6tables`（`-N/-F/-X/-C/-I/-A/-D/-S/-L` + 计数器）、
-文件后端的 `uci`、可控的 `date`/`resolveip`/`wget`/`jsonfilter`/`crontab`。
-关键路径（链名、挂载顺序、时限/额度阈值、跨天换档、采样记账、重建自愈、防自锁放行顺序）
-都是直接断言生成的规则文本，而不是“跑通就算过”。
-
-### 上线黑盒验收（真机）
-
-白盒测试跑在主机上；**上线前还要在真机上按「用户可观测行为」验收**（不看实现细节）。验收清单：
+开发过程中在主机侧用一套白盒用例（覆盖规则构建、配置迁移、边界条件与防自锁顺序）加静态检查做回归，
+上线前还要在真机上按「用户可观测行为」逐项验收。验收清单：
 
 | # | 验收项 | 期望 |
 |---|--------|------|

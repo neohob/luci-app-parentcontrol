@@ -17,3 +17,7 @@ docs/superpowers/
 AGENTS.md
 CLAUDE.md
 .mcp.json
+
+# 测试套件与 CI 配置（本地保留，不随产品公开）
+test/
+.github/
