@@ -31,17 +31,18 @@
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="screenshot/2.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
+<td align="center" width="50%"><img src="screenshot/weburl.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
+<td align="center" width="50%"><img src="screenshot/quota.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享额度池</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="screenshot/4.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享额度池</sub></td>
+<td align="center" width="50%"><img src="screenshot/stats.png" width="100%"><br><sub><b>使用统计</b>：今天进度、最近 30 天趋势、按条目/设备分析、重置记录</sub></td>
+<td align="center" width="50%"></td>
 </tr>
 </table>
 
+> 截图中的 **MAC 地址、静态 IP 与设备名均已替换为示例值**，不是真实数据。
 > 列表**只显示摘要**：`设备（含设备名） / 档案（平日+节假日一句话） / 今日额度`，
 > 点每行的 **编辑** 进独立页做详细设置。
-> 更完整的用量统计（今天进度条、最近 30 天趋势、按条目/设备分析、重置记录）在
-> **「使用统计」** 页 —— 截图 4 里的旧小看板已经移到那里了。
 
 ## 主要改动
 
