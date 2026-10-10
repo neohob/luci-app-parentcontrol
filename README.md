@@ -27,6 +27,21 @@
 - **防改 MAC**（静态 IP/主机名，与 MAC 任一命中即生效）
 - **列表瘦身 + 详情独立编辑页**，列表显示「设备名 + 今日额度」
 
+## 安装
+
+从 [Releases](https://github.com/neohob/luci-app-parentcontrol/releases) 下载最新版本：
+
+| 文件 | 怎么用 |
+| --- | --- |
+| `luci-app-parentcontrol_<版本>_all.ipk` | `opkg install <文件>`，或在 LuCI「系统 → 软件包 → 上传软件包」里上传 |
+| `luci-app-parentcontrol_<版本>.run` | 不依赖 opkg 的自解压安装器：`sh <文件>` 安装，`sh <文件> uninstall` 卸载 |
+
+包内全是 Lua / shell / 配置文件，不含编译产物，`Architecture: all` ——
+**一个包适用于所有 CPU 架构**（x86_64 / arm / mips / aarch64 …），不需要按架构分别下载。
+
+装完在 LuCI 里进 **网络 → 家长控制**。依赖 `iptables-mod-filter` 与 `kmod-ipt-filter`
+（用 `.ipk` 安装时 opkg 会一并装上；用 `.run` 安装请先确认这两个已就绪）。
+
 ## 界面
 
 <table>
