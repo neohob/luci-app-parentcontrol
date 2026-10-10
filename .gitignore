@@ -18,6 +18,8 @@ AGENTS.md
 CLAUDE.md
 .mcp.json
 
-# 测试套件与 CI 配置（本地保留，不随产品公开）
+# 测试套件（本地保留，不随产品公开）
 test/
-.github/
+
+# 本地组包输出
+dist/

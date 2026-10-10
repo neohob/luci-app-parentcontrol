@@ -1,0 +1,253 @@
+name: Release
+
+# 打一个 v* 标签（或在 Actions 页面手动触发）就会：
+#   1. 组出 luci-app-parentcontrol_<版本>_all.ipk（opkg install 用）
+#   2. 组出 luci-app-parentcontrol_<版本>.run（自解压安装器，带 install / uninstall）
+#   3. 生成 SHA256SUMS，并创建 / 更新对应的 GitHub Release
+#
+# 关于架构：本插件全是 Lua / shell / JSON / 配置，Makefile 里 LUCI_PKGARCH:=all，
+# 组出来的包是 Architecture: all —— 同一个包适用于所有 CPU 架构（x86_64 / arm / mips …），
+# 所以**不需要按架构交叉编译**，也不需要 OpenWrt SDK。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          set -eu
+          V=$(sed -n 's/^PKG_VERSION:=//p' Makefile | tr -d ' \r')
+          R=$(sed -n 's/^PKG_RELEASE:=//p' Makefile | tr -d ' \r')
+          [ -n "$V" ] && [ -n "$R" ] || { echo "Makefile 里读不到 PKG_VERSION / PKG_RELEASE"; exit 1; }
+          echo "full=$V-$R" >> "$GITHUB_OUTPUT"
+
+      - name: 组 .ipk 与 .run
+        env:
+          FULL: ${{ steps.ver.outputs.full }}
+        run: |
+          set -eu
+
+          APP=luci-app-parentcontrol
+          OUT="$PWD/dist"
+          mkdir -p "$OUT"
+          STAGE=$(mktemp -d)
+          trap 'rm -rf "$STAGE"' EXIT INT TERM
+
+          # ---- 可复现构建：统一时间戳 ----
+          # 注1：libarchive 的 `tar -z` 会把当前时间写进 gzip 头 → 一律先出未压缩 tar，再 `gzip -n -9`。
+          # 注2：macOS 的 bsdtar 没有 `--mtime`，故用 python 统一 touch。
+          MT=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}
+          [ -n "$MT" ] || MT=0
+          export MT
+          freeze() {
+            python3 - "$1" "$MT" <<'PY'
+          import os, sys
+          root, mt = sys.argv[1], int(sys.argv[2])
+          try:
+              os.utime(root, (mt, mt))
+          except OSError:
+              pass
+          for dp, dns, fns in os.walk(root):
+              for n in dns + fns:
+                  try:
+                      os.utime(os.path.join(dp, n), (mt, mt))
+                  except OSError:
+                      pass
+          PY
+          }
+          TGZ() {   # TGZ <目录> <输出.tar.gz>
+            freeze "$1"
+            ( cd "$1" && COPYFILE_DISABLE=1 tar --format=ustar --no-xattrs \
+                --owner=0 --group=0 --numeric-owner -cf "$2.tar" . )
+            gzip -n -9 -c "$2.tar" > "$2"
+            rm -f "$2.tar"
+          }
+
+          # ---- 暂存：root/ 铺到 /，luasrc/ 铺到 /usr/lib/lua/luci/ ----
+          mkdir -p "$STAGE/data/usr/lib/lua/luci"
+          cp -a root/.   "$STAGE/data/"
+          cp -a luasrc/. "$STAGE/data/usr/lib/lua/luci/"
+          find "$STAGE/data" -name '._*' -delete 2>/dev/null || true
+          find "$STAGE/data" -type f -exec chmod 644 {} +
+          chmod 755 "$STAGE/data/etc/init.d/parentcontrol"   # 与仓库里的 git 模式一致：只有 init.d 可执行
+          SIZE=$(du -sk "$STAGE/data" | awk '{print $1}')
+
+          # ---- 1) .ipk ----
+          # 注意：.ipk 是 **gzip 压缩的 tar**，不是 `ar` 归档；用 `ar rc` 组出来的包
+          # 会被 opkg-lede 报 `Malformed package file`。成员顺序与官方包一致。
+          mkdir -p "$STAGE/ctl"
+          cat > "$STAGE/ctl/control" <<EOF
+          Package: $APP
+          Version: $FULL
+          Depends: libc, iptables-mod-filter, kmod-ipt-filter, luci-lua-runtime
+          Source: $APP
+          SourceName: $APP
+          License: Apache-2.0
+          Section: luci
+          Maintainer: neohob
+          Architecture: all
+          Installed-Size: $SIZE
+          Description: LuCI support for Parent Control (parentcontrol)
+          EOF
+          printf '/etc/config/parentcontrol\n' > "$STAGE/ctl/conffiles"
+          cat > "$STAGE/ctl/postinst" <<'EOF'
+          #!/bin/sh
+          [ "${IPKG_NO_SCRIPT}" = "1" ] && exit 0
+          [ -s ${IPKG_INSTROOT}/lib/functions.sh ] || exit 0
+          . ${IPKG_INSTROOT}/lib/functions.sh
+          default_postinst $0 $@
+          EOF
+          cat > "$STAGE/ctl/prerm" <<'EOF'
+          #!/bin/sh
+          [ -s ${IPKG_INSTROOT}/lib/functions.sh ] || exit 0
+          . ${IPKG_INSTROOT}/lib/functions.sh
+          default_prerm $0 $@
+          EOF
+          chmod 755 "$STAGE/ctl/postinst" "$STAGE/ctl/prerm"
+          printf '2.0\n' > "$STAGE/debian-binary"
+
+          TGZ "$STAGE/ctl" "$STAGE/control.tar.gz"
+          TGZ "$STAGE/data" "$STAGE/data.tar.gz"
+          IPK="$OUT/${APP}_${FULL}_all.ipk"
+          freeze "$STAGE"
+          ( cd "$STAGE" && COPYFILE_DISABLE=1 tar --format=ustar --no-xattrs \
+              --owner=0 --group=0 --numeric-owner -cf "$STAGE/ipk.tar" \
+              ./debian-binary ./data.tar.gz ./control.tar.gz )
+          gzip -n -9 -c "$STAGE/ipk.tar" > "$IPK"
+          rm -f "$STAGE/ipk.tar"
+
+          # ---- 2) .run（自解压安装器：header 脚本 + gzip 载荷接在文件尾） ----
+          R="$STAGE/run"
+          mkdir -p "$R/data"
+          cp -a "$STAGE/data/." "$R/data/"
+          ( cd "$R/data" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) > "$R/files.list"
+
+          cat > "$R/head" <<HDR
+          #!/bin/sh
+          # $APP $FULL
+          # 家长控制（按网址 / 域名过滤某台设备）自解压安装器。
+          # 纯 Lua / shell 文件，与 CPU 架构无关。
+          #
+          #   sh <文件名>.run              安装或升级
+          #   sh <文件名>.run uninstall    卸载
+          #       （保留 /etc/config/parentcontrol 与 /etc/parentcontrol 下的用量数据）
+          #
+          # 装完在 LuCI 里进「网络 -> 家长控制」。
+          set -eu
+
+          APP=$APP
+          INIT=parentcontrol
+          VER=$FULL
+
+          [ "\$(id -u)" = "0" ] || { echo "请用 root 运行" >&2; exit 1; }
+
+          TMP=\$(mktemp -d /tmp/\$APP.XXXXXX) || exit 1
+          trap 'rm -rf "\$TMP"' EXIT INT TERM
+
+          LINE=\$(awk '/^__PAYLOAD_BELOW__\$/ {print NR + 1; exit}' "\$0")
+          [ -n "\$LINE" ] || { echo "找不到内嵌数据" >&2; exit 1; }
+          mkdir -p "\$TMP/x"
+          tail -n +"\$LINE" "\$0" | tar -xzf - -C "\$TMP/x"
+
+          FILES="\$TMP/x/files.list"
+          [ -f "\$FILES" ] || { echo "内嵌数据不完整" >&2; exit 1; }
+
+          clear_cache() {
+            rm -f /tmp/luci-indexcache* 2>/dev/null || true
+            rm -rf /tmp/luci-modulecache 2>/dev/null || true
+          }
+
+          install_pkg() {
+            echo "==> 安装 \$APP \$VER"
+            while read -r p; do
+              [ -n "\$p" ] || continue
+              mkdir -p "/\$(dirname "\$p")"
+              cp -f "\$TMP/x/data/\$p" "/\$p"
+            done < "\$FILES"
+            chmod 755 /etc/init.d/\$INIT
+
+            # 首装脚本：与 opkg 的 uci-defaults 行为一致（执行后删除）
+            if [ -f "/etc/uci-defaults/\$APP" ]; then
+              ( cd / && sh "/etc/uci-defaults/\$APP" ) || true
+              rm -f "/etc/uci-defaults/\$APP"
+            fi
+
+            clear_cache
+            /etc/init.d/\$INIT enable  2>/dev/null || true
+            /etc/init.d/\$INIT restart 2>/dev/null || true
+            echo "==> 完成"
+          }
+
+          uninstall_pkg() {
+            echo "==> 卸载 \$APP"
+            if [ -x "/etc/init.d/\$INIT" ]; then
+              /etc/init.d/\$INIT stop    2>/dev/null || true
+              /etc/init.d/\$INIT disable 2>/dev/null || true
+            fi
+            while read -r p; do
+              [ -n "\$p" ] || continue
+              if [ "\$p" = "etc/config/parentcontrol" ]; then
+                continue
+              fi
+              rm -f "/\$p"
+            done < "\$FILES"
+            # 顺带清掉空目录（best effort）
+            sort -r "\$FILES" | while read -r p; do
+              [ -n "\$p" ] || continue
+              rmdir "/\$(dirname "\$p")" 2>/dev/null || true
+            done
+            uci -q delete firewall.parentcontrol 2>/dev/null || true
+            uci -q commit firewall 2>/dev/null || true
+            uci -q delete ucitrack.@parentcontrol[-1] 2>/dev/null || true
+            uci -q commit ucitrack 2>/dev/null || true
+            clear_cache
+            echo "==> 已卸载（配置与用量数据仍保留）"
+          }
+
+          case "\${1:-install}" in
+            install|"")       install_pkg ;;
+            uninstall|remove) uninstall_pkg ;;
+            *) echo "用法: sh \$0 [install|uninstall]" >&2; exit 1 ;;
+          esac
+          exit 0
+          __PAYLOAD_BELOW__
+          HDR
+
+          TGZ "$R" "$STAGE/payload.tar.gz"
+          RUN="$OUT/${APP}_${FULL}.run"
+          cat "$R/head" "$STAGE/payload.tar.gz" > "$RUN"
+          chmod 755 "$RUN"
+          rm -f "$STAGE/payload.tar.gz"
+
+          # ---- 3) 校验和 ----
+          ( cd "$OUT" && sha256sum *.ipk *.run > SHA256SUMS )
+
+          echo "----- 产物 -----"
+          ls -l "$OUT"
+          cat "$OUT/SHA256SUMS"
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/*.ipk dist/*.run dist/SHA256SUMS --clobber
+          gh release view "$TAG"
