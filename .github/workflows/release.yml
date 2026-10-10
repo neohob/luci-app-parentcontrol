@@ -241,6 +241,13 @@ jobs:
           ls -l "$OUT"
           cat "$OUT/SHA256SUMS"
 
+      - name: 保存产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-parentcontrol-packages
+          path: dist/*
+          if-no-files-found: error
+
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
