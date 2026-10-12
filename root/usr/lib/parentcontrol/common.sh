@@ -558,8 +558,32 @@ _pc_ai_fail() {
 	return 1
 }
 
+# D10/F-12：从客户端 stderr 与响应体开头嗅探 HTTP 4xx/5xx 状态。
+# 背景：curl -f 自带可靠判定，但 busybox-wget / uclient-fetch（尤其老版本）在
+# 4xx/5xx 上可能 exit 0 并把错误体写进 outfile —— 不嗅探就会把鉴权失败等
+# HTTP 错误当成「成功响应」，页面只能报「响应不是 JSON」（原因失真，复审 F-12）。
+# 命中返回可读原因（"HTTP <状态>" 或明示「无法判定」）；未命中输出空串。
+# 真机上各客户端的确切报错形态由阶段 6 黑盒 B63 收口（design.md R11）；这里是唯一修点。
+_pc_http_fail_status() { # <客户端名> <stderr文本> <outfile>
+	local _cl _txt _hit
+	_cl="$1"; _txt="$2"
+	if [ -f "$3" ]; then
+		_txt="$_txt
+$(head -c 256 "$3" 2>/dev/null | tr '\r' '\n')"
+	fi
+	_txt=$(printf '%s' "$_txt" | tr '\r' '\n')
+	# 只取状态码（"HTTP/1.1 401"）：不要在字符类里写 \n（POSIX 括号表达式里反斜杠不转义，
+	# BSD grep 会把它当字面 backslash/n，GNU grep 才当换行 —— 两边行为不一致）。
+	_hit=$(printf '%s\n' "$_txt" | grep -aoE 'HTTP/1\.[01][[:space:]]+[45][0-9][0-9]' | head -n 1)
+	if [ -n "$_hit" ]; then
+		printf 'HTTP %s' "$(printf '%s' "$_hit" | sed -E 's#^HTTP/1\.[01][[:space:]]+##')"
+	elif printf '%s\n' "$_txt" | grep -aq 'server returned error'; then
+		printf '%s' "HTTP 状态无法判定（客户端 $_cl）"
+	fi
+}
+
 pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
-	local _m _u _o _i _t _k _err _r
+	local _m _u _o _i _t _k _err _r _st
 	_m="$1"; _u="$2"; _o="$3"; _i=""
 	if [ "$#" -ge 4 ]; then _i="$4"; shift 4; else shift 3; fi
 	_t=$(_pc_http_timeout); _k=$(_pc_ai_key); _err="${_o}.err"
@@ -587,7 +611,14 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		else
 			uclient-fetch -q -T "$_t" -O "$_o" "$@" "$_u" >/dev/null 2>"$_err"
 		fi
-		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		if [ $? -eq 0 ]; then
+			# D10：uclient-fetch 老版本可能 exit 0 + 4xx 错误体 —— 嗅探状态行，不得 fail-open
+			_st=$(_pc_http_fail_status uclient-fetch "$(cat "$_err" 2>/dev/null)" "$_o")
+			rm -f "$_err"
+			[ -n "$_st" ] || return 0
+			_pc_ai_fail "$_o" "uclient-fetch 请求失败：$_st"
+			return 1
+		fi
 		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 		_pc_ai_fail "$_o" "uclient-fetch 请求失败：${_r:-HTTP 错误或网络不可达}"
 	elif command -v wget >/dev/null 2>&1; then
@@ -596,7 +627,14 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		else
 			wget -q -T "$_t" -O "$_o" "$@" "$_u" >/dev/null 2>"$_err"
 		fi
-		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		if [ $? -eq 0 ]; then
+			# D10：wget 分支同上（busybox-wget 无 --fail，用等价状态行判定）
+			_st=$(_pc_http_fail_status wget "$(cat "$_err" 2>/dev/null)" "$_o")
+			rm -f "$_err"
+			[ -n "$_st" ] || return 0
+			_pc_ai_fail "$_o" "wget 请求失败：$_st"
+			return 1
+		fi
 		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 		_pc_ai_fail "$_o" "wget 请求失败：${_r:-HTTP 错误或网络不可达}"
 	else
