@@ -47,7 +47,7 @@
 <table>
 <tr>
 <td align="center" width="50%"><img src="screenshot/weburl.png" width="100%"><br><sub><b>网址过滤</b>：按域名/CIDR 封锁（含过滤力度、IP 刷新间隔、封锁粒度、用量阈值）</sub></td>
-<td align="center" width="50%"><img src="screenshot/quota.png" width="100%"><br><sub><b>使用限额</b>：可用时段 + 每日额度 + 共享额度池</sub></td>
+<td align="center" width="50%"><img src="screenshot/quota.png" width="100%"><br><sub><b>设置</b>：可用时段 + 每日额度 + 共享额度池 + AI 辅助解析</sub></td>
 </tr>
 <tr>
 <td align="center" width="50%"><img src="screenshot/stats.png" width="100%"><br><sub><b>使用统计</b>：今天进度、最近 30 天趋势、按条目/设备分析、重置记录</sub></td>
@@ -107,11 +107,18 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 标记匹配 **0** 个（关掉 GRO 也一样）。所以「按关键词匹配 TLS SNI」对 **IPv4 转发流量完全无效**。
 （IPv6 相反 —— 走隧道、解封装会把负载线性化，SNI 能匹配。）
 
+**本插件的「网址封锁」在 IPv4 上实际是 IP 封，不是域名封。** 域名在这里的唯一作用是
+「被解析成 IP，再按 `-d <ip>` 封」。字面串规则（`-m string` 匹配明文 DNS 53 / TLS SNI 80,443）
+在 IPv4 上**双重失效**：① 转发报文的负载落在 skb 的 page frags 里，`-m string` 看不到（实测 0/18）；
+② 即便看得到，DNS QNAME 是 wire format（`\x03www\x0bexample\x03com\x00`），
+带点的域名串并不是它的子串。所以「填了域名」并不等于「按域名封」——真正拦住的是解析出来的 IP。
+对自带 HTTPDNS/QUIC 的客户端覆盖不到其真实 IP，这是**机制上限，不是配置问题**。
+
 **结论：IPv4 转发流量只能按目标 IP（报文头）来封。** 于是：
 
 - 按解析出的目标 IP 封锁（规则进 `PARENTCONTROL_QUOTA` 链，mangle PREROUTING —— 已把旧的独立 `PARENTCONTROL_IP` / `PARENTCONTROL_WEBURL` 链统一掉）
-- 网址行的「关键词/域名」列写域名即可：既当子串匹配明文 DNS / TLS SNI（apex 天然覆盖子域），
-  也会被解析成 IP 一起封
+- 网址行的「域名/IP」列写域名即可：会被解析成 IP 一起封（apex 天然覆盖子域）；
+  字面串规则仍会生成，但在 IPv4 上不生效（见上）
 - IPv4 默认封整个 `/24`（`basic.ip_mask` 可改 `32` 只封精确 IP）；IPv6 封 `/64`
 - 解析同时取 apex 与 `www.` 两个变体（A 常在 apex、AAAA 常在 www）
 - 列里**含 `/` 的项直接当 CIDR 封**，不解析（应急口子）
@@ -168,15 +175,42 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 ### 8. 界面
 
-- 列表只显示摘要：`开启 / 备注 / 设备 / 静态IP / 域名/IP / 档案 / 今日额度 / 重置`，
+- 列表只显示摘要：`开启 / 备注 / 设备 / 静态IP / 名称 / 域名/IP / 档案 / 今日额度 / 重置`，
   每行一个 **编辑** 按钮
   - **设备**列显示 `MAC（设备名）`，设备名取自 DHCP 租约/ARP（`luci.sys.net.mac_hints`）
   - **档案**列显示紧凑摘要：两档案一致时只写一次（`两档案相同：60分钟(09:00-21:00)`），
     否则 `平日 … · 节假日 …`；全天时段不写、秒不写
   - **今日额度**列显示 `12 / 30 分钟`；勾了「不限额度」显示 `不限`；条目不存在时显示 `-`
 - 点 **编辑** 进独立页（`weburl_edit`），容纳全部详细字段
-- 新增「**使用限额**」页：共享额度池、寒暑假区间
+- 「**设置**」页（原「使用限额」）：共享额度池、寒暑假区间，以及「AI 辅助解析」（endpoint/model/apikey + 获取模型列表）
+- 编辑页新增「**要封锁的名称**」与「**AI 解析**」；「域名/IP」明确为**生效列表**（详见下节）
 - 插件内所有文案都是**中文字面量**（不受 LuCI 界面语言影响）
+
+### 9. AI 辅助解析域名
+
+「网址过滤」的编辑页多了一个 **`apps`（要封锁的名称）** 输入框和一个 **「AI 解析」** 按钮：
+
+1. 在 **名称** 里填应用/游戏/网站名（中英文均可），也可以直接混填域名/IP/CIDR；
+2. 点 **AI 解析**：形如域名/IP/CIDR 的项**直接**放进 **域名/IP（生效列表）**；
+   其余名称由路由器**服务端**请求你配置的 OpenAI 兼容接口，换成**真实 ASCII 域名**后**追加**进去
+   （已存在的不重复添加，原内容不覆盖）；
+3. 确认后点 **保存并应用**。之后由既有的 cron 刷新链路（`basic.ip_refresh`，默认 30 分钟）把域名解析成
+   IP 并重建规则；解析结果按条目累积在 `/etc/parentcontrol/ips/weburl_<N>`，**只增不减**。
+
+要点：
+
+- **AI 只管「名称 → 域名」**，不碰 IP、不改时段/额度。真正拦住流量的仍是「按域名解析出的 IP 封锁」。
+- 接口是**服务端**发的（路由器自己请求），浏览器不直连、API Key 不出内网；
+  请求/响应走 `/tmp` 临时文件，不拼 shell 字符串。
+- 「**设置**」页有「AI 辅助解析」区块：填 `endpoint` / `model` / `apikey`，
+  点 **获取模型列表** 可以从 `{endpoint}/models` 拉候选。
+- **失败不会自动回退**：未配置 endpoint/model、路由器缺 HTTP 客户端（`curl`/`uclient-fetch`/`wget` 全无）、
+  请求超时或非 2xx、返回不是 JSON、过滤后没有合法域名 —— 都会在按钮旁显示**明确原因**，
+  且**不改动**「域名/IP」里的内容，你可以手动填域名或 IP。
+- 需要运行时能上网；`curl`/`uclient-fetch`/`wget` 任一即可（访问 https 还需 `libustream-ssl` + `ca-bundle`）。
+  这些**不是插件的硬依赖**，不进 `LUCI_DEPENDS`。
+- AI 产出的必须是**真实 ASCII 域名**（带点、可被 DNS 解析）；中文、解释性文字、markdown 代码块、
+  列表编号都会被丢掉。
 
 ## 更新日志
 
@@ -257,9 +291,14 @@ IPv4 侧的取网段逻辑与生成的规则**一字未动**。
   每年重复，寒假用 `YYYY-MM-DD` 指定年份）。法定节假日/调休自动从
   [NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn) 拉取（jsDelivr 主、raw 备、
   包内自带离线兜底）。
-- 不填域名时靠关键词猜（`关键词` → `关键词.com` / `www.关键词.com` / `关键词.cn`），只能覆盖主域名。
+- **关键词（老字段 `word`）已废弃**：中文关键词本就匹配不上（`-m string` 规则只收 ASCII），
+  IPv4 上字面串规则又看不到转发负载，等于完全不生效。UI 已不再提供关键词入口。
+- 不填域名时靠**裸词猜测**兜底（`X` → `X.com` / `www.X.com` / `X.cn`），只能覆盖主域名；
+  这是最后的兜底，建议直接填真实域名，或用编辑页的 **AI 解析** 把名称换成域名。
 - QUIC(HTTP/3) 的 SNI 是加密的，任何 `-m string` 方案都拦不到；好在浏览器会自动回落 TCP。
-- 客户端若用自带 HTTPDNS 的 App（IP 不来自系统 DNS），解析式封锁/计时覆盖不到它的 IP。
+- 客户端若用自带 HTTPDNS / QUIC 的 App（IP 不来自系统 DNS，或全程加密），解析式封锁/计时覆盖不到它的
+  真实 IP —— 这是**机制上限，不是配置问题**。（小红书这类走系统 DNS 的能封住；蛋仔派对/魔兽世界这类
+  自带 HTTPDNS/QUIC 的封不住。）
 
 ## 参数速查
 
@@ -274,6 +313,10 @@ IPv4 侧的取网段逻辑与生成的规则**一字未动**。
 | 条目 `sd_*` / `hd_*` | — | 平日 / 节假日档案（**没有模式字段**）：`qstart`/`qend`(可用时段)、`quota`(**0 = 全天禁止**)、`unlimited`、`pool` |
 | `quota.*` | — | 共享额度池：`name` + 平日/节假日额度 |
 | `vacation.*` | — | 寒暑假区间：`name` + `start` + `end`（`MM-DD` 每年重复或 `YYYY-MM-DD` 绝对日期） |
+| 条目 `apps` | — | 要封锁的名称（应用/游戏/网站名，可混填域名/IP/CIDR）；只给人看与 AI 解析用，shell 不读 |
+| `ai.endpoint` | — | OpenAI 兼容接口基址（如 `http://192.168.1.10:11434/v1`）；留空 = 不使用 AI 解析 |
+| `ai.model` | — | 模型 id（AI 解析与模型列表都要） |
+| `ai.apikey` | — | 可选，Bearer 鉴权用 |
 
 时间口径：**日子类型、额度一律按北京时间（UTC+8）**，与路由器系统时区无关；
 可用时段会按 UTC+8 换算成 UTC 再交给 `-m time`（该模块默认按 UTC 解释），因此也不依赖内核时区。
