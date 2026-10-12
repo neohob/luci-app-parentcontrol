@@ -5,7 +5,7 @@
 <% if key ~= "" then %>
 	<input type="button" class="btn cbi-button cbi-button-reset" style="padding:2px 8px"
 		value="<%=translate("重置")%>" data-key="<%=key%>"
-		onclick="pcResetQuota(this.getAttribute('data-key'))" />
+		onclick="pcResetQuota(this.getAttribute('data-key'), '<%=url("admin/control/parentcontrol/reset_quota")%>', '<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>', '<%=token%>')" />
 <% else %>
 	<span class="muted">-</span>
 <% end %>

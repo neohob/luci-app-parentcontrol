@@ -1,13 +1,7 @@
 <% include("cbi/map") %>
+<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
 <script type="text/javascript">//<![CDATA[
-	function pcResetQuota(k) {
-		if (!k) return;
-		if (!confirm('<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>')) return;
-		XHR.post('<%=url("admin/control/parentcontrol/reset_quota")%>',
-			{ key: k, token: '<%=token%>' },
-			function() { location.reload(); });
-	}
-
+	// pcResetQuota（重置按钮用）来自公共资源 parentcontrol/pc-ui.js（D11，唯一实现）。
 	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "control", "parentcontrol", "status")%>', null,
 		function (x, result) {
 			var status = document.getElementsByClassName('parentcontrol_status')[0];

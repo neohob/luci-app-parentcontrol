@@ -74,7 +74,7 @@
 			<td class="num muted"><% if (u.projected or 0) > 0 then %><%=u.projected%> <%=T("分")%><% else %>-<% end %></td>
 			<td><input type="button" class="btn cbi-button cbi-button-reset" style="padding:2px 8px"
 				value="<%=T("重置")%>" data-key="<%=u.kind == "pool" and ("pool:" .. u.name) or (u.key or "")%>"
-				onclick="pcResetQuota(this.getAttribute('data-key'))" /></td>
+				onclick="pcResetQuota(this.getAttribute('data-key'), '<%=url("admin/control/parentcontrol/reset_quota")%>', '<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>', '<%=token%>')" /></td>
 		</tr>
 		<% end %>
 	</table>
@@ -216,13 +216,4 @@
 	</table>
 </div>
 </div>
-<script type="text/javascript">//<![CDATA[
-	function pcResetQuota(k) {
-		if (!k) return;
-		if (!confirm('<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>')) return;
-		XHR.post('<%=url("admin/control/parentcontrol/reset_quota")%>',
-			{ key: k, token: '<%=token%>' },
-			function() { location.reload(); });
-	}
-//]]>
-</script>
+<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
