@@ -37,6 +37,9 @@
 
 <div class="cbi-map">
 <div class="pc-dash">
+	<% if d.invariant_drift then %>
+	<div class="pc-badge bad" style="margin:4px 0"><%=T("统计台账校验失败（D12 不变式失配）：本页数字可能不可信，请把本行内容反馈给开发者。")%> <%=pcdata(d.invariant_drift)%></div>
+	<% end %>
 	<div class="pc-kv">
 		<b><%=pcdata(m.date or "-")%></b>
 		（<%=pcdata(m.daytype == "holiday" and T("节假日") or T("平日"))%>）

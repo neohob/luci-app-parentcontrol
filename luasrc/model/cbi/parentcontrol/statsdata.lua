@@ -250,6 +250,43 @@ function M.collect()
 	end)
 	d.dev_day_rows = ddrows
 
+	-- D12 不变式守卫（F-R2-3）：真守卫，不是注释 —— 归约一旦与源数据对不上
+	-- （如重置被重复叠加、归约口径漂移），页面顶部给出可见标记并留系统日志，
+	-- 绝不静默输出错数。两条不变式：
+	--   ① Σ_day dev_day_rows[dev].by == dev_rows[dev].minutes（矩阵 vs 设备合计）
+	--   ② 台账合计 == Σ hist_key(窗口) + Σ 窗口内重置（台账是唯一源，不被二次计数；
+	--     第 2 轮复审的注入实验证明：只有②能在 r.before 翻倍时报警）
+	local drift
+	for _, row in ipairs(d.dev_rows) do
+		local byday = devmap[row.device]
+		local total = 0
+		if byday then
+			for _, v in pairs(byday) do total = total + v end
+		end
+		if total ~= row.minutes then
+			drift = (drift and (drift .. "; ") or "")
+				.. row.device .. " matrix=" .. total .. " != rows=" .. row.minutes
+		end
+	end
+	local total_ledger, total_source = 0, 0
+	for _, day in ipairs(d.days) do
+		for _, v in pairs(ledger[day.date]) do total_ledger = total_ledger + v end
+	end
+	for _, dt in ipairs(dates) do
+		for _, v in pairs(d.hist_key[dt] or {}) do total_source = total_source + v end
+	end
+	for _, r in ipairs(rrows) do total_source = total_source + r.before end
+	if total_ledger ~= total_source then
+		drift = (drift and (drift .. "; ") or "")
+			.. "ledger=" .. total_ledger .. " != source=" .. total_source
+	end
+	if drift then
+		d.invariant_drift = drift
+		pcall(function()
+			(require "luci.sys").log("parentcontrol: D12 invariant drift: " .. drift)
+		end)
+	end
+
 	-- 7) 重置记录（倒序，带条目名与设备名）
 	local rr = {}
 	for _, r in ipairs(d.resets) do
