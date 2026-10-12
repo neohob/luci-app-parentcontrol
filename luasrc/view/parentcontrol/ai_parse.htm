@@ -77,6 +77,12 @@
 					if (add.length && domainsField) {
 						domainsField.value = existing.concat(add).join('\n');
 					}
+					// A9（F-1 第二道防线）：有回应但既无直用项也无新域名 → 红字明确原因，不改 domains。
+					if (add.length === 0 && !(res.direct || []).length && !(res.domains || []).length) {
+						setMsg('<%=translate("AI 没有解析出合法域名，请手动填写域名或 IP")%>', false);
+						if (hint) hint.style.display = '';
+						return;
+					}
 					var note = '<%=translate("新增")%>' + add.length + '<%=translate("项")%>';
 					if (res.truncated) {
 						note += '<%=translate("（名称过长已截断）")%>';

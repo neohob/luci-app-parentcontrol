@@ -340,6 +340,11 @@ function M.parse(text, opts)
 	end
 
 	local ex = M.extract_domains(content)
+	if #ex.domains == 0 and #c.direct == 0 then
+		-- A9 第四类失败（复审 F-1）：AI 有回应但抽不出任何合法域名，也没有可直用的项 ——
+		-- 必须按失败红字处理，不得回落成绿色「新增 0 项」。
+		return { ok = false, error = T("AI 没有解析出合法域名，请手动填写域名或 IP"), raw = ex.raw }
+	end
 	return { ok = true, direct = c.direct, domains = ex.domains, raw = ex.raw }
 end
 
