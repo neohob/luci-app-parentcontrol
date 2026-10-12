@@ -30,6 +30,12 @@ local function weekday_cn(ymd)
 	return cn[w + 1] or ""
 end
 
+-- 只用于显示：YYYYMMDD → YYYY-MM-DD（date 字段仍是历史文件键与排序键，两者并存）
+local function date_iso(ymd)
+	if not ymd then return "" end
+	return (ymd:gsub("^(%d%d%d%d)(%d%d)(%d%d)$", "%1-%2-%3"))
+end
+
 -- 采集 + 分析
 function M.collect()
 	local d = tsv.read(false)
@@ -140,11 +146,21 @@ function M.collect()
 		local v = (d.hist[dt] or 0) + rst
 		if v > maxmin then maxmin = v end
 		d.days[#d.days + 1] = {
-			date = dt, minutes = v, weekday = weekday_cn(dt),
+			date = dt, date_iso = date_iso(dt), minutes = v, weekday = weekday_cn(dt),
 			reset = rst, has = (d.hist[dt] ~= nil),
 		}
 	end
 	d.days_max = maxmin
+
+	-- 日期列（与 d.days 同序）：供「按设备每日用量」矩阵的表头使用
+	d.day_cols = {}
+	for _, day in ipairs(d.days) do
+		d.day_cols[#d.day_cols + 1] = {
+			date = day.date, iso = day.date_iso,
+			label = day.date:sub(5, 6) .. "-" .. day.date:sub(7, 8),
+			weekday = day.weekday,
+		}
+	end
 
 	-- 4) 历史汇总（与柱状图、按条目占比同一个 minutes 口径）
 	local sum, cnt, mx = 0, 0, 0
@@ -202,6 +218,46 @@ function M.collect()
 	end
 	table.sort(drows, function(a, b) return a.minutes > b.minutes end)
 	d.dev_rows = drows
+
+	-- 6b) 按设备每日矩阵：hist_key[day][key] + 窗口内该 (day,key) 的重置量。
+	--     设备判定与上面「按设备分析」完全一致（只统计能映射到设备名的条目）。
+	local byday = {}
+	for _, day in ipairs(d.days) do byday[day.date] = {} end
+	for _, day in ipairs(d.days) do
+		local per = d.hist_key[day.date]
+		if per then
+			for key, v in pairs(per) do
+				byday[day.date][key] = (byday[day.date][key] or 0) + v
+			end
+		end
+	end
+	for _, r in ipairs(d.resets) do
+		local row = byday[r.date]
+		if row then row[r.key] = (row[r.key] or 0) + r.before end
+	end
+	local devmap = {}
+	for _, day in ipairs(d.days) do
+		for key, v in pairs(byday[day.date]) do
+			local ent = labels[key]
+			local dev = ent and ent.device
+			if dev and dev ~= "" then
+				devmap[dev] = devmap[dev] or {}
+				devmap[dev][day.date] = (devmap[dev][day.date] or 0) + v
+			end
+		end
+	end
+	d.dev_days = devmap
+	local ddrows = {}
+	for dev, by in pairs(devmap) do
+		local total = 0
+		for _, v in pairs(by) do total = total + v end
+		ddrows[#ddrows + 1] = { device = dev, total = total, by = by }
+	end
+	table.sort(ddrows, function(x, y)
+		if x.total ~= y.total then return x.total > y.total end
+		return x.device < y.device
+	end)
+	d.dev_day_rows = ddrows
 
 	-- 7) 重置记录（倒序，带条目名与设备名）
 	local rr = {}

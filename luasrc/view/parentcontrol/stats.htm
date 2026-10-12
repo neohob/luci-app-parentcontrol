@@ -1,4 +1,3 @@
-<%+cbi/valueheader%>
 <%
 	local stats = require "luci.model.cbi.parentcontrol.statsdata"
 	local d = stats.collect()
@@ -32,8 +31,11 @@
 	.pc-chart-x > div { flex: 1; text-align: center; overflow: hidden; }
 	.pc-kv { margin: 4px 0; }
 	.pc-kv b { color: #ccc; }
+	.pc-matrix th, .pc-matrix td { white-space: nowrap; text-align: right; }
+	.pc-matrix th:first-child, .pc-matrix td:first-child { text-align: left; }
 </style>
 
+<div class="cbi-map">
 <div class="pc-dash">
 	<div class="pc-kv">
 		<b><%=pcdata(m.date or "-")%></b>
@@ -96,7 +98,7 @@
 				local h = (d.days_max > 0) and math.floor(day.minutes * 100 / d.days_max) or 0
 			%>
 			<div class="<%=day.has and '' or 'nodata'%>" style="height:<%=h%>%"
-				title="<%=pcdata(day.date)%><%=day.has and ('  '..day.minutes..' 分钟') or '  无数据'%>"></div>
+				title="<%=pcdata(day.date_iso)%><%=(day.minutes and day.minutes > 0) and ('  '..day.minutes..' 分钟') or '  无数据'%>"></div>
 			<% end %>
 		</div>
 		<div class="pc-chart-x">
@@ -141,6 +143,37 @@
 		<% end %>
 	<% end %>
 
+	<h3><%=T("按设备每日用量（最近 30 天）")%></h3>
+	<% if #d.dev_day_rows == 0 then %>
+		<div class="muted"><%=T("还没有按设备统计的用量数据。")%></div>
+	<% else %>
+	<div style="overflow-x:auto">
+		<table class="pc-matrix">
+			<tr>
+				<th><%=T("设备")%></th>
+				<% for _, c in ipairs(d.day_cols) do %>
+				<th title="<%=pcdata(c.iso)%>"><%=pcdata(c.label)%></th>
+				<% end %>
+				<th><%=T("合计")%></th>
+			</tr>
+			<% for _, r in ipairs(d.dev_day_rows) do %>
+			<tr>
+				<td><%=pcdata(r.device)%></td>
+				<% for _, c in ipairs(d.day_cols) do
+					local v = r.by[c.date]
+				%>
+				<td><%=v and v or "-"%></td>
+				<% end %>
+				<td><b><%=r.total%></b></td>
+			</tr>
+			<% end %>
+		</table>
+	</div>
+	<div class="muted" style="margin-top:6px">
+		<%=T("每格是该设备当天计入额度统计的分钟数；「-」= 当天没有该设备的用量记录。列顺序与上方柱状图一致，可横向滚动。")%>
+	</div>
+	<% end %>
+
 	<h3><%=T("重置记录")%></h3>
 	<% if #d.reset_rows == 0 then %>
 		<div class="muted"><%=T("还没有重置记录。在额度用完时点「重置」可以立刻清零，每次重置都会记在这里。")%></div>
@@ -182,4 +215,14 @@
 		</td></tr>
 	</table>
 </div>
-<%+cbi/valuefooter%>
+</div>
+<script type="text/javascript">//<![CDATA[
+	function pcResetQuota(k) {
+		if (!k) return;
+		if (!confirm('<%=translate("确定把这个条目今天的额度清零？此操作会记入重置记录。")%>')) return;
+		XHR.post('<%=url("admin/control/parentcontrol/reset_quota")%>',
+			{ key: k, token: '<%=token%>' },
+			function() { location.reload(); });
+	}
+//]]>
+</script>
