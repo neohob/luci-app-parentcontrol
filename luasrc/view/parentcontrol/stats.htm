@@ -34,6 +34,11 @@
 	.pc-matrix th, .pc-matrix td { white-space: nowrap; text-align: right; }
 	.pc-matrix th:first-child, .pc-matrix td:first-child { text-align: left; }
 	.pc-dev-group td { background: rgba(255, 255, 255, 0.05); border-top: 2px solid #3c3c3c; color: #ccc; }
+	/* F3（A1 判据②）：「保存并应用 / 保存 / 复位」动作条由 dispatcher 的 cbi/footer 在
+	   页面层注入（stats.lua 仍是 cbi 节点，模板层删不掉；nofooter 会连 </form> 与主题
+	   页脚一起跳过，风险更大）—— 页内隐藏。判据 = 三按钮不可见（is_visible=false），
+	   DOM 存在可接受（见 design §9.9）。 */
+	.cbi-page-actions { display: none; }
 </style>
 
 <div class="cbi-map">
