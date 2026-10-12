@@ -203,9 +203,11 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 - 接口是**服务端**发的（路由器自己请求），浏览器不直连、API Key 不出内网；
   请求/响应走 `/tmp` 临时文件，不拼 shell 字符串。
 - 「**设置**」页有「AI 辅助解析」区块：填 `endpoint` / `model` / `apikey`，
-  点 **获取模型列表** 可以从 `{endpoint}/models` 拉候选。
+  点 **获取模型列表** 可以从 `{endpoint}/models` 拉候选
+  （**endpoint 只填基址**，不要带 `/models` 或 `/chat/completions`，否则会拼出重复路径）。
 - **失败不会自动回退**：未配置 endpoint/model、路由器缺 HTTP 客户端（`curl`/`uclient-fetch`/`wget` 全无）、
-  请求超时或非 2xx、返回不是 JSON、过滤后没有合法域名 —— 都会在按钮旁显示**明确原因**，
+  请求超时或非 2xx、返回不是 JSON、过滤后没有合法域名（会提示「AI 没有解析出合法域名，
+  请手动填写域名或 IP」）—— 都会在按钮旁显示**明确原因**，
   且**不改动**「域名/IP」里的内容，你可以手动填域名或 IP。
 - 需要运行时能上网；`curl`/`uclient-fetch`/`wget` 任一即可（访问 https 还需 `libustream-ssl` + `ca-bundle`）。
   这些**不是插件的硬依赖**，不进 `LUCI_DEPENDS`。
@@ -314,7 +316,7 @@ IPv4 侧的取网段逻辑与生成的规则**一字未动**。
 | `quota.*` | — | 共享额度池：`name` + 平日/节假日额度 |
 | `vacation.*` | — | 寒暑假区间：`name` + `start` + `end`（`MM-DD` 每年重复或 `YYYY-MM-DD` 绝对日期） |
 | 条目 `apps` | — | 要封锁的名称（应用/游戏/网站名，可混填域名/IP/CIDR）；只给人看与 AI 解析用，shell 不读 |
-| `ai.endpoint` | — | OpenAI 兼容接口基址（如 `http://192.168.1.10:11434/v1`）；留空 = 不使用 AI 解析 |
+| `ai.endpoint` | — | OpenAI 兼容接口基址（如 `http://192.168.1.10:11434/v1`，不要带 `/models` 或 `/chat/completions`）；留空 = 不使用 AI 解析 |
 | `ai.model` | — | 模型 id（AI 解析与模型列表都要） |
 | `ai.apikey` | — | 可选，Bearer 鉴权用 |
 
