@@ -544,9 +544,15 @@ _pc_ai_key() {
 }
 
 _pc_http_timeout() {
-	case "${PC_HTTP_TIMEOUT:-${PC_AI_TIMEOUT:-15}}" in
+	# F-R2-1：匹配与回显必须用**同一个**取过默认值的变量 —— 曾经 case 匹配
+	# ${PC_HTTP_TIMEOUT:-${PC_AI_TIMEOUT:-15}} 而 *) 分支回显未取默认的
+	# $PC_HTTP_TIMEOUT 原变量，生产环境（两变量都未设）回显空串，
+	# curl --max-time "" 秒挂，所有 pc_http 调用（AI + fetch_url）全灭。
+	local _v
+	_v="${PC_HTTP_TIMEOUT:-${PC_AI_TIMEOUT:-15}}"
+	case "$_v" in
 		''|*[!0-9]*) echo 15 ;;
-		*) echo "$PC_HTTP_TIMEOUT" ;;
+		*) echo "$_v" ;;
 	esac
 }
 
