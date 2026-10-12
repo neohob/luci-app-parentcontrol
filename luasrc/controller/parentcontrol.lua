@@ -1,6 +1,7 @@
 module("luci.controller.parentcontrol", package.seeall)
 
 local util = require "luci.util"
+local translate = require("luci.i18n").translate
 
 function index()
     if not nixio.fs.access("/etc/config/parentcontrol") then return end
@@ -10,12 +11,15 @@ function index()
 	e.dependent=false
 	e.acl_depends = { "luci-app-parentcontrol" }
 	entry({"admin", "control", "parentcontrol","weburl"}, cbi("parentcontrol/weburl"), _("网址过滤"), 20).leaf = true
-	entry({"admin", "control", "parentcontrol","quota"}, cbi("parentcontrol/quota"), _("使用限额"), 40).leaf = true
+	entry({"admin", "control", "parentcontrol","settings"}, cbi("parentcontrol/settings"), translate("设置"), 40).leaf = true
 	entry({"admin", "control", "parentcontrol","stats"}, cbi("parentcontrol/stats"), _("使用统计"), 45).leaf = true
 	-- 各模块的「详细设置」独立页（列表行用 extedit 跳过来，section id 在 arg[1]）
 	entry({"admin", "control", "parentcontrol","weburl_edit"}, cbi("parentcontrol/weburl_edit")).leaf = true
 	entry({"admin", "control", "parentcontrol","status"}, call("status")).leaf = true
 	entry({"admin", "control", "parentcontrol","reset_quota"}, call("reset_quota")).leaf = true
+	-- 仅 POST（test_post_security 拒绝非 POST）：AI 模型列表 / AI 域名解析
+	entry({"admin", "control", "parentcontrol","ai_models"}, call("ai_models")).leaf = true
+	entry({"admin", "control", "parentcontrol","ai_parse"}, call("ai_parse")).leaf = true
 end
 
 function status()
@@ -39,6 +43,33 @@ function reset_quota()
     end
     luci.http.prepare_content("application/json")
     luci.http.write_json({ ok = ok, key = key })
+end
+
+-- AI：从 {endpoint}/models 拉取模型候选。POST + CSRF（同 reset_quota 范式）。
+function ai_models()
+    if not require("luci.dispatcher").test_post_security() then return end
+    local ai = require "luci.model.cbi.parentcontrol.ai"
+    local endpoint = luci.http.formvalue("endpoint") or ""
+    local apikey = luci.http.formvalue("apikey") or ""
+    local res = ai.models(endpoint, apikey)
+    luci.http.prepare_content("application/json")
+    luci.http.write_json(res)
+end
+
+-- AI：把「应用/游戏/网站名称」解析成真实域名。POST + CSRF。
+function ai_parse()
+    if not require("luci.dispatcher").test_post_security() then return end
+    local ai = require "luci.model.cbi.parentcontrol.ai"
+    local text = luci.http.formvalue("text") or ""
+    local truncated = false
+    if #text > 2048 then
+        text = text:sub(1, 2048)
+        truncated = true
+    end
+    local res = ai.parse(text)
+    if truncated then res.truncated = true end
+    luci.http.prepare_content("application/json")
+    luci.http.write_json(res)
 end
 
 
