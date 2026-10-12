@@ -104,6 +104,8 @@ jobs:
           Maintainer: neohob
           Architecture: all
           Installed-Size: $SIZE
+          Conffiles:
+           /etc/config/parentcontrol
           Description: LuCI support for Parent Control (parentcontrol)
           EOF
           printf '/etc/config/parentcontrol\n' > "$STAGE/ctl/conffiles"
@@ -146,8 +148,10 @@ jobs:
           # 纯 Lua / shell 文件，与 CPU 架构无关。
           #
           #   sh <文件名>.run              安装或升级
+          #       （F-R5-1：/etc/config/* 与 /etc/parentcontrol/*.list 已存在时不覆盖，
+          #         新版本装成 *.pc-new 供对比，用户配置原样保留；其余文件照常覆盖）
           #   sh <文件名>.run uninstall    卸载
-          #       （保留 /etc/config/parentcontrol 与 /etc/parentcontrol 下的用量数据）
+          #       （/etc/config 与 /etc/parentcontrol 下的用户配置与用量数据一律保留，不删）
           #
           # 装完在 LuCI 里进「网络 -> 家长控制」。
           set -eu
@@ -155,6 +159,10 @@ jobs:
           APP=$APP
           INIT=parentcontrol
           VER=$FULL
+
+          # 安装根前缀（测试沙箱用）。非空时：所有目标路径装到 \$PC_DESTDIR 下，
+          # 并跳过 uci-defaults / enable / restart / clear_cache 等真机副作用。
+          PC_DESTDIR="\${PC_DESTDIR:-}"
 
           [ "\$(id -u)" = "0" ] || { echo "请用 root 运行" >&2; exit 1; }
 
@@ -178,10 +186,27 @@ jobs:
             echo "==> 安装 \$APP \$VER"
             while read -r p; do
               [ -n "\$p" ] || continue
-              mkdir -p "/\$(dirname "\$p")"
-              cp -f "\$TMP/x/data/\$p" "/\$p"
+              dest="\$PC_DESTDIR/\$p"
+              case "\$p" in
+                etc/config/*|etc/parentcontrol/*.list)
+                  # F-R5-1：用户配置/封锁清单已存在 → 不覆盖，装成 .pc-new 供对比合并
+                  if [ -e "\$dest" ]; then
+                    cp -f "\$TMP/x/data/\$p" "\$dest.pc-new"
+                    echo "  保留已有 \$p，新版本已存为 \$p.pc-new（可 diff 后自行合并）"
+                    continue
+                  fi
+                  ;;
+              esac
+              mkdir -p "\$(dirname "\$dest")"
+              cp -f "\$TMP/x/data/\$p" "\$dest"
             done < "\$FILES"
-            chmod 755 /etc/init.d/\$INIT
+            chmod 755 "\$PC_DESTDIR/etc/init.d/\$INIT"
+
+            if [ -n "\$PC_DESTDIR" ]; then
+              # 沙箱/重定向模式：不动真机（uci-defaults/enable/restart/缓存清理全跳过）
+              echo "==> 完成（PC_DESTDIR=\$PC_DESTDIR，已跳过 uci-defaults/enable/restart）"
+              return 0
+            fi
 
             # 首装脚本：与 opkg 的 uci-defaults 行为一致（执行后删除）
             if [ -f "/etc/uci-defaults/\$APP" ]; then
@@ -197,27 +222,32 @@ jobs:
 
           uninstall_pkg() {
             echo "==> 卸载 \$APP"
-            if [ -x "/etc/init.d/\$INIT" ]; then
+            if [ -z "\$PC_DESTDIR" ] && [ -x "/etc/init.d/\$INIT" ]; then
               /etc/init.d/\$INIT stop    2>/dev/null || true
               /etc/init.d/\$INIT disable 2>/dev/null || true
             fi
             while read -r p; do
               [ -n "\$p" ] || continue
-              if [ "\$p" = "etc/config/parentcontrol" ]; then
-                continue
-              fi
-              rm -f "/\$p"
+              case "\$p" in
+                etc/config/*|etc/parentcontrol/*)
+                  # F-R5-1：用户配置与用量数据一律保留（与 opkg 的 Conffiles 行为一致）
+                  continue
+                  ;;
+              esac
+              rm -f "\$PC_DESTDIR/\$p"
             done < "\$FILES"
             # 顺带清掉空目录（best effort）
             sort -r "\$FILES" | while read -r p; do
               [ -n "\$p" ] || continue
-              rmdir "/\$(dirname "\$p")" 2>/dev/null || true
+              rmdir "\$PC_DESTDIR/\$(dirname "\$p")" 2>/dev/null || true
             done
-            uci -q delete firewall.parentcontrol 2>/dev/null || true
-            uci -q commit firewall 2>/dev/null || true
-            uci -q delete ucitrack.@parentcontrol[-1] 2>/dev/null || true
-            uci -q commit ucitrack 2>/dev/null || true
-            clear_cache
+            if [ -z "\$PC_DESTDIR" ]; then
+              uci -q delete firewall.parentcontrol 2>/dev/null || true
+              uci -q commit firewall 2>/dev/null || true
+              uci -q delete ucitrack.@parentcontrol[-1] 2>/dev/null || true
+              uci -q commit ucitrack 2>/dev/null || true
+              clear_cache
+            fi
             echo "==> 已卸载（配置与用量数据仍保留）"
           }
 
