@@ -52,16 +52,25 @@ e = t:option(Flag, "enable", translate("开启"))
 e.rmempty = false
 e.default = '1'
 
-t:option(Value, 'remarks', translate('备注'))
+-- R6：一个条目 = 一个要封锁的名称。名称列显示 remarks（原「备注」列并入这里），
+-- 存量数据兜底：旧 apps 大框的首项 → domains 首项（老条目照常显示，零迁移）。
+e = t:option(DummyValue, "remarks", translate("名称"))
+e.cfgvalue = function(self, section)
+	local v = self.map:get(section, "remarks") or ""
+	if v ~= "" then return v end
+	local first = (self.map:get(section, "apps") or ""):match("[^,;%s、，；]+")
+	if first then return first end
+	first = (self.map:get(section, "domains") or ""):match("[^,;%s、，；]+")
+	if first then return first end
+	return "-"
+end
+e.rmempty = true
 
 e = t:option(DummyValue, "mac", translate("设备"))
 e.cfgvalue = ui.mac
 e.rmempty = true
 
 e = t:option(DummyValue, "ip", translate("静态IP"))
-e.rmempty = true
-
-e = t:option(DummyValue, "apps", translate("名称"))
 e.rmempty = true
 
 e = t:option(DummyValue, "domains", translate("域名/IP"))

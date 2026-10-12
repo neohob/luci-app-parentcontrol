@@ -28,11 +28,11 @@
 		}
 
 		btn.addEventListener('click', function () {
-			var appsField = pcField('apps');
+			var nameField = pcField('remarks');
 			var domainsField = pcField('domains');
-			var text = appsField ? appsField.value : '';
+			var text = nameField ? nameField.value : '';
 			if (text.replace(/[\s,;、，；]+/g, '') === '') {
-				pcSetMsg(msg, '<%=translate("请先在上面填写要封锁的名称或域名")%>', false);
+				pcSetMsg(msg, '<%=translate("请先在上方填写要封锁的名称")%>', false);
 				return;
 			}
 			pcSetMsg(msg, '<%=translate("正在解析…")%>', true);
