@@ -23,9 +23,12 @@ e = t:option(DummyValue, "pc_usage_link", translate("用量看板"),
 e.template = "parentcontrol/pcusagelink"
 
 -- AI 辅助解析：把「应用/游戏/网站名称」翻译成真实域名（在「编辑条目」页手点按钮触发）。
--- 匿名 TypedSection：老配置没有 ai 段时按「未配置」处理，保存时自动创建（无需迁移）。
+-- F1：升级用户的旧配置可能没有 ai 段 —— TypedSection 对 0 段连字段都不渲染、也不给
+-- 「添加」按钮，所以必须 addremove=true 让 UI 能自建段（与 quota/vacation 同型）；
+-- .run 安装侧另有「无 ai 段则 uci add」自愈（见 release.yml install_pkg），双保险。
 t = a:section(TypedSection, "ai", translate("AI 辅助解析"))
 t.anonymous = true
+t.addremove = true
 
 e = t:option(Value, "endpoint", translate("AI endpoint"),
 	translate("OpenAI 兼容接口基址，例如 http://192.168.1.10:11434/v1；只填基址，不要带 /models 或 /chat/completions。留空 = 不使用 AI 解析。"))

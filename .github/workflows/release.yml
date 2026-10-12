@@ -214,6 +214,13 @@ jobs:
               rm -f "/etc/uci-defaults/\$APP"
             fi
 
+            # F1：升级用户的旧配置没有 config ai 段（TypedSection 对 0 段不渲染字段、
+            # 也不给「添加」按钮）—— 无则补建空段，让 AI 设置可达。幂等：已有段不动。
+            if ! uci -q get parentcontrol.@ai[0] >/dev/null 2>&1; then
+              uci -q add parentcontrol ai >/dev/null 2>&1 || true
+              uci -q commit parentcontrol 2>/dev/null || true
+            fi
+
             clear_cache
             /etc/init.d/\$INIT enable  2>/dev/null || true
             /etc/init.d/\$INIT restart 2>/dev/null || true
