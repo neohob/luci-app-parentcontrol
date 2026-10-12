@@ -689,7 +689,7 @@ prune_usage() {
 			if [ -n "$_cut" ]; then
 				awk -F'\t' -v cut="$_cut" '$1 >= cut' "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
 			else
-				tail -n 200 "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+				tail -n 2000 "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
 			fi
 		fi
 	fi
@@ -873,9 +873,10 @@ stats_tsv() {
 			awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
 		done
 		# 重置记录：reset <YYYYMMDD> <HH:MM:SS> <key> <重置前已用分钟>
-		# 只取最近 200 条事件，30 天窗口由 Lua 侧按日期过滤（shell 不做日期算术）。
+		# 取最近 2000 条事件（与写日志侧 reset_quota 的 tail -n 2000 保留上限对齐，见 RESET_LOG 注释），
+		# 30 天窗口由 Lua 侧按日期过滤（shell 不做日期算术）。
 		if [ -f "$RESET_LOG" ]; then
-			tail -n 200 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+			tail -n 2000 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
 		fi
 		[ -n "$_dump" ] && rm -f "$_dump"
 	fi
