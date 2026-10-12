@@ -27,6 +27,18 @@
 			return out;
 		}
 
+		// F4：res.direct / res.domains 必须是「字符串数组」才收。后端空列表已省键，
+		// 但个别 LuCI 版本的 write_json 会把空表编成 {}（对象），concat 会把对象当
+		// 元素追加成 "[object Object]" 脏数据 —— Array.isArray + string 过滤双保险。
+		function toList(v) {
+			if (!Array.isArray(v)) return [];
+			var out = [];
+			for (var i = 0; i < v.length; i++) {
+				if (typeof v[i] === 'string' && v[i] !== '') out.push(v[i]);
+			}
+			return out;
+		}
+
 		btn.addEventListener('click', function () {
 			var nameField = pcField('remarks');
 			var domainsField = pcField('domains');
@@ -52,7 +64,9 @@
 						seen[existing[i]] = true;
 					}
 					var add = [];
-					var items = (res.direct || []).concat(res.domains || []);
+					var direct = toList(res.direct);
+					var domains = toList(res.domains);
+					var items = direct.concat(domains);
 					for (var j = 0; j < items.length; j++) {
 						var it = items[j];
 						if (!it || seen[it]) continue;
@@ -60,7 +74,7 @@
 						add.push(it);
 					}
 					// A9（F-1 第二道防线）：有回应但既无直用项也无新域名 → 红字明确原因，不改 domains。
-					if (add.length === 0 && !(res.direct || []).length && !(res.domains || []).length) {
+					if (add.length === 0 && direct.length === 0 && domains.length === 0) {
 						pcSetMsg(msg, '<%=translate("AI 没有解析出合法域名，请手动填写域名或 IP")%>', false);
 						if (hint) hint.style.display = '';
 						return;
