@@ -188,6 +188,7 @@ function M.collect()
 	d.hist_max = mx
 
 	-- 5) 按条目（最近 30 天合计 + 占比）—— 台账按 key 归约（重置已在台账里，不再另加）
+	--    R7：行带 device 维度，排序挪到 6) 之后按设备分组（见 devrank）
 	local labels = {}
 	for _, e in ipairs(d.entries) do labels[e.key] = e end
 	for _, day in ipairs(d.days) do
@@ -206,8 +207,6 @@ function M.collect()
 			share = (sum > 0) and math.floor(v * 100 / sum + 0.5) or 0,
 		}
 	end
-	table.sort(rows, function(a, b) return a.minutes > b.minutes end)
-	d.key_rows = rows
 
 	-- 6) 按设备（把该设备下各条目 30 天用量相加；设备口径：能映射到设备名 device ~= ""）
 	for _, r in ipairs(rows) do
@@ -223,6 +222,19 @@ function M.collect()
 	end
 	table.sort(drows, function(a, b) return a.minutes > b.minutes end)
 	d.dev_rows = drows
+
+	-- R7：key_rows 按设备分组排序 —— 设备顺序沿用 dev_rows（30 天用量多者在前），
+	-- 组内按条目分钟降序；映射不到设备名（device == ""）的条目整体排最后。
+	-- 纯归约：只重排上面的 rows，不动台账、不动数据源口径，也不动 D12 守卫。
+	local devrank = {}
+	for i, dr in ipairs(drows) do devrank[dr.device] = i end
+	table.sort(rows, function(x, y)
+		local rx = x.device ~= "" and devrank[x.device] or math.huge
+		local ry = y.device ~= "" and devrank[y.device] or math.huge
+		if rx ~= ry then return rx < ry end
+		return x.minutes > y.minutes
+	end)
+	d.key_rows = rows
 
 	-- 6b) 按设备每日矩阵：台账按 (设备, day) 归约；设备判定与「按设备分析」同一口径
 	--     （能映射到设备名 device ~= "" 的条目才进表，与上面 dev_totals 完全一致）。

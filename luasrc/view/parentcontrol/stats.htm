@@ -33,6 +33,7 @@
 	.pc-kv b { color: #ccc; }
 	.pc-matrix th, .pc-matrix td { white-space: nowrap; text-align: right; }
 	.pc-matrix th:first-child, .pc-matrix td:first-child { text-align: left; }
+	.pc-dev-group td { background: rgba(255, 255, 255, 0.05); border-top: 2px solid #3c3c3c; color: #ccc; }
 </style>
 
 <div class="cbi-map">
@@ -119,20 +120,30 @@
 			<%=T("最高一天")%> <b><%=d.hist_max%></b> <%=T("分钟")%>
 		</div>
 		<% if #d.key_rows > 0 then %>
-		<h3><%=T("按条目分析（最近 30 天）")%></h3>
+		<h3><%=T("按设备+条目（最近 30 天）")%></h3>
 		<table>
-			<tr><th><%=T("名称")%></th><th><%=T("设备")%></th><th class="num"><%=T("合计")%></th>
+			<tr><th><%=T("名称条目")%></th><th class="num"><%=T("合计")%></th>
 				<th class="num"><%=T("日均")%></th><th><%=T("占比")%></th></tr>
-			<% for _, r in ipairs(d.key_rows) do %>
+			<% local cur_dev = nil
+			for _, r in ipairs(d.key_rows) do
+				if r.device ~= cur_dev then
+					cur_dev = r.device
+			%>
+			<tr class="pc-dev-group">
+				<td colspan="4"><b><%=T("设备")%>：<%=pcdata(r.device ~= "" and r.device or T("未指定设备"))%></b></td>
+			</tr>
+			<% end %>
 			<tr>
 				<td><%=pcdata(r.name)%></td>
-				<td class="muted"><%=pcdata(r.device or "")%></td>
 				<td class="num"><%=r.minutes%> <%=T("分")%></td>
 				<td class="num"><%=math.floor(r.minutes / (d.hist_days > 0 and d.hist_days or 1) + 0.5)%> <%=T("分")%></td>
 				<td><%=bar(r.share)%> <span class="muted"><%=r.share%>%</span></td>
 			</tr>
 			<% end %>
 		</table>
+		<div class="muted" style="margin-top:6px">
+			<%=T("条目按设备分组展示；条目即「要封锁的名称」（按其域名/IP 计时）。")%>
+		</div>
 		<% end %>
 		<% if #d.dev_rows > 0 then %>
 		<h3><%=T("按设备分析（最近 30 天）")%></h3>
@@ -205,7 +216,7 @@
 			（<%=T("一分钟内目标流量低于此值不计；心跳/通知通常 < 5KB，真实访问 200KB 起")%>）</td></tr>
 		<tr><td><%=T("历史保留")%></td><td class="muted"><%=m.keep or 90%> <%=T("天")%></td></tr>
 		<tr><td><%=T("计时口径")%></td><td class="muted">
-			<%=T("每个条目只算「它自己规则命中的流量」：机器条目=该设备全部流量；协议条目=该端口的流量；网址条目=目标 IP + 明文 DNS/SNI 命中的流量。")%>
+			<%=T("每个条目只算「它自己规则命中的流量」：机器条目=该设备全部流量；协议条目=该端口的流量；名称条目（域名/IP）=目标 IP + 明文 DNS/SNI 命中的流量。")%>
 		</td></tr>
 		<tr><td><%=T("三态")%></td><td class="muted">
 			<%=T("① 可用时段之外→封（时段外的流量不计入额度）② 时段内且额度没用完→放行 ③ 额度用完→封到当天 24:00。额度按自然日结算、不结转。")%>
@@ -214,7 +225,7 @@
 			<%=T("额度条目可点「重置额度」立刻清零今天的用量（并写入重置记录）。重置不影响已累计的历史与实际用量。")%>
 		</td></tr>
 		<tr><td><%=T("可能少计的情况")%></td><td class="muted">
-			<%=T("网址条目在 IPv4 上只能按解析出的目标 IP 计时，CDN 换到全新段时会短暂漏计；QUIC/HTTP3 的 SNI 加密，任何方案都拦不到。")%>
+			<%=T("名称条目（按其域名/IP 计时）在 IPv4 上只能按解析出的目标 IP 匹配，CDN 换到全新段时会短暂漏计；QUIC/HTTP3 的 SNI 加密，任何方案都拦不到。")%>
 		</td></tr>
 	</table>
 </div>
