@@ -28,7 +28,7 @@ t = a:section(TypedSection, "ai", translate("AI 辅助解析"))
 t.anonymous = true
 
 e = t:option(Value, "endpoint", translate("AI endpoint"),
-	translate("OpenAI 兼容接口基址，例如 http://192.168.1.10:11434/v1。留空 = 不使用 AI 解析。"))
+	translate("OpenAI 兼容接口基址，例如 http://192.168.1.10:11434/v1；只填基址，不要带 /models 或 /chat/completions。留空 = 不使用 AI 解析。"))
 e.placeholder = "http://192.168.1.10:11434/v1"
 e.rmempty = true
 

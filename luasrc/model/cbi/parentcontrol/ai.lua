@@ -11,6 +11,9 @@
 local i18n = require "luci.i18n"
 local sys  = require "luci.sys"
 
+-- F-7：临时文件限权用（keyfile 含 API Key）。nixio.fs 缺失时降级为不限权（不致命）。
+local okfs, fs = pcall(require, "nixio.fs")
+
 local function T(s) return i18n.translate(s) end
 
 local M = {}
@@ -70,7 +73,9 @@ function M.classify(text)
 			direct[#direct + 1] = tok
 		elseif tok:match(RE_IPV4) then                 -- 纯 IPv4
 			direct[#direct + 1] = tok
-		elseif tok:find(":", 1, true) then             -- IPv6 字面量
+		elseif tok:match("^[%x:]+$") and select(2, tok:gsub(":", "")) >= 2 then
+			-- F-8：真 IPv6 形态才直用（仅十六进制与冒号、至少两个冒号），
+			-- 「抖音:短视频」这类含冒号的名称必须落到 names 送 AI。
 			direct[#direct + 1] = tok
 		elseif tok:match(RE_DOMAIN) then               -- 已是域名形态
 			direct[#direct + 1] = tok:lower()
@@ -176,6 +181,12 @@ local function shq(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+-- F-7：临时文件创建后收紧为 0600（384 = 十进制 0o600；不拼 shell 字符串）。
+-- 先建好再让 shell 重定向复用同一 inode（> 截断不改权限）。
+local function tighten(path)
+	if okfs and fs and fs.chmod then pcall(fs.chmod, path, 384) end
+end
+
 local function readfile(p)
 	local f = io.open(p, "r")
 	if not f then return nil end
@@ -189,25 +200,32 @@ local function http_run(method, url, body, apikey)
 	local out = tmpfile("out")
 	local infile, keyfile
 
+	-- 先建 out（0600）：pc_http 的重定向只截断、不重建，权限得以保留
+	local f = io.open(out, "w")
+	if f then f:close() end
+	tighten(out)
+
 	-- PC_AI_TIMEOUT 只允许数字，防止环境变量注入。
 	local timeout = (os.getenv("PC_AI_TIMEOUT") or ""):match("^%d+$") or "15"
 	local parts = { "PC_AI_TIMEOUT=" .. timeout }
 
 	if apikey and apikey ~= "" then
 		keyfile = tmpfile("key")
-		local f = io.open(keyfile, "w")
-		if f then f:write(apikey); f:close() end
+		local kf = io.open(keyfile, "w")
+		if kf then kf:write(apikey); kf:close() end
+		tighten(keyfile)
 		parts[#parts + 1] = "PC_AI_KEY_FILE=" .. shq(keyfile)
 	end
 
 	if body ~= nil then
 		infile = tmpfile("in")
-		local f = io.open(infile, "w")
-		if not f then
+		local inf = io.open(infile, "w")
+		if not inf then
 			return nil, T("无法创建临时文件")
 		end
-		f:write(body)
-		f:close()
+		inf:write(body)
+		inf:close()
+		tighten(infile)
 	end
 
 	local cmd = table.concat(parts, " ")
@@ -250,13 +268,11 @@ end
 
 -- 从 {endpoint}/models 拉取模型候选列表（OpenAI 兼容 GET /models）。
 function M.models(endpoint, apikey)
+	local conf = M.config()
 	endpoint = trim(endpoint or "")
-	apikey = apikey or ""
-	if endpoint == "" then
-		local conf = M.config()
-		endpoint = conf.endpoint
-		if apikey == "" then apikey = conf.apikey end
-	end
+	if endpoint == "" then endpoint = trim(conf.endpoint or "") end
+	-- F-9：apikey 为空时无条件回落已保存值（与 M.parse 对称），不再只挂在 endpoint == "" 分支里
+	if apikey == nil or apikey == "" then apikey = conf.apikey or "" end
 	if endpoint == "" then
 		return { ok = false, error = T("请先填写 AI endpoint（以 http:// 或 https:// 开头）") }
 	end
