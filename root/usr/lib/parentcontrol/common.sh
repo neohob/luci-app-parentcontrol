@@ -589,12 +589,12 @@ $(head -c 256 "$3" 2>/dev/null | tr '\r' '\n')"
 }
 
 pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
-	local _m _u _o _i _t _k _err _r _st
+	local _m _u _o _i _t _k _err _r _st _cl _h _n
 	_m="$1"; _u="$2"; _o="$3"; _i=""
 	if [ "$#" -ge 4 ]; then _i="$4"; shift 4; else shift 3; fi
 	_t=$(_pc_http_timeout); _k=$(_pc_ai_key); _err="${_o}.err"
-	# "$@" 此时 = 调用方附加请求头（每个一个参数）。鉴权头（PC_AI_KEY_FILE 单点注入）
-	# 与 POST 的 Content-Type 在这里前置补齐：
+	# "$@" 此时 = 调用方附加请求头（每个一个参数，裸 "Name: value" 串）。鉴权头
+	# （PC_AI_KEY_FILE 单点注入）与 POST 的 Content-Type 在这里前置补齐。
 	if [ -n "$_k" ]; then set -- "Authorization: Bearer $_k" "$@"; fi
 	if [ "$_m" = "POST" ]; then
 		set -- "Content-Type: application/json" "$@"
@@ -602,6 +602,31 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		[ -f "$_i" ] || { _pc_ai_fail "$_o" "请求体临时文件不存在：$_i"; return 1; }
 	fi
 	if command -v curl >/dev/null 2>&1; then
+		_cl="curl"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		_cl="uclient-fetch"
+	elif command -v wget >/dev/null 2>&1; then
+		_cl="wget"
+	else
+		_pc_ai_fail "$_o" "路由器缺少 HTTP 客户端，请安装 curl 或 uclient-fetch（访问 https 还需 libustream-ssl 与 ca-bundle）"
+		return 1
+	fi
+	# F-R2-2：头串必须用客户端认的 flag 形态传 —— curl 用 `-H <h>`，uclient-fetch 与
+	# busybox-wget 用 `--header=<h>`（长选项只认 = 形态）。绝不能把头串作裸位置参数
+	# 传给客户端：那会落在 URL 位置，curl 把它当第二个 URL 且 exit 0 静默假成功，
+	# Bearer/Content-Type 从未真正发出（复审实弹抓包复现过）。
+	# 实现：for 词表在循环开始前展开完毕，循环内 set -- 只往尾部追加包装副本，
+	# 最后把前段的裸头串 shift 掉 —— "$@" 就地变成包装后的 argv。
+	_n=$#
+	for _h in "$@"; do
+		if [ "$_cl" = "curl" ]; then
+			set -- "$@" "-H" "$_h"
+		else
+			set -- "$@" "--header=$_h"
+		fi
+	done
+	shift "$_n"
+	if [ "$_cl" = "curl" ]; then
 		# curl -f：4xx/5xx 自带可靠失败判定（三客户端里唯一，见 D10）
 		if [ "$_m" = "POST" ]; then
 			curl -fsS --max-time "$_t" --data-binary "@$_i" "$@" "$_u" > "$_o" 2>"$_err"
@@ -611,7 +636,7 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
 		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 		_pc_ai_fail "$_o" "curl 请求失败：${_r:-HTTP 错误或网络不可达}"
-	elif command -v uclient-fetch >/dev/null 2>&1; then
+	elif [ "$_cl" = "uclient-fetch" ]; then
 		if [ "$_m" = "POST" ]; then
 			uclient-fetch -q -T "$_t" -O "$_o" --post-file="$_i" "$@" "$_u" >/dev/null 2>"$_err"
 		else
@@ -627,7 +652,7 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		fi
 		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 		_pc_ai_fail "$_o" "uclient-fetch 请求失败：${_r:-HTTP 错误或网络不可达}"
-	elif command -v wget >/dev/null 2>&1; then
+	else # wget（_cl 探测已保证非 curl/uclient-fetch 必为 wget）
 		if [ "$_m" = "POST" ]; then
 			wget -q -T "$_t" -O "$_o" --post-file="$_i" "$@" "$_u" >/dev/null 2>"$_err"
 		else
@@ -643,7 +668,5 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		fi
 		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 		_pc_ai_fail "$_o" "wget 请求失败：${_r:-HTTP 错误或网络不可达}"
-	else
-		_pc_ai_fail "$_o" "路由器缺少 HTTP 客户端，请安装 curl 或 uclient-fetch（访问 https 还需 libustream-ssl 与 ca-bundle）"
 	fi
 }
