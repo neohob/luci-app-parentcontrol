@@ -26,3 +26,4 @@ dist/
 
 # herdr 多 agent 流水线编排脚本（本地工具，不随产品公开）
 .herdr/
+.playwright-mcp/
