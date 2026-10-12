@@ -32,9 +32,17 @@ e = t:option(Value, "ip", translate("静态IP/主机名"),
 	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
 e.rmempty = true
 
-e = t:option(Value, "domains", translate("关键词/域名<font color=\"green\">(逗号分隔)</font>"),
-	translate("填域名（apex 覆盖子域），或直接填 CIDR。"))
+e = t:option(TextValue, "apps", translate("要封锁的名称") .. '<font color="green">' .. translate("(逗号或换行分隔)") .. '</font>',
+	translate("填应用/游戏/网站名称（中英文均可），也可直接填域名或 IP/CIDR。原始域名/IP/CIDR 会直接生效；名称部分点下面的「AI 解析」换成真实域名。"))
 e.rmempty = true
+
+e = t:option(TextValue, "domains", translate("域名/IP") .. '<font color="green">' .. translate("(生效列表，逗号或换行分隔)") .. '</font>',
+	translate("真正生效的列表：这里填的域名会由路由器解析成 IP，并按目标 IP 封锁（IPv4 上无法按域名或文本内容匹配）。「AI 解析」的结果会追加到这里。"))
+e.rmempty = true
+
+e = t:option(DummyValue, "pc_ai_parse", translate("AI 解析"),
+	translate("把上面的名称交给 AI，换成真实域名并追加到「域名/IP」。"))
+e.template = "parentcontrol/ai_parse"
 
 parts.add_profile(t, "sd", translate("平日"))
 parts.add_profile(t, "hd", translate("节假日"))

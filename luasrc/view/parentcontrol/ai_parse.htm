@@ -1,0 +1,94 @@
+<%+cbi/valueheader%>
+<div>
+	<p class="cbi-value-description">
+		<%=translate("点「AI 解析」：已经像域名/IP/CIDR 的项会直接放进「域名/IP」；其余名称（如应用名、游戏名）交给 AI 换成真实域名后追加进去。已存在的不重复添加，原内容不会被覆盖。")%>
+	</p>
+	<button type="button" id="pc-ai-parse-btn" class="cbi-button cbi-button-action"><%=translate("AI 解析")%></button>
+	<span id="pc-ai-parse-msg" style="margin-left:8px"></span>
+	<div id="pc-ai-parse-hint" class="cbi-value-description" style="display:none">
+		<%=translate("解析失败不影响已填内容，可手动填写域名或 IP。")%>
+	</div>
+</div>
+<script type="text/javascript">//<![CDATA[
+	(function () {
+		var btn = document.getElementById('pc-ai-parse-btn');
+		var msg = document.getElementById('pc-ai-parse-msg');
+		var hint = document.getElementById('pc-ai-parse-hint');
+		if (!btn) return;
+
+		function setMsg(text, ok) {
+			if (!msg) return;
+			msg.style.color = ok ? 'green' : 'red';
+			msg.textContent = text;
+		}
+
+		function splitItems(v) {
+			var out = [];
+			if (!v) return out;
+			var parts = v.split(/[\s,;、，；]+/);
+			for (var i = 0; i < parts.length; i++) {
+				if (parts[i] !== '') out.push(parts[i]);
+			}
+			return out;
+		}
+
+		function parseReply(x) {
+			if (x && typeof x.responseText === 'string') {
+				try { return JSON.parse(x.responseText); } catch (e) { return null; }
+			}
+			if (x && typeof x === 'object') return x;
+			return null;
+		}
+
+		btn.addEventListener('click', function () {
+			// R10：新式控件可能渲染成 textarea 也可能渲染成 input，两个都试。
+			var appsField = document.querySelector('textarea[name$=".apps"], input[name$=".apps"]');
+			var domainsField = document.querySelector('textarea[name$=".domains"], input[name$=".domains"]');
+			var text = appsField ? appsField.value : '';
+			if (text.replace(/[\s,;、，；]+/g, '') === '') {
+				setMsg('<%=translate("请先在上面填写要封锁的名称或域名")%>', false);
+				return;
+			}
+			setMsg('<%=translate("正在解析…")%>', true);
+			if (hint) hint.style.display = 'none';
+			XHR.post('<%=url("admin/control/parentcontrol/ai_parse")%>',
+				{ text: text, token: '<%=token%>' },
+				function (x) {
+					var res = parseReply(x);
+					if (!res || !res.ok) {
+						setMsg((res && res.error) ? res.error : '<%=translate("解析失败，请检查 AI 设置")%>', false);
+						if (hint) hint.style.display = '';
+						return;
+					}
+					// 追加而不覆盖：保留原列表，只补入新项（已存在的不重复添加）。
+					var existing = splitItems(domainsField ? domainsField.value : '');
+					var seen = {};
+					for (var i = 0; i < existing.length; i++) {
+						seen[existing[i]] = true;
+					}
+					var add = [];
+					var items = (res.direct || []).concat(res.domains || []);
+					for (var j = 0; j < items.length; j++) {
+						var it = items[j];
+						if (!it || seen[it]) continue;
+						seen[it] = true;
+						add.push(it);
+					}
+					if (add.length && domainsField) {
+						domainsField.value = existing.concat(add).join('\n');
+					}
+					var note = '<%=translate("新增")%>' + add.length + '<%=translate("项")%>';
+					if (res.truncated) {
+						note += '<%=translate("（名称过长已截断）")%>';
+					}
+					setMsg(note + '<%=translate("，确认后点「保存并应用」")%>', true);
+				},
+				function () {
+					setMsg('<%=translate("请求失败，请检查网络后重试")%>', false);
+					if (hint) hint.style.display = '';
+				});
+		});
+	})();
+//]]>
+</script>
+<%+cbi/valuefooter%>
