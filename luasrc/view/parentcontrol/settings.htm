@@ -1,0 +1,67 @@
+<% include("cbi/map") %>
+<datalist id="pc-ai-models"></datalist>
+<script type="text/javascript">//<![CDATA[
+	(function () {
+		var btn = document.getElementById('pc-ai-models-btn');
+		var msg = document.getElementById('pc-ai-models-msg');
+		var list = document.getElementById('pc-ai-models');
+
+		function field(suffix) {
+			return document.querySelector('textarea[name$=".' + suffix + '"], input[name$=".' + suffix + '"]');
+		}
+
+		function setMsg(text, ok) {
+			if (!msg) return;
+			msg.style.color = ok ? 'green' : 'red';
+			msg.textContent = text;
+		}
+
+		// 关联 datalist：让「模型名称」输入框出现候选下拉
+		var modelInput = field('model');
+		if (modelInput && modelInput.tagName === 'INPUT') {
+			modelInput.setAttribute('list', 'pc-ai-models');
+		}
+
+		if (btn) btn.addEventListener('click', function () {
+			var ep = field('endpoint');
+			var ak = field('apikey');
+			setMsg('<%=translate("正在获取…")%>', true);
+			XHR.post('<%=url("admin/control/parentcontrol/ai_models")%>',
+				{
+					endpoint: ep ? ep.value : '',
+					apikey: ak ? ak.value : '',
+					token: '<%=token%>'
+				},
+				function (x) {
+					var res = null;
+					if (x && x.responseText) {
+						try { res = JSON.parse(x.responseText); } catch (e) { res = null; }
+					} else if (x && typeof x === 'object') {
+						res = x;
+					}
+					if (!res || !res.ok) {
+						setMsg((res && res.error) ? res.error : '<%=translate("获取失败，请检查 endpoint 与网络")%>', false);
+						return;
+					}
+					var models = res.models || [];
+					if (list) {
+						list.innerHTML = '';
+						for (var i = 0; i < models.length; i++) {
+							var op = document.createElement('option');
+							op.value = models[i];
+							list.appendChild(op);
+						}
+					}
+					if (modelInput) modelInput.setAttribute('list', 'pc-ai-models');
+					setMsg(models.length
+						? '<%=translate("获取到")%>' + models.length + '<%=translate("个模型，点输入框可下拉选择")%>'
+						: '<%=translate("该接口未返回模型列表，请手动填写模型 id")%>',
+						models.length > 0);
+				},
+				function () {
+					setMsg('<%=translate("请求失败，请检查网络或 endpoint")%>', false);
+				});
+		});
+	})();
+//]]>
+</script>

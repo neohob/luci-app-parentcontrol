@@ -1,11 +1,11 @@
 local a, t, e
 
-a = Map("parentcontrol", translate("使用限额"),
+a = Map("parentcontrol", translate("设置"),
 	translate("额度按<b>自然日</b>结算、<b>每天 0 点自然重置</b>，不结转。</br>\
 具体限制在「网址过滤」条目行的「编辑」页里配：先选<b>可用时段</b>（默认全天，不跨日、起必须早于止），时段外一律不可用且不计入额度；再设<b>每日额度</b>，或勾「不限额度」只受时段限制。</br>\
 时间段/日期来自节假日数据 + 下方寒暑假区间；无当年数据时退化为“周一至五=平日、周末=节假日”。"))
 
-a.template = "parentcontrol/index"
+a.template = "parentcontrol/settings"
 
 t = a:section(TypedSection, "basic", translate(""))
 t.anonymous = true
@@ -21,6 +21,29 @@ e.rmempty = true
 e = t:option(DummyValue, "pc_usage_link", translate("用量看板"),
 	translate("详细统计、最近 30 天趋势与条目/设备分析已移到「使用统计」页。"))
 e.template = "parentcontrol/pcusagelink"
+
+-- AI 辅助解析：把「应用/游戏/网站名称」翻译成真实域名（在「编辑条目」页手点按钮触发）。
+-- 匿名 TypedSection：老配置没有 ai 段时按「未配置」处理，保存时自动创建（无需迁移）。
+t = a:section(TypedSection, "ai", translate("AI 辅助解析"))
+t.anonymous = true
+
+e = t:option(Value, "endpoint", translate("AI endpoint"),
+	translate("OpenAI 兼容接口基址，例如 http://192.168.1.10:11434/v1。留空 = 不使用 AI 解析。"))
+e.placeholder = "http://192.168.1.10:11434/v1"
+e.rmempty = true
+
+e = t:option(Value, "apikey", translate("API Key"),
+	translate("可选。留空表示该接口不需要鉴权。"))
+e.password = true
+e.rmempty = true
+
+e = t:option(Value, "model", translate("模型名称"),
+	translate("点下方「获取模型列表」从 endpoint 拉取候选，或手动填写模型 id。"))
+e.rmempty = true
+
+e = t:option(DummyValue, "pc_ai_models", translate("模型列表"),
+	translate("从上面的 endpoint 拉取可用模型，填充「模型名称」的候选。"))
+e.template = "parentcontrol/ai_models"
 
 t = a:section(TypedSection, "quota", translate("共享额度池"))
 t.template = "cbi/tblsection"
@@ -46,11 +69,11 @@ t.addremove = true
 t:option(Value, "name", translate("名称"))
 
 e = t:option(Value, "start", translate("开始"))
-e.placeholder = '07-01 或 2026-01-20'
+e.placeholder = translate('07-01 或 2026-01-20')
 e.rmempty = true
 
 e = t:option(Value, "end", translate("结束"))
-e.placeholder = '08-31 或 2026-02-16'
+e.placeholder = translate('08-31 或 2026-02-16')
 e.rmempty = true
 
 return a
