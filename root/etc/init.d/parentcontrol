@@ -36,14 +36,15 @@ CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
 	refresh_holiday  Fetch statutory-holiday data for this year and next
 	stats_tsv [brief]  Print dashboard/list data as TSV (brief: meta+entry only)
 	stats_tsv        Print full stats for the dashboard as TSV
-	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log"
+	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log
+	ai_http          GET/POST a URL via curl/uclient-fetch/wget (used by the AI domain helper)"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -688,7 +689,7 @@ prune_usage() {
 			if [ -n "$_cut" ]; then
 				awk -F'\t' -v cut="$_cut" '$1 >= cut' "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
 			else
-				tail -n 2000 "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
+				tail -n 200 "$RESET_LOG" > "$RESET_LOG.new" 2>/dev/null && mv "$RESET_LOG.new" "$RESET_LOG"
 			fi
 		fi
 	fi
@@ -786,6 +787,35 @@ reset_quota() {
 		with_tick_lock build_quota_blocks
 	fi
 	return 0
+}
+
+# AI 辅助解析的 HTTP 转发：交给 pc_http_get / pc_http_post（运行时探测 curl/uclient-fetch/wget）。
+#   ai_http GET  <url> -        <outfile>
+#   ai_http POST <url> <infile> <outfile>
+# exit 0 = HTTP 2xx（响应体已写入 outfile）；非 0 = 失败（可读原因已写入 outfile）。
+ai_http() {
+	local _m _u _i _o _rc
+	_m="$1"; _u="$2"; _i="$3"; _o="$4"
+	case "$_m" in
+		GET)
+			[ -n "$_u" ] && [ -n "$_o" ] || return 1
+			pc_http_get "$_u" "$_o"
+			;;
+		POST)
+			[ -n "$_u" ] && [ -n "$_i" ] && [ -n "$_o" ] || return 1
+			if [ "$_i" = "-" ]; then
+				_i="/tmp/pc-ai-http-$$.in"
+				: > "$_i"
+			fi
+			pc_http_post "$_u" "$_i" "$_o"
+			_rc=$?
+			case "$_i" in /tmp/pc-ai-http-*) rm -f "$_i" ;; esac
+			return $_rc
+			;;
+		*)
+			return 1
+			;;
+	esac
 }
 
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）。

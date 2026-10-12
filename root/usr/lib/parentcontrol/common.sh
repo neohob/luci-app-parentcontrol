@@ -524,3 +524,105 @@ _pclog() {
 	mkdir -p /tmp/log 2>/dev/null
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >> "${LOG_FILE:-/tmp/log/parentcontrol.log}"
 }
+
+# ============================================================================
+# AI 辅助解析用的 HTTP 客户端探测（可选依赖：curl / uclient-fetch / wget）。
+#
+# 只做运行时探测，不写进 LUCI_DEPENDS。约定：
+#   * 成功 = 客户端 exit 0（curl 带 -f，因此只认 HTTP 2xx），响应体写 <outfile>；
+#   * 全部失败 = 返回非 0，并把可读原因（≤2KB）写 <outfile>；
+#   * 鉴权：若设置了 PC_AI_KEY_FILE，读其内容作为 Bearer token（不进命令行/ps）；
+#   * 超时：PC_AI_TIMEOUT（秒，默认 15）。
+# 用法：pc_http_get <url> <outfile>
+#       pc_http_post <url> <infile> <outfile>
+# ============================================================================
+
+_pc_ai_key() {
+	[ -n "$PC_AI_KEY_FILE" ] && [ -f "$PC_AI_KEY_FILE" ] && tr -d '\r\n' < "$PC_AI_KEY_FILE"
+}
+
+_pc_ai_timeout() {
+	case "${PC_AI_TIMEOUT:-15}" in
+		''|*[!0-9]*) echo 15 ;;
+		*) echo "$PC_AI_TIMEOUT" ;;
+	esac
+}
+
+# 把可读失败原因写进 outfile（截断到 2KB）并返回非 0。
+_pc_ai_fail() {
+	local _o
+	_o="$1"; shift
+	printf '%s\n' "$*" 2>/dev/null | head -c 2048 > "$_o"
+	return 1
+}
+
+pc_http_get() {
+	local _u _o _t _k _err _r
+	_u="$1"; _o="$2"; _t=$(_pc_ai_timeout); _k=$(_pc_ai_key); _err="${_o}.err"
+	if command -v curl >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			curl -fsS --max-time "$_t" -H "Authorization: Bearer $_k" "$_u" > "$_o" 2>"$_err"
+		else
+			curl -fsS --max-time "$_t" "$_u" > "$_o" 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "curl 请求失败：${_r:-HTTP 错误或网络不可达}"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			uclient-fetch -q -T "$_t" -O "$_o" --header="Authorization: Bearer $_k" "$_u" >/dev/null 2>"$_err"
+		else
+			uclient-fetch -q -T "$_t" -O "$_o" "$_u" >/dev/null 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "uclient-fetch 请求失败：${_r:-HTTP 错误或网络不可达}"
+	elif command -v wget >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			wget -q -T "$_t" -O "$_o" --header="Authorization: Bearer $_k" "$_u" >/dev/null 2>"$_err"
+		else
+			wget -q -T "$_t" -O "$_o" "$_u" >/dev/null 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "wget 请求失败：${_r:-HTTP 错误或网络不可达}"
+	else
+		_pc_ai_fail "$_o" "路由器缺少 HTTP 客户端，请安装 curl 或 uclient-fetch（访问 https 还需 libustream-ssl 与 ca-bundle）"
+	fi
+}
+
+pc_http_post() {
+	local _u _i _o _t _k _err _r
+	_u="$1"; _i="$2"; _o="$3"; _t=$(_pc_ai_timeout); _k=$(_pc_ai_key); _err="${_o}.err"
+	[ -f "$_i" ] || { _pc_ai_fail "$_o" "请求体临时文件不存在：$_i"; return 1; }
+	if command -v curl >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			curl -fsS --max-time "$_t" -H "Authorization: Bearer $_k" -H "Content-Type: application/json" --data-binary "@$_i" "$_u" > "$_o" 2>"$_err"
+		else
+			curl -fsS --max-time "$_t" -H "Content-Type: application/json" --data-binary "@$_i" "$_u" > "$_o" 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "curl 请求失败：${_r:-HTTP 错误或网络不可达}"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			uclient-fetch -q -T "$_t" -O "$_o" --header="Authorization: Bearer $_k" --header="Content-Type: application/json" --post-file="$_i" "$_u" >/dev/null 2>"$_err"
+		else
+			uclient-fetch -q -T "$_t" -O "$_o" --header="Content-Type: application/json" --post-file="$_i" "$_u" >/dev/null 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "uclient-fetch 请求失败：${_r:-HTTP 错误或网络不可达}"
+	elif command -v wget >/dev/null 2>&1; then
+		if [ -n "$_k" ]; then
+			wget -q -T "$_t" -O "$_o" --header="Authorization: Bearer $_k" --header="Content-Type: application/json" --post-file="$_i" "$_u" >/dev/null 2>"$_err"
+		else
+			wget -q -T "$_t" -O "$_o" --header="Content-Type: application/json" --post-file="$_i" "$_u" >/dev/null 2>"$_err"
+		fi
+		if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+		_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+		_pc_ai_fail "$_o" "wget 请求失败：${_r:-HTTP 错误或网络不可达}"
+	else
+		_pc_ai_fail "$_o" "路由器缺少 HTTP 客户端，请安装 curl 或 uclient-fetch（访问 https 还需 libustream-ssl 与 ca-bundle）"
+	fi
+}
