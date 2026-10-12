@@ -3,8 +3,7 @@
 -- 设计要点（见 docs/superpowers/specs/pc-ui-ai-rework-*）：
 --  * 本模块是纯逻辑 + HTTP 代理：真正的网络请求交给 shell 子命令
 --    `/etc/init.d/parentcontrol ai_http <GET|POST> <url> <infile|-> <outfile>`，
---    由 common.sh 的 pc_http_get/pc_http_post 依序探测 curl/uclient-fetch/wget，
---    不新增 OpenWrt 硬依赖。
+--    由 common.sh 的 pc_http 依序探测 curl/uclient-fetch/wget，不新增 OpenWrt 硬依赖。
 --  * 本文件是被 require 的子模块，不能依赖 LuCI 注入的全局 translate()，
 --    必须自己 require "luci.i18n"（范本：statsdata.lua）。
 --  * 所有新增用户可见文案都包在 T()（= i18n.translate）里，中文 msgid。
