@@ -151,16 +151,16 @@
 		<table class="pc-matrix">
 			<tr>
 				<th><%=T("设备")%></th>
-				<% for _, c in ipairs(d.day_cols) do %>
-				<th title="<%=pcdata(c.iso)%>"><%=pcdata(c.label)%></th>
+				<% for _, day in ipairs(d.days) do %>
+				<th title="<%=pcdata(day.date_iso)%>"><%=pcdata(day.label)%></th>
 				<% end %>
 				<th><%=T("合计")%></th>
 			</tr>
 			<% for _, r in ipairs(d.dev_day_rows) do %>
 			<tr>
 				<td><%=pcdata(r.device)%></td>
-				<% for _, c in ipairs(d.day_cols) do
-					local v = r.by[c.date]
+				<% for _, day in ipairs(d.days) do
+					local v = r.by[day.date]
 				%>
 				<td><%=v and v or "-"%></td>
 				<% end %>
