@@ -78,10 +78,12 @@ jobs:
             rm -f "$2.tar"
           }
 
-          # ---- 暂存：root/ 铺到 /，luasrc/ 铺到 /usr/lib/lua/luci/ ----
+          # ---- 暂存：root/ 铺到 /，luasrc/ 铺到 /usr/lib/lua/luci/，htdocs/ 铺到 /www/ ----
           mkdir -p "$STAGE/data/usr/lib/lua/luci"
           cp -a root/.   "$STAGE/data/"
           cp -a luasrc/. "$STAGE/data/usr/lib/lua/luci/"
+          mkdir -p "$STAGE/data/www"
+          cp -a htdocs/. "$STAGE/data/www/"
           find "$STAGE/data" -name '._*' -delete 2>/dev/null || true
           find "$STAGE/data" -type f -exec chmod 644 {} +
           chmod 755 "$STAGE/data/etc/init.d/parentcontrol"   # 与仓库里的 git 模式一致：只有 init.d 可执行
