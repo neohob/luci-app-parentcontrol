@@ -61,6 +61,9 @@ e.rmempty = true
 e = t:option(DummyValue, "ip", translate("静态IP"))
 e.rmempty = true
 
+e = t:option(DummyValue, "apps", translate("名称"))
+e.rmempty = true
+
 e = t:option(DummyValue, "domains", translate("域名/IP"))
 e.rmempty = true
 

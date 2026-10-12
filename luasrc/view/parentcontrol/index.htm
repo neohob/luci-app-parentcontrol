@@ -1,10 +1,4 @@
 <% include("cbi/map") %>
-<style type="text/css">
-	/* 表格里的输入框被主题设成了 width:100%（选择器
-	   .cbi-section-table-row>.cbi-value-field .cbi-input-text ），特异性比单个属性选择器高，
-	   所以这里走同等路径 + !important，把「关键词/域名」那一栏单独收窄，不影响其它字段。 */
-	.cbi-section-table-row .cbi-value-field input[id$=".domains"] { width: 13em !important; }
-</style>
 <script type="text/javascript">//<![CDATA[
 	function pcResetQuota(k) {
 		if (!k) return;
