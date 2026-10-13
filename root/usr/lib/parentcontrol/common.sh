@@ -497,7 +497,10 @@ pc_migrate_config() {
 			_ai_v=$(pc_uget "@ai[$_i].apikey")
 			[ -z "$_ai_key" ] && [ -n "$_ai_v" ] && _ai_key="$_ai_v"
 		done
-		uci -q delete "$PC_CONF.ai"
+		# 类型守卫：按名删节前先确认该节确实是 ai 类型 —— 模板里若恰好有「异类型但名为 ai」
+		# 的节（如 config weburl 'ai'），直接 uci -q delete 会误删。命名节不存在时
+		# pc_uget ai 为空 ⇒ 本就不需要删，跳过即可。
+		if [ "$(pc_uget ai)" = "ai" ]; then uci -q delete "$PC_CONF.ai"; fi
 		_ai_del=""
 		for _i in $(pc_ids_all ai); do
 			_ai_del="$_i $_ai_del"
