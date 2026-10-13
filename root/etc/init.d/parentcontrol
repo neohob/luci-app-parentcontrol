@@ -914,7 +914,7 @@ sample_diag_counters() { # $1=阈值（字节）
 				END { printf "%d", s + 0 }' "$_dump")
 			_bf="$STATE_DIR/dbase.${_key}.t$_n"
 			_d=$(diag_delta "$_v" "$_bf")
-			[ "$_d" -gt 0 ] && diag_bump_t "$_key" "$_tg"
+			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && diag_bump_t "$_key" "$_tg"
 		done < "$_tf"
 		_n=0
 		for _mac in $(diag_clients "$_m" "$_i"); do
