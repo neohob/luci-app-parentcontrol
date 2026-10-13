@@ -6,8 +6,8 @@ include $(TOPDIR)/rules.mk
 
 NAME:=parentcontrol
 PKG_NAME:=luci-app-$(NAME)
-PKG_VERSION:=1.8.5
-PKG_RELEASE:=20261013
+PKG_VERSION:=1.8.6
+PKG_RELEASE:=20261014
 PKG_LICENSE:=Apache-2.0
 
 LUCI_TITLE:=LuCI support for Parent Control
