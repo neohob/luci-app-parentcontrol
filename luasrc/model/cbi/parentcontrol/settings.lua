@@ -23,15 +23,13 @@ e = t:option(DummyValue, "pc_usage_link", translate("用量看板"),
 e.template = "parentcontrol/pcusagelink"
 
 -- AI 辅助解析：把「应用/游戏/网站名称」翻译成真实域名（在「编辑条目」页逐行点按钮触发）。
--- 第 8 轮 D15（R8）：改为**固定单节** —— 页面上不再出现「添加/删除 AI 段」的多条录入。
+-- 第 8 轮 D15（R8）：固定单节；第 9 轮 D22（A31）：**渲染期不写盘**。
 --   · NamedSection 绑死段名 ai：段被手工删掉时字段照常渲染，保存即重建该段；
---   · 另外做一次 0 段自愈（与 .run 安装侧「无 ai 段则 uci add」同源），
---     这样即使某个 LuCI 版本在 0 段时不渲染字段，打开本页也会先把空段补上。
+--   · 0 段自愈只在 **Map 自己的 cursor**（`a.uci`）里补一个内存段，交给 LuCI 正常保存时提交；
+--     绝不在渲染期 commit —— 打开（GET）设置页不得改写 /etc/config/parentcontrol。
 do
-	local uci = require("luci.model.uci").cursor()
-	if not uci:get("parentcontrol", "ai") then
-		uci:section("parentcontrol", "ai", "ai", {})
-		uci:commit("parentcontrol")
+	if not a.uci:get("parentcontrol", "ai") then
+		a.uci:section("parentcontrol", "ai", "ai", {})
 	end
 end
 t = a:section(NamedSection, "ai", "ai", translate("AI 辅助解析"))
