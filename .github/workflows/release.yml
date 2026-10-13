@@ -215,10 +215,11 @@ jobs:
               rm -f "/etc/uci-defaults/\$APP"
             fi
 
-            # F1：升级用户的旧配置没有 config ai 段（TypedSection 对 0 段不渲染字段、
-            # 也不给「添加」按钮）—— 无则补建空段，让 AI 设置可达。幂等：已有段不动。
-            if ! uci -q get parentcontrol.@ai[0] >/dev/null 2>&1; then
-              uci -q add parentcontrol ai >/dev/null 2>&1 || true
+            # F1 + A29/D21：升级用户的旧配置可能没有 ai 段（TypedSection 对 0 段不渲染字段、
+            # 也不给「添加」按钮）—— 无则补建**命名节** `ai`，让 AI 设置可达且段身份唯一。
+            # 幂等：命名节已存在时不动（不动其值、不重复 commit）。
+            if ! uci -q get parentcontrol.ai >/dev/null 2>&1; then
+              uci -q set parentcontrol.ai=ai >/dev/null 2>&1 || true
               uci -q commit parentcontrol 2>/dev/null || true
             fi
 
