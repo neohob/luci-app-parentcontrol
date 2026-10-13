@@ -15,6 +15,12 @@ e = t:option(DummyValue, "parentcontrol_status", translate("当前状态"))
 e.template = "parentcontrol/parentcontrol"
 e.value = translate("获取数据中…")
 
+-- R10/D18：绑定失效汇总（页顶一行；没有失效条目时整块不渲染）。只看不改。
+e = t:option(DummyValue, "_bindwarn", "")
+e.template = "parentcontrol/bindwarn"
+e.cfgvalue = function(self, section) return ui.offline_bindings(self.map) end
+e.rmempty = true
+
 e = t:option(Flag, "enabled", translate("开启"))
 e.rmempty = false
 

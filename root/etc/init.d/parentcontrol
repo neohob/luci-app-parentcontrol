@@ -31,12 +31,14 @@ HOLIDAY_LOCAL=${HOLIDAY_LOCAL:-/usr/share/parentcontrol/holiday}
 STATE_DIR=${STATE_DIR:-/tmp/parentcontrol}
 # 重置日志放 /etc（flash）是有意的：重置历史要跨重启保留，不能放 /tmp。
 RESET_LOG=${RESET_LOG:-/etc/parentcontrol/resets.log}
+# DHCP 租约（dnsmasq 格式）——hosts_tsv 用它补 IP/主机名；可覆盖以便白盒测试指到临时文件。
+DHCP_LEASES=${DHCP_LEASES:-/tmp/dhcp.leases}
 CRON_TAG="#pc_tick"
 CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http hosts_tsv"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
@@ -44,7 +46,8 @@ EXTRA_HELP="
 	stats_tsv [brief]  Print dashboard/list data as TSV (brief: meta+entry only)
 	stats_tsv        Print full stats for the dashboard as TSV
 	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log
-	ai_http          GET/POST a URL via curl/uclient-fetch/wget (used by the AI domain helper)"
+	ai_http          GET/POST a URL via curl/uclient-fetch/wget (used by the AI domain helper)
+	hosts_tsv        Print LAN hosts as 'host <mac> <ip> <name> <online>' (binding health / diagnostics)"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -888,6 +891,63 @@ reset_quota() {
 # exit 0 = HTTP 2xx（响应体已写入 outfile）；非 0 = 失败（可读原因已写入 outfile）。
 ai_http() {
 	pc_http "$1" "$2" "$4" "$3"
+}
+
+# 绑定健康 / 诊断用的「在网设备清单」（第 8 轮 R10/D18/ADR-021）。
+# 每行：host <mac> <ip> <name> <online>（空格分隔；缺项以 - 占位）。
+#   online=1 ⇔ 该 MAC 在 `ip neigh` 里且状态 ∈ {REACHABLE, STALE, DELAY, PROBE}
+#            （FAILED / INCOMPLETE / 无状态一律算 0）
+#   ip/name 由 DHCP 租约（$DHCP_LEASES）补齐；只在租约里的设备也列出（online=0）。
+# 只读、不碰配置、不碰 iptables —— 页面拿它做「绑定设备是否在网」展示与一键重绑。
+hosts_tsv() {
+	local _lf _nf
+	mkdir -p "$STATE_DIR"
+	_lf="$STATE_DIR/leases.$$"
+	_nf="$STATE_DIR/neigh.$$"
+	cat "$DHCP_LEASES" 2>/dev/null > "$_lf"
+	ip neigh show 2>/dev/null > "$_nf"
+	awk -v lf="$_lf" '
+		BEGIN {
+			while ((getline line < lf) > 0) {
+				n = split(line, a, /[ \t]+/)
+				if (n < 4) continue
+				k = tolower(a[2])
+				if (k !~ /^[0-9a-f][0-9a-f:]+$/) continue
+				if (!(k in seen_l)) { lorder[++ln] = k; seen_l[k] = 1 }
+				lip[k] = a[3]
+				if (a[4] != "" && a[4] != "*") lh[k] = a[4]
+			}
+		}
+		{
+			mac = ""; st = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i == "lladdr") mac = $(i + 1)
+				else if ($i ~ /^(REACHABLE|STALE|DELAY|PROBE|FAILED|INCOMPLETE|PERMANENT|NOARP|NONE)$/) st = $i
+			}
+			if (mac == "") next
+			k = tolower(mac)
+			o = (st == "REACHABLE" || st == "STALE" || st == "DELAY" || st == "PROBE") ? 1 : 0
+			if (!(k in seen_n)) {
+				seen_n[k] = 1; norder[++nn] = k; macs[k] = k; nip[k] = $1; nonl[k] = o
+			} else {
+				if (o == 1 && nonl[k] == 0) nonl[k] = 1
+				# 同一 MAC 先见 IPv6 邻居行、后见 IPv4 时，改报 IPv4（常用地址；v6 行不干扰 v4 结论）
+				if (nip[k] ~ /:/ && $1 !~ /:/) nip[k] = $1
+			}
+		}
+		END {
+			for (i = 1; i <= nn; i++) {
+				k = norder[i]
+				printf "host %s %s %s %d\n", macs[k], (nip[k] != "" ? nip[k] : "-"), (lh[k] != "" ? lh[k] : "-"), nonl[k]
+			}
+			for (i = 1; i <= ln; i++) {
+				k = lorder[i]
+				if (k in seen_n) continue
+				printf "host %s %s %s %d\n", k, (lip[k] != "" ? lip[k] : "-"), (lh[k] != "" ? lh[k] : "-"), 0
+			}
+		}' "$_nf"
+	rm -f "$_lf" "$_nf"
+	return 0
 }
 
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）。

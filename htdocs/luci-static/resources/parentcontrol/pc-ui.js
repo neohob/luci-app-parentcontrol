@@ -40,8 +40,21 @@
 		XHR.post(url, { key: key, token: token }, function () { location.reload(); });
 	}
 
+	// R10/D18：「绑定健康」的一键重绑 —— 把值写进指定字段（如 mac）并派发 change，
+	// 让 LuCI 的控件状态跟着更新；**只写输入框，不自动保存**（保存仍由用户点按钮）。
+	function pcSetField(suffix, value) {
+		var el = pcField(suffix);
+		if (!el) return false;
+		el.value = value;
+		if (typeof Event === 'function') {
+			try { el.dispatchEvent(new Event('change')); } catch (e) { /* 老浏览器忽略 */ }
+		}
+		return true;
+	}
+
 	window.pcField = pcField;
 	window.pcSetMsg = pcSetMsg;
 	window.pcPost = pcPost;
 	window.pcResetQuota = pcResetQuota;
+	window.pcSetField = pcSetField;
 })(window, document);

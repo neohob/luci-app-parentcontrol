@@ -1,0 +1,12 @@
+<%+cbi/valueheader%>
+<%
+	-- 列表页页顶汇总：有「绑定的 MAC 已不在网」的条目时给一行提示（无则整块不渲染）。
+	-- 只看不改：绝不自动修改任何用户配置（D18/ADR-021）。
+	local n = tonumber(self:cfgvalue(section) or 0) or 0
+%>
+<% if n > 0 then %>
+<div style="color:#c00;font-weight:bold;margin:4px 0">
+	⚠ <%=string.format(translate("有 %d 个条目的绑定设备不在网（可能是 Wi-Fi 私有地址已轮换）。点该行「编辑」可查看在网设备并一键重绑。"), n)%>
+</div>
+<% end %>
+<%+cbi/valuefooter%>

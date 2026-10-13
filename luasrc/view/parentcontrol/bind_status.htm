@@ -1,0 +1,41 @@
+<%+cbi/valueheader%>
+<%
+	-- 编辑页「绑定状态」（第 8 轮 R10/D18/ADR-021）：绑定的 MAC 是否在网。
+	-- 不在网时列出当前在网设备，每行一个「用这个 MAC」（JS 写入上面的 MAC 地址框）。
+	-- 只看不改：这里不写任何配置，写完还是要用户自己点「保存并应用」。
+	local hosts = require "luci.model.cbi.parentcontrol.hosts"
+	local mac = tostring(self:cfgvalue(section) or "")
+	local cur = nil
+	if mac ~= "" then
+		for _, x in ipairs(hosts.list()) do
+			if x.mac == mac:lower() then cur = x; break end
+		end
+	end
+%>
+<% if mac == "" then %>
+	<span class="muted"><%=translate("未填 MAC：该条目对全部客户端生效，无法判断绑定健康。")%></span>
+<% elseif cur and cur.online then %>
+	<span style="color:green;font-weight:bold">● <%=translate("绑定设备在线")%><% if cur.ip ~= "" or cur.name ~= "" then %>（<%=pcdata(cur.ip or "")%><% if cur.name ~= "" then %> · <%=pcdata(cur.name)%><% end %>）<% end %></span>
+<% else %>
+	<div style="color:#c00;font-weight:bold">⚠ <%=translate("绑定设备不在网（可能是 Wi-Fi 私有地址已轮换）")%></div>
+	<div class="cbi-value-description"><%=translate("当前在网设备：点「用这个 MAC」把它写进上面的 MAC 地址框，确认后点页面底部的「保存并应用」。")%></div>
+	<table class="pc-bind-hosts">
+		<% local shown = 0 %>
+		<% for _, x in ipairs(hosts.list()) do %>
+			<% if x.online then shown = shown + 1 %>
+			<tr>
+				<td><%=pcdata(x.mac)%></td>
+				<td><%=pcdata(x.ip ~= "" and x.ip or "-")%></td>
+				<td><%=pcdata(x.name ~= "" and x.name or "-")%></td>
+				<td><input type="button" class="cbi-button" style="padding:2px 8px"
+					value="<%=translate("用这个 MAC")%>"
+					onclick="pcSetField('mac', '<%=pcdata(x.mac)%>')" /></td>
+			</tr>
+			<% end %>
+		<% end %>
+		<% if shown == 0 then %>
+			<tr><td colspan="4" class="muted"><%=translate("当前没有检测到在网设备（邻居表为空）。")%></td></tr>
+		<% end %>
+	</table>
+<% end %>
+<%+cbi/valuefooter%>

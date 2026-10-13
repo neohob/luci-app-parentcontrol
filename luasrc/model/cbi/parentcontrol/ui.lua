@@ -4,6 +4,7 @@
 local i18n = require "luci.i18n"
 local devnames = require "luci.model.cbi.parentcontrol.devnames"
 local tsv = require "luci.model.cbi.parentcontrol.tsv"
+local hosts = require "luci.model.cbi.parentcontrol.hosts"
 
 local M = {}
 
@@ -97,7 +98,8 @@ function M.profiles(self, section)
 	return i18n.translate("平日") .. " " .. sd .. " · " .. i18n.translate("节假日") .. " " .. hd
 end
 
--- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示
+-- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示。
+-- 第 8 轮（R10/D18）：绑定设备不在网时加一个 ⚠（只看不改 —— 绝不自动修改用户配置）。
 function M.mac(self, section)
 	local mac = self.map:get(section, "mac") or ""
 	local ip = self.map:get(section, "ip") or ""
@@ -108,7 +110,21 @@ function M.mac(self, section)
 	end
 	if ip ~= "" then out[#out + 1] = ip end
 	if #out == 0 then return i18n.translate("全部客户端") end
-	return table.concat(out, " / ")
+	local s = table.concat(out, " / ")
+	if mac ~= "" and hosts.online(mac) == false then s = s .. " ⚠" end
+	return s
+end
+
+-- 绑定已失效（绑了 MAC 但该 MAC 不在网）的已启用条目数 —— 列表页页顶汇总提示用。
+-- 判定与编辑页「绑定状态」同源（hosts.lua）：不自动改配置，只提示。
+function M.offline_bindings(map)
+	local n = 0
+	map.uci:foreach("parentcontrol", "weburl", function(s)
+		if s.enable == "1" and s.mac and s.mac ~= "" and hosts.online(s.mac) == false then
+			n = n + 1
+		end
+	end)
+	return n
 end
 
 -- 列表页「重置」按钮的 key：统一模型下没有模式了，任何条目都能重置当天用量，

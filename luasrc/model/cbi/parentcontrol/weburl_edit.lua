@@ -35,6 +35,13 @@ e = t:option(Value, "mac", translate("MAC地址"))
 e.rmempty = true
 o.net.mac_hints(function(mac, name) e:value(mac, "%s (%s)" % {mac, name}) end)
 
+-- R10/D18（ADR-021）：绑定健康。绑定的 MAC 不在网 ⇒ 该条目既不计时也不封锁
+-- （典型原因：iOS/iPadOS「私有 Wi-Fi 地址」轮换）。这里只提示与一键重绑，不自动改配置。
+e = t:option(DummyValue, "_bind", translate("绑定状态"),
+	translate("绑定的设备不在网时，这个条目既不计时也不封锁。常见原因是 iOS「私有 Wi-Fi 地址」轮换：可在 iPad 的 Wi-Fi 设置里把该网络改为「固定」。此处只做检测与一键重绑，不会自动修改你的配置。"))
+e.template = "parentcontrol/bind_status"
+e.cfgvalue = function(self, section) return self.map:get(section, "mac") or "" end
+
 e = t:option(Value, "ip", translate("静态IP/主机名"),
 	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
 e.rmempty = true
