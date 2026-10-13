@@ -104,10 +104,11 @@ jobs:
           Maintainer: neohob
           Architecture: all
           Installed-Size: $SIZE
-          Conffiles:
-           /etc/config/parentcontrol
           Description: LuCI support for Parent Control (parentcontrol)
           EOF
+          # 配置保护只能靠 control.tar.gz 的独立 `conffiles` 成员声明（opkg/lede 规范）。
+          # 别在这里写 Debian 风格的 `Conffiles:` 字段：opkg 会在装包时报
+          # `parse_conffiles: Failed to parse Conffiles line for luci-app-parentcontrol`（F11）。
           printf '/etc/config/parentcontrol\n' > "$STAGE/ctl/conffiles"
           cat > "$STAGE/ctl/postinst" <<'EOF'
           #!/bin/sh
