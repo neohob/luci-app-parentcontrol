@@ -395,7 +395,7 @@ pc_apps_rows() { # $1=apps 多行文本
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n _extra _seen
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n _ai_ep _ai_md _ai_key _ai_v _ai_del _ai_secs
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
 	#    （README 里承诺了这件事，就必须真的做；$PC_CONF_DIR 下没有配置文件时自动跳过。
 	#      PC_CONF_DIR / BACKUP_DIR 是可覆盖钩子（默认值 = 生产路径），供白盒测试把
@@ -460,20 +460,52 @@ pc_migrate_config() {
 		_pclog "migrate: weburl[$_i] apps 归一化（domains 已并入 apps 行并删除）"
 	done
 
-	# 2c) AI 设置固定单节（第 8 轮 D15/R8）：多于一个 config ai 段时只保留第一个，
-	#     其余删除并留日志（界面上已不再有「添加/删除 AI 段」的入口）。
-	#     删除按**倒序**下标进行（uci 删掉一个段后，后续段的 @ai[N] 下标会前移）。
-	_extra=""
-	_seen=0
-	for _i in $(pc_ids_all ai); do
-		_seen=$((_seen + 1))
-		[ "$_seen" = 1 ] && continue
-		_extra="$_i $_extra"
-	done
-	for _i in $_extra; do
-		uci -q delete "$PC_CONF.@ai[$_i]"
-		_pclog "migrate: 删除多余的 config ai 段（@ai[$_i]）—— AI 设置固定单节"
-	done
+	# 2c) AI 段身份统一为命名节 `ai`（第 9 轮 A29/D21 修订，取代第 8 轮的「盲保下标 0」）：
+	#     目标：最多 1 个 ai 段，段名 == ai（命名节），且用户既有值**不丢**。
+	#     算法对「@ai[N] 下标是否计入命名节」这一未证实语义**不敏感**（本机无 uci/Lua，
+	#     真机语义未证实；`pc_ids_all` 的下标在命名节与匿名节混排时可能撞号，故不能用它判数量）：
+	#       * 段数用 `pc_uci_scan` 的**节行**直接计数（不依赖下标语义）。
+	#       * 段数 0 → 不动（不凭空造段，交给安装自愈 / 设置页 0 段自愈；沿用第 8 轮 W95⑧）。
+	#       * 段数 1 且为命名节 ai → 已收敛，**一个字节都不改**（保证 `uci show` 逐字节幂等）。
+	#       * 否则按下述语义无关算法收敛：
+	#         ① 先按命名节读三字段（`parentcontrol.ai.<opt>`，无歧义）；
+	#         ⑥ 再把各 ai 段的非空值按序并入（仅补命名节里为空的字段）—— 老匿名值不丢，
+	#            命名节已有的值优先；只补空位 ⇒ @ai[N] 语义无论是否计入命名节都无害；
+	#         ② 删除命名节 `parentcontrol.ai`（按名删，与下标语义无关）；
+	#         ③ 此时剩余 ai 段必定全是匿名节（下标空间无歧义）⇒ `pc_ids_all ai` 取下标、
+	#            **倒序**全部删除（每删一个后 @ai[N] 下标会前移，故倒序），逐个留 _pclog；
+	#         ④ `uci -q set parentcontrol.ai=ai` 重建命名节，再把①/⑥拿到的非空字段写回。
+	_ai_secs=$(pc_uci_scan | awk -F'|' -v t="ai" '$1 == t && $3 == "" { n++ } END { print n + 0 }')
+	if [ "$_ai_secs" = "0" ]; then
+		: # 无 ai 段：交给安装自愈 / 设置页自愈
+	elif [ "$_ai_secs" = "1" ] && [ "$(pc_uget ai)" = "ai" ]; then
+		: # 已收敛：唯一 ai 段且为命名节
+	else
+		_ai_ep=$(pc_uget "ai.endpoint")
+		_ai_md=$(pc_uget "ai.model")
+		_ai_key=$(pc_uget "ai.apikey")
+		for _i in $(pc_ids_all ai); do
+			_ai_v=$(pc_uget "@ai[$_i].endpoint")
+			[ -z "$_ai_ep" ] && [ -n "$_ai_v" ] && _ai_ep="$_ai_v"
+			_ai_v=$(pc_uget "@ai[$_i].model")
+			[ -z "$_ai_md" ] && [ -n "$_ai_v" ] && _ai_md="$_ai_v"
+			_ai_v=$(pc_uget "@ai[$_i].apikey")
+			[ -z "$_ai_key" ] && [ -n "$_ai_v" ] && _ai_key="$_ai_v"
+		done
+		uci -q delete "$PC_CONF.ai"
+		_ai_del=""
+		for _i in $(pc_ids_all ai); do
+			_ai_del="$_i $_ai_del"
+		done
+		for _i in $_ai_del; do
+			uci -q delete "$PC_CONF.@ai[$_i]"
+			_pclog "migrate: 删除匿名 config ai 段（@ai[$_i]）—— AI 段身份统一为命名节 ai"
+		done
+		uci -q set "$PC_CONF.ai=ai"
+		[ -n "$_ai_ep" ]  && uci -q set "$PC_CONF.ai.endpoint=$_ai_ep"
+		[ -n "$_ai_md" ]  && uci -q set "$PC_CONF.ai.model=$_ai_md"
+		[ -n "$_ai_key" ] && uci -q set "$PC_CONF.ai.apikey=$_ai_key"
+	fi
 
 	# 3) 统一为「可用时段 + 额度」模型。老配置有两代：
 	#      a) 双档案时代：<sfx>_mode ∈ off|time|quota|block（另有 <sfx>_start/<sfx>_end）
