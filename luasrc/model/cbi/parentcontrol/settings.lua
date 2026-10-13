@@ -22,13 +22,20 @@ e = t:option(DummyValue, "pc_usage_link", translate("用量看板"),
 	translate("详细统计、最近 30 天趋势与条目/设备分析已移到「使用统计」页。"))
 e.template = "parentcontrol/pcusagelink"
 
--- AI 辅助解析：把「应用/游戏/网站名称」翻译成真实域名（在「编辑条目」页手点按钮触发）。
--- F1：升级用户的旧配置可能没有 ai 段 —— TypedSection 对 0 段连字段都不渲染、也不给
--- 「添加」按钮，所以必须 addremove=true 让 UI 能自建段（与 quota/vacation 同型）；
--- .run 安装侧另有「无 ai 段则 uci add」自愈（见 release.yml install_pkg），双保险。
-t = a:section(TypedSection, "ai", translate("AI 辅助解析"))
-t.anonymous = true
-t.addremove = true
+-- AI 辅助解析：把「应用/游戏/网站名称」翻译成真实域名（在「编辑条目」页逐行点按钮触发）。
+-- 第 8 轮 D15（R8）：改为**固定单节** —— 页面上不再出现「添加/删除 AI 段」的多条录入。
+--   · NamedSection 绑死段名 ai：段被手工删掉时字段照常渲染，保存即重建该段；
+--   · 另外做一次 0 段自愈（与 .run 安装侧「无 ai 段则 uci add」同源），
+--     这样即使某个 LuCI 版本在 0 段时不渲染字段，打开本页也会先把空段补上。
+do
+	local uci = require("luci.model.uci").cursor()
+	if not uci:get("parentcontrol", "ai") then
+		uci:section("parentcontrol", "ai", "ai", {})
+		uci:commit("parentcontrol")
+	end
+end
+t = a:section(NamedSection, "ai", "ai", translate("AI 辅助解析"))
+t.addremove = false
 
 e = t:option(Value, "endpoint", translate("AI endpoint"),
 	translate("OpenAI 兼容接口基址，例如 http://192.168.1.10:11434/v1；只填基址，不要带 /models 或 /chat/completions。留空 = 不使用 AI 解析。"))

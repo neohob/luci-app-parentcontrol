@@ -395,7 +395,7 @@ pc_apps_rows() { # $1=apps 多行文本
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n _extra _seen
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
 	#    （README 里承诺了这件事，就必须真的做；$PC_CONF_DIR 下没有配置文件时自动跳过。
 	#      PC_CONF_DIR / BACKUP_DIR 是可覆盖钩子（默认值 = 生产路径），供白盒测试把
@@ -458,6 +458,21 @@ pc_migrate_config() {
 		fi
 		uci -q delete "$PC_CONF.@weburl[$_i].domains"
 		_pclog "migrate: weburl[$_i] apps 归一化（domains 已并入 apps 行并删除）"
+	done
+
+	# 2c) AI 设置固定单节（第 8 轮 D15/R8）：多于一个 config ai 段时只保留第一个，
+	#     其余删除并留日志（界面上已不再有「添加/删除 AI 段」的入口）。
+	#     删除按**倒序**下标进行（uci 删掉一个段后，后续段的 @ai[N] 下标会前移）。
+	_extra=""
+	_seen=0
+	for _i in $(pc_ids_all ai); do
+		_seen=$((_seen + 1))
+		[ "$_seen" = 1 ] && continue
+		_extra="$_i $_extra"
+	done
+	for _i in $_extra; do
+		uci -q delete "$PC_CONF.@ai[$_i]"
+		_pclog "migrate: 删除多余的 config ai 段（@ai[$_i]）—— AI 设置固定单节"
 	done
 
 	# 3) 统一为「可用时段 + 额度」模型。老配置有两代：
