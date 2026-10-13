@@ -605,10 +605,13 @@ _quota_emit_rules() { # $1=daytype $2=局域网网段列表
 					continue
 				fi
 			fi
-			# 允许中：先发 PCAW 跳转，再发时段外全封 —— -I 是头插，后发射者在前，
-			# 于是「时段外全封」排在「PCAW 跳转」之前先命中；时段内落到 PCAW 跳转。
-			white_entry_jump "$_m" "$_i"
+			# 允许中：先建/填 PCAW 链，再发 TAGQ 的 PCAW 跳转，最后发时段外全封。
+			# 跳转必须晚于目标链建立：真 iptables 不认尚未 -N 的 -j 目标，而 ipt_do
+			# 吞 stderr ⇒ 跳转静默丢失（替身硬化后白盒可测，第 10 轮 R15）。
+			# -I 是头插，后发射者在前，于是「时段外全封」排在「PCAW 跳转」之前先命中；
+			# 时段内落到 PCAW 跳转。
 			white_chain_fill "$_m" "$_i"
+			white_entry_jump "$_m" "$_i"
 			pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
 				[ -n "$_a" ] && block_entry_window_all "$_m" "$_i" "$_a" "$_b"
 			done
@@ -783,19 +786,23 @@ _diag_emit_rules() {
 			[ -n "$_p" ] || continue
 			_n=$((_n + 1))
 			case "$_p" in *:*) _c=$ipt6 ;; *) _c=$ipt ;; esac
-			ipt_do "$_c" -t mangle -I "PCAD_$_key" -d "$_p" -j "PCDT_${_key}_$_n"
+			# 先建/填 PCDT_<key>_<n>（diag_client_rules 里 ensure），再插 PCAD_ 跳转：
+			# 反序会让 -j PCDT_ 指到尚未 -N 的链，真 iptables 拒绝且 ipt_do 吞 stderr
+			# ⇒ 规则静默丢失（替身硬化后白盒可测，第 10 轮 R15）。
 			diag_client_rules "$_c" "$_key" "$_n" "$_cf"
+			ipt_do "$_c" -t mangle -I "PCAD_$_key" -d "$_p" -j "PCDT_${_key}_$_n"
 		done < "$_itf"
 		rm -f "$_itf"
 		# ③b 匹配串目标（明文 DNS/SNI，与封锁同源）：两族各两条
 		for _p in $(weburl_patterns "$_i"); do
 			_n=$((_n + 1))
 			for _c in "$ipt" "$ipt6"; do
+				# 同上：先建/填 PCDT_ 链，再插 PCAD_ 跳转
+				diag_client_rules "$_c" "$_key" "$_n" "$_cf"
 				ipt_do "$_c" -t mangle -I "PCAD_$_key" -p UDP --dport 53 \
 					-m string --algo "$_algos" --string "$_p" -j "PCDT_${_key}_$_n"
 				ipt_do "$_c" -t mangle -I "PCAD_$_key" -p TCP -m multiport --dports 80,443 \
 					-m string --algo "$_algos" --string "$_p" -j "PCDT_${_key}_$_n"
-				diag_client_rules "$_c" "$_key" "$_n" "$_cf"
 			done
 		done
 	done
