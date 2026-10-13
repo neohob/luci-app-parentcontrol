@@ -193,6 +193,61 @@
 	</div>
 	<% end %>
 
+	<h3><%=T("未被条目覆盖的命中流量（诊断）")%></h3>
+	<% if #d.diag_rows == 0 then %>
+		<div class="muted"><%=T("暂无——说明所有命中封锁目标的设备都在条目范围内，或还没有命中。")%></div>
+	<% else %>
+	<table>
+		<tr>
+			<th><%=T("设备")%></th><th><%=T("IP")%></th><th><%=T("主机名")%></th><th><%=T("条目")%></th>
+			<th class="num"><%=T("今日分钟")%></th><th><%=T("首次命中")%></th><th><%=T("最近命中")%></th>
+			<th class="num"><%=T("最近 30 天")%></th><th><%=T("命中过的目标")%></th>
+		</tr>
+		<% for _, r in ipairs(d.diag_rows) do %>
+		<tr>
+			<td><%=pcdata(r.mac)%>
+				<% if not r.online then %><span class="muted">(<%=T("已离线")%>)</span><% end %></td>
+			<td class="muted"><%=pcdata(r.ip or "")%></td>
+			<td class="muted"><%=pcdata(r.hostname or "")%></td>
+			<td><%=pcdata(r.entry or "")%></td>
+			<td class="num"><%=r.minutes%></td>
+			<td class="muted"><%=pcdata(r.first or "")%></td>
+			<td class="muted"><%=pcdata(r.last or "")%></td>
+			<td class="num"><%=r.total30%>
+				<%
+					-- 按天合计（最近 30 天）：只列有数据的天，避免 30 个 0 刷屏
+					local parts = {}
+					for _, day in ipairs(r.days30 or {}) do
+						if day.minutes > 0 then
+							parts[#parts + 1] = day.label .. ":" .. day.minutes
+						end
+					end
+					if #parts > 0 then
+				%>
+				<span class="muted" style="font-size:11px">(<%=pcdata(table.concat(parts, " "))%>)</span>
+				<% end %>
+			</td>
+			<td>
+				<% if r.multi then %>
+					<span class="muted"><%=T("多设备命中，目标未区分设备")%></span>
+				<% elseif r.targets and #r.targets > 0 then %>
+					<%
+						local tl = {}
+						for _, tg in ipairs(r.targets) do
+							tl[#tl + 1] = tg.target .. "(" .. tg.minutes .. ")"
+						end
+					%>
+					<%=pcdata(table.concat(tl, "、"))%>
+				<% else %>-<% end %>
+			</td>
+		</tr>
+		<% end %>
+	</table>
+	<div class="muted" style="margin-top:6px">
+		<%=T("诊断统计的是「命中了封锁目标、但不在该条目设备范围内」的客户端流量，用来发现绕过（例如设备换了 MAC 导致原条目不再生效）。限制：每个条目最多统计 8 台未覆盖客户端（在线优先）；多台客户端命中同一条目时，目标列表不区分设备。阈值与额度计时一致。")%>
+	</div>
+	<% end %>
+
 	<h3><%=T("重置记录")%></h3>
 	<% if #d.reset_rows == 0 then %>
 		<div class="muted"><%=T("还没有重置记录。在额度用完时点「重置」可以立刻清零，每次重置都会记在这里。")%></div>
