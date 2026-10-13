@@ -57,7 +57,7 @@ config vacation
 
 # AI 辅助解析（可选）：endpoint 为 OpenAI 兼容接口基址（如 http://192.168.1.10:11434/v1），
 # model 为模型 id，apikey 可留空。仅用于「编辑条目」页的「AI 解析」按钮。
-config ai
+config ai 'ai'
 	option endpoint ''
 	option model ''
 	option apikey ''
