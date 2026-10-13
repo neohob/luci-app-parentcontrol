@@ -326,9 +326,18 @@ function M.config()
 	local conf = { endpoint = "", model = "", apikey = "" }
 	pcall(function()
 		local uci = require("luci.model.uci").cursor()
-		conf.endpoint = uci:get("parentcontrol", "@ai[0]", "endpoint") or ""
-		conf.model    = uci:get("parentcontrol", "@ai[0]", "model") or ""
-		conf.apikey   = uci:get("parentcontrol", "@ai[0]", "apikey") or ""
+		-- A29/D21：段身份统一为命名节 `ai`，逐字段先读命名节，
+		-- 为空再回落 `@ai[0]`（兼容未迁移、仍为匿名节的老安装）。
+		local function pick(opt)
+			local v = uci:get("parentcontrol", "ai", opt)
+			if v == nil or v == "" then
+				v = uci:get("parentcontrol", "@ai[0]", opt)
+			end
+			return v or ""
+		end
+		conf.endpoint = pick("endpoint")
+		conf.model    = pick("model")
+		conf.apikey   = pick("apikey")
 	end)
 	return conf
 end
