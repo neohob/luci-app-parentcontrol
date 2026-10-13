@@ -385,7 +385,12 @@ pc_apps_rows() { # $1=apps 多行文本
 			for (i = 2; i <= NF; i++) d = (d == "") ? $i : d "|" $i
 			gsub(/[\r\t\n]/, " ", d); gsub(/,/, " ", d)
 			gsub(/ +/, " ", d); sub(/^ /, "", d); sub(/ $/, "", d)
-			if (name != "") print name "\t" d
+			# A30/D23：丢弃条件 = 名称与域名**都**空（与 pc-ui.js 的 sync() 同口径）。
+			# `|a.com`（名称空、域名非空）是**有效行**：名称空时用域名列表首项兜底显示名，
+			# 该行域名照常进入封锁目标/解析（不得静默丢弃）。
+			if (name == "" && d == "") next
+			if (name == "") { n = d; sub(/[ |].*$/, "", n); name = n }
+			print name "\t" d
 		}'
 }
 
