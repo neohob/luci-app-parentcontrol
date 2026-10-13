@@ -441,6 +441,9 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 # -X 只能删「已无人引用」的链，而链之间有引用关系（诊断 PCAD_ → PCDT_ → PCDC_），
 # 一轮下来可能剩孤儿 —— 所以循环重试到某一轮再也删不掉为止（real iptables 的 -X
 # 成功返回 0、失败非 0，用退出码判断）。
+# F-R5-2：每轮必须**先 -F 再 -X** —— 真 iptables 对非空链 -X 报 "Directory not
+# empty"；只 -X 时第一轮就删不掉任何带内容的链（PCAD_/PCDT_/PCAW_），_n=0 直接
+# break，stop() 后残留几十条 PC*_ 链。先清空再删链，多轮重试解引用依赖。
 clean_pca_chains() {
 	local _c _ip _n _round
 	for _ip in "$ipt" "$ipt6"; do
@@ -448,6 +451,7 @@ clean_pca_chains() {
 		for _round in 1 2 3 4 5 6; do
 			_n=0
 			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n 's/^-N \(PC[A-Z]*_[^ ]*\)$/\1/p'); do
+				$_ip -t mangle -F "$_c" 2>/dev/null
 				$_ip -t mangle -X "$_c" 2>/dev/null && _n=$((_n + 1))
 			done
 			[ "$_n" -gt 0 ] || break
