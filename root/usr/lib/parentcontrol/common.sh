@@ -370,12 +370,32 @@ pc_quota_positive() {
 }
 
 # ============================================================================
+# apps 行解析（第 8 轮 D14/ADR-018）：apps 是「封锁名称行表」的唯一数据源，
+# 每行 = `名称|域名列表`（名称不得含 | 与换行；域名列表可用逗号/空格/换行分隔）。
+# 解析只此一份：init.d 的 entry_domains 与下面的迁移共用，别处不得再写第二份拆分。
+# 输出：逐行 `名称<TAB>域名列表`；`|` 缺失的行按「纯名称」处理（域名列表为空）；空行跳过。
+# ============================================================================
+pc_apps_rows() { # $1=apps 多行文本
+	printf '%s\n' "$1" | awk -F'|' '
+		{
+			name = $1
+			gsub(/[\r\t\n]/, " ", name); gsub(/ +/, " ", name)
+			sub(/^ /, "", name); sub(/ $/, "", name)
+			d = ""
+			for (i = 2; i <= NF; i++) d = (d == "") ? $i : d "|" $i
+			gsub(/[\r\t\n]/, " ", d); gsub(/,/, " ", d)
+			gsub(/ +/, " ", d); sub(/^ /, "", d); sub(/ $/, "", d)
+			if (name != "") print name "\t" d
+		}'
+}
+
+# ============================================================================
 # 配置迁移（安装/升级时调用一次，幂等）：
 #   1) 补 basic 默认值；2) 老 word(关键词) → domains；3) 统一为「可用时段 + 额度」模型
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
 	#    （README 里承诺了这件事，就必须真的做；$PC_CONF_DIR 下没有配置文件时自动跳过。
 	#      PC_CONF_DIR / BACKUP_DIR 是可覆盖钩子（默认值 = 生产路径），供白盒测试把
@@ -402,6 +422,42 @@ pc_migrate_config() {
 		fi
 		# 老 word 一律删除：否则改了域名后，旧关键词仍会生成幽灵匹配规则
 		[ -n "$_w" ] && uci -q delete "$PC_CONF.@weburl[$_i].word"
+	done
+
+	# 2b) apps 归一化（第 8 轮 D14/ADR-018）：apps 成为「封锁名称行表」的唯一数据源，
+	#     一行 = 一台设备 + N 行 `名称|域名列表`。四种形态：
+	#       ① R6 形态（有 remarks/domains、无 apps）→ 一行 apps（名称 = remarks，空则首域名），
+	#          域名 = 原 domains 内容，随后**删除 domains**（防双源幽灵匹配，与 word 同理）
+	#       ② ≤1.8.2 老 apps（纯名称、整个值不含 `|`）→ 每个名称一行，域名 = 该条目原 domains
+	#       ③ 已是新形态（apps 含 `|`）→ 一个字段都不动（幂等）
+	#       ④ 都没有 → 不动
+	#     写进 apps 的域名列表必须是**单行**（换行在 apps 里是行分隔符，会把域名变成幽灵名称行），
+	#     所以先把 domains 的逗号/换行压成空格再拼。
+	for _i in $(pc_ids_all weburl); do
+		_a=$(pc_uget "@weburl[$_i].apps")
+		case "$_a" in *\|*) continue ;; esac
+		_d=$(pc_uget "@weburl[$_i].domains")
+		_d=$(printf '%s' "$_d" | tr ',\r\n' '   ' | awk '{ $1 = $1; print }')
+		_r=$(pc_uget "@weburl[$_i].remarks")
+		_r=$(printf '%s' "$_r" | tr '|\r\n\t' '    ' | awk '{ $1 = $1; print }')
+		if [ -n "$_a" ]; then
+			# ② 老 apps：纯名称列表（换行/逗号/空格分隔）→ 每名称一行，域名取该条目 domains 并集
+			_out=""
+			for _n in $(printf '%s' "$_a" | tr ',\r\n' '   '); do
+				_out="${_out}${_n}|${_d}
+"
+			done
+			[ -n "$_out" ] || continue
+			uci -q set "$PC_CONF.@weburl[$_i].apps=$_out"
+		elif [ -n "$_d" ]; then
+			# ① R6 形态：名称为空时用首个域名兜底
+			[ -n "$_r" ] || { set -- $_d; _r=$1; }
+			uci -q set "$PC_CONF.@weburl[$_i].apps=${_r}|${_d}"
+		else
+			continue
+		fi
+		uci -q delete "$PC_CONF.@weburl[$_i].domains"
+		_pclog "migrate: weburl[$_i] apps 归一化（domains 已并入 apps 行并删除）"
 	done
 
 	# 3) 统一为「可用时段 + 额度」模型。老配置有两代：

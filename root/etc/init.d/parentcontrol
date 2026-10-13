@@ -162,8 +162,22 @@ ip6_slash64() {
 		}'
 }
 
+# 条目的目标枚举源（第 8 轮 D14/ADR-018）：优先 apps 行表（各行 `|` 右侧的域名并集，
+# 去重、空格分隔），无 apps 时回退 domains，再回退老 word。解析只走 common.sh 的
+# pc_apps_rows（唯一实现），这里不再自己拆行。
 entry_domains() { # $1=module $2=idx
-	local _d
+	local _a _d
+	_a=$(pc_uget "@$1[$2].apps")
+	if [ -n "$_a" ]; then
+		pc_apps_rows "$_a" | awk -F'\t' '
+			{
+				n = split($2, w, / +/)
+				for (i = 1; i <= n; i++)
+					if (w[i] != "" && !seen[w[i]]++) out = (out == "") ? w[i] : out " " w[i]
+			}
+			END { print out }'
+		return 0
+	fi
 	_d=$(pc_uget "@$1[$2].domains")
 	[ -z "$_d" ] && _d=$(pc_uget "@$1[$2].word")
 	echo "$_d" | tr ',' ' '
