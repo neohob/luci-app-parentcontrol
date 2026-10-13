@@ -2,7 +2,7 @@
 --
 -- R6（名称条目模型）：解析输入 = 本条目的 remarks（一个条目一个名称；含逗号/
 -- 顿号分隔的多个名称也接受，一次请求返回全部名称的域名**并集**）。前端把并集
--- **去重合并追加**进本条 domains（不清空已有内容，见 ai_parse.htm）。
+-- **去重合并追加**进当前行（不清空已有内容，见 view/parentcontrol/apps_rows.htm + pc-ui.js）。
 --
 -- 设计要点（见 docs/superpowers/specs/pc-ui-ai-rework-*）：
 --  * 本模块是纯逻辑 + HTTP 代理：真正的网络请求交给 shell 子命令

@@ -1,0 +1,53 @@
+<%+cbi/valueheader%>
+<%
+	-- 封锁名称行表（第 8 轮 R9/D17/ADR-018）：一行一个名称 + 该名称的域名/IP。
+	-- 服务端先渲染已有行（无 JS 时也能看、也能原样保存）；增删 / 序列化 / 逐行 AI 解析
+	-- 由 pc-ui.js 的 pcAppsRows 统一实现（唯一 JS 实现，文案与 URL 由本模板传入）。
+	-- 真正的表单字段是下面隐藏的 textarea：name = self:cbid(section)，值 = apps 原文。
+	local ui = require "luci.model.cbi.parentcontrol.ui"
+	local raw = self:cfgvalue(section) or ""
+	local rows = ui.apps_rows(raw)
+%>
+<div class="pc-apps" id="pc-apps">
+	<p class="cbi-value-description">
+		<%=translate("一行一个名称：左边填要封锁的名称（如 小红书 / 我的世界），右边填该名称真正生效的域名或 IP。名称只是给人看的，真正拦住流量的是右边这一列（域名会由路由器解析成 IP）。")%>
+	</p>
+	<div class="pc-apps-list" data-pc-app-list>
+		<% for _, r in ipairs(rows) do %>
+		<div class="pc-app-row" data-pc-app-row>
+			<input type="text" class="pc-app-name" value="<%=pcdata(r.name)%>"
+				placeholder="<%=translate("名称，如 小红书")%>" />
+			<button type="button" class="cbi-button pc-app-ai" data-pc-app-ai><%=translate("AI 解析IP")%></button>
+			<input type="text" class="pc-app-dom" value="<%=pcdata(r.domains)%>"
+				placeholder="<%=translate("域名/IP，逗号或空格分隔")%>" />
+			<button type="button" class="cbi-button pc-app-del" data-pc-app-del><%=translate("删除")%></button>
+			<span class="pc-app-msg"></span>
+		</div>
+		<% end %>
+	</div>
+	<button type="button" class="cbi-button cbi-button-add" data-pc-app-add><%=translate("➕ 新增名称")%></button>
+</div>
+<textarea name="<%=self:cbid(section)%>" data-pc-app-value style="display:none"><%=pcdata(raw)%></textarea>
+<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
+<script type="text/javascript">//<![CDATA[
+	pcAppsRows({
+		root: 'pc-apps',
+		url: '<%=url("admin/control/parentcontrol/ai_parse")%>',
+		token: '<%=token%>',
+		aiText: '<%=translate("AI 解析IP")%>',
+		delText: '<%=translate("删除")%>',
+		namePh: '<%=translate("名称，如 小红书")%>',
+		domPh: '<%=translate("域名/IP，逗号或空格分隔")%>',
+		msg: {
+			emptyName: '<%=translate("请先在这一行填写名称")%>',
+			parsing:   '<%=translate("正在解析…")%>',
+			noResult:  '<%=translate("AI 没有解析出合法域名，请手动填写域名或 IP")%>',
+			added:     '<%=translate("新增")%>',
+			items:     '<%=translate("项")%>',
+			truncated: '<%=translate("（名称过长已截断）")%>',
+			netFail:   '<%=translate("请求失败，请检查网络后重试")%>',
+			fail:      '<%=translate("解析失败，请检查 AI 设置")%>'
+		}
+	});
+//]]></script>
+<%+cbi/valuefooter%>

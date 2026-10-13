@@ -33,6 +33,64 @@ local function get(map, section, key)
 	return map:get(section, key)
 end
 
+-- ============================================================================
+-- 封锁名称行表（第 8 轮 R9/R11/D17/ADR-018）：Lua 侧解析与展示的唯一实现。
+-- 数据格式与 shell 侧 pc_apps_rows 同源：每行 `名称|域名列表`；缺 `|` 的行按纯名称处理；
+-- 空行跳过。名称不得含 `|` 与换行（写入时由前端保证）。
+-- ============================================================================
+local function trim(s)
+	return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- HTML 转义（列表页「封锁条目」列要求：pcdata 转义后再拼 <br>，名称里的 < & " 不能破坏页面）
+local function escape(s)
+	s = tostring(s or "")
+	s = s:gsub("&", "&amp;")
+	s = s:gsub("<", "&lt;")
+	s = s:gsub(">", "&gt;")
+	s = s:gsub('"', "&quot;")
+	return s
+end
+
+function M.apps_rows(text)
+	local rows = {}
+	for line in tostring(text or ""):gmatch("[^\r\n]+") do
+		if line:match("%S") then
+			local name, dom = line:match("^([^|]*)|(.*)$")
+			if name then
+				rows[#rows + 1] = { name = trim(name), domains = trim(dom) }
+			else
+				rows[#rows + 1] = { name = trim(line), domains = "" }
+			end
+		end
+	end
+	return rows
+end
+
+-- 行表里的名称列表（非空名称，保持行序）
+function M.app_names(text)
+	local out = {}
+	for _, r in ipairs(M.apps_rows(text)) do
+		if r.name ~= "" then out[#out + 1] = r.name end
+	end
+	return out
+end
+
+-- 列表页「封锁条目」列：每个名称先 HTML 转义、再用 <br> 连接（转义在前、拼接在后）
+function M.apps_html(text)
+	local out = {}
+	for _, r in ipairs(M.apps_rows(text)) do
+		if r.name ~= "" then out[#out + 1] = escape(r.name) end
+	end
+	return table.concat(out, "<br>")
+end
+
+-- 条目的名单模式：缺失/非 white 一律按 black（与 shell 侧 _quota_emit_rules 同一判据）
+function M.mode(map, section)
+	if tostring(map:get(section, "mode") or "") == "white" then return "white" end
+	return "black"
+end
+
 -- 与后端 pc_quota_positive 同口径的归一：纯数字 → 该数；非纯数字 → 0（新语义 0 = 全禁）；
 -- 空/没填 → nil（表示"没有这个额度来源"，由调用方继续往下判）
 local function qmin(v)

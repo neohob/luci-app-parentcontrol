@@ -1,4 +1,8 @@
--- 名称条目（一个条目 = 一个要封锁的名称，R6）的详细设置页（从列表页的「编辑」按钮进入，section id 在 arg[1]）
+-- 条目详细设置页（第 8 轮 D17/ADR-018：一个条目 = 一台设备 + 若干行「封锁名称」）。
+-- 字段顺序（D17 写死）：条目名称(remarks) → MAC → 绑定状态 → 静态IP → 封锁名称行表(apps)
+--                        → 黑/白名单(mode) → 平日/节假日档案。
+-- 旧的「域名/IP」(domains) 大框与页面级「AI 解析」按钮已撤：前者由行表取代（迁移把
+-- domains 并进 apps 行），后者由行表里的逐行「AI 解析IP」取代（同一个 ai_parse 接口）。
 local o = require "luci.sys"
 local disp = require "luci.dispatcher"
 local parts = require "luci.model.cbi.parentcontrol.parts"
@@ -9,8 +13,8 @@ if not arg[1] then
 end
 
 local a, t, e
-a = Map("parentcontrol", translate("编辑名称条目"),
-	translate("一个条目 = 一个要封锁的名称（设备绑定 + 该名称自己的域名/IP + 自己的额度档案）；多个名称就分多条条目。</br>平日 / 节假日 两套档案各自设<b>可用时段</b>+<b>每日额度</b>。</br><b>可用时段</b>内才能使用（默认全天 00:00:00-23:59:59；不跨日，起必须早于止），时段外的流量直接被丢弃、<b>不计入额度</b>；时段内累计用满额度也会被封。</br>勾 <b>不限额度</b> 就只受时段限制（额度框会消失）。额度 <b>0</b> = 一分钟都不给（全禁）。额度按自然日、每天 0 点重置，可填共享组名并入额度池。"))
+a = Map("parentcontrol", translate("编辑条目"),
+	translate("一个条目 = 一台被管设备 + 若干行「封锁名称」。在下面逐行填：名称（给人看）+ 该名称真正生效的域名/IP。</br>平日 / 节假日 两套档案各自设<b>可用时段</b>+<b>每日额度</b>。<b>可用时段</b>内才能使用（默认全天 00:00:00-23:59:59；不跨日、起必须早于止），时段外的流量直接被丢弃、<b>不计入额度</b>；时段内累计用满额度也会被封。</br>勾 <b>不限额度</b> 就只受时段限制（额度框会消失）。额度 <b>0</b> = 一分钟都不给（全禁）。额度按自然日、每天 0 点重置，可填共享组名并入额度池。"))
 a.redirect = disp.build_url("admin", "control", "parentcontrol", "weburl")
 a.template = "parentcontrol/edit"
 
@@ -22,15 +26,12 @@ end
 t = a:section(NamedSection, arg[1], "weburl")
 t.addremove = false
 
--- R6：名称放最前，「AI 解析」紧随其后（一对一，不再有 apps/domains 两个大框）
-e = t:option(Value, "remarks", translate("要封锁的名称"),
-	translate("这条条目要封锁什么：填一个应用/游戏/网站名称（中英文均可），也可直接填域名或 IP/CIDR。多个名称请分多条条目添加；点下方「AI 解析」把名称换成真实域名。"))
+-- ① 条目名称 = 这台设备的别名（展示用；可留空，列表页会兜底显示首个封锁名称）
+e = t:option(Value, "remarks", translate("条目名称"),
+	translate("这台被管设备的别名（如 iPad Pro）。只用于在列表里认出它；要封锁什么在下面的「封锁名称」行表里逐条填。"))
 e.rmempty = true
 
-e = t:option(DummyValue, "pc_ai_parse", translate("AI 解析"),
-	translate("把上面的名称交给 AI，换成真实域名并追加到「域名/IP」。"))
-e.template = "parentcontrol/ai_parse"
-
+-- ② 设备绑定：MAC → 绑定状态 → 静态IP/主机名
 e = t:option(Value, "mac", translate("MAC地址"))
 e.rmempty = true
 o.net.mac_hints(function(mac, name) e:value(mac, "%s (%s)" % {mac, name}) end)
@@ -46,9 +47,18 @@ e = t:option(Value, "ip", translate("静态IP/主机名"),
 	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
 e.rmempty = true
 
-e = t:option(TextValue, "domains", translate("域名/IP") .. '<font color="green">' .. translate("(该名称的生效列表，逗号或换行分隔)") .. '</font>',
-	translate("该名称真正生效的列表：这里填的域名会由路由器解析成 IP，并按目标 IP 封锁（IPv4 上无法按域名或文本内容匹配）。「AI 解析」的结果会追加到这里。"))
+-- ③ 封锁名称行表：一行一个名称（名称给人看，生效靠该行的域名/IP）
+e = t:option(TextValue, "apps", translate("封锁名称"),
+	translate("一行一个名称。点该行的「AI 解析IP」把名称换成真实域名；结果**追加**进该行（已存在的不重复添加，原有内容不会被覆盖）。"))
+e.template = "parentcontrol/apps_rows"
 e.rmempty = true
+
+-- ④ 黑 / 白名单模式（默认黑名单；白名单下额度与时段照旧生效）
+e = t:option(ListValue, "mode", translate("名单模式"),
+	translate("黑名单：只封下面列出的目标（默认）。白名单：只放行下面列出的目标，该设备的其余流量全部封锁（局域网、路由器自身、DNS 与 DHCP 始终可用）。两种模式下额度与时段都照旧生效。"))
+e:value("black", translate("黑名单（只封列出的目标）"))
+e:value("white", translate("白名单（只放行列出的目标，其余全封）"))
+e.default = "black"
 
 parts.add_profile(t, "sd", translate("平日"))
 parts.add_profile(t, "hd", translate("节假日"))

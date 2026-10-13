@@ -1,0 +1,7 @@
+<%+cbi/valueheader%>
+<%
+	-- 列表页「封锁条目」列（第 8 轮 R11/D17）：每个名称**先转义**再用 <br> 连接
+	-- （转义在模型侧 ui.apps_html 完成），这里按原样写出，不再二次转义。
+%>
+<%=self:cfgvalue(section) or ""%>
+<%+cbi/valuefooter%>
