@@ -23,6 +23,9 @@ ipt6=$(command -v ip6tables-legacy || command -v ip6tables)
 #   已废弃，只在 del_rule 里按字面量清理一次。
 TAGA="PARENTCONTROL_ACCT"
 TAGQ="PARENTCONTROL_QUOTA"
+TAGD="PARENTCONTROL_DIAG"
+# 诊断明细的客户端上限（D19/A27）：每条目最多给这么多台「未覆盖客户端」装计数规则。
+PC_DIAG_MAX=${PC_DIAG_MAX:-8}
 FWI="/var/etc/$CONFIG.include"
 IPDIR=${IPDIR:-/etc/parentcontrol/ips}
 USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
@@ -33,6 +36,7 @@ STATE_DIR=${STATE_DIR:-/tmp/parentcontrol}
 RESET_LOG=${RESET_LOG:-/etc/parentcontrol/resets.log}
 # DHCP 租约（dnsmasq 格式）——hosts_tsv 用它补 IP/主机名；可覆盖以便白盒测试指到临时文件。
 DHCP_LEASES=${DHCP_LEASES:-/tmp/dhcp.leases}
+TAB=$(printf '\t')   # 诊断文件的字段分隔符（c 行含主机名，不能用空格）
 CRON_TAG="#pc_tick"
 CRON_TAG_IP="#pc_ip_refresh"
 
@@ -442,7 +446,7 @@ clean_pca_chains() {
 		[ -n "$_ip" ] || continue
 		for _round in 1 2 3 4 5 6; do
 			_n=0
-			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA[A-Z]*_[^ ]*\)$/\1/p'); do
+			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n 's/^-N \(PC[A-Z]*_[^ ]*\)$/\1/p'); do
 				$_ip -t mangle -X "$_c" 2>/dev/null && _n=$((_n + 1))
 			done
 			[ "$_n" -gt 0 ] || break
@@ -683,6 +687,260 @@ build_quota_blocks() {
 	return 0
 }
 
+# ============================================================================
+# 诊断明细（第 8 轮 R13/D19/ADR-020）
+#   语义：对每个**启用**的网址条目 E，把「命中了 E 的目标、但不在 E 的设备范围
+#   （mac ≠ E.mac 且 ip ≠ E.ip）」的 LAN 客户端流量，按 (E, 客户端) 与 (E, 目标) 记账。
+#   链：TAGD（PARENTCONTROL_DIAG，挂在 PREROUTING 最后）
+#        → PCAD_<key>（每个目标一条 → PCDT_<key>_<t>）
+#        → PCDT_<key>_<t>（每个未覆盖客户端一条 -m mac → PCDC_<key>_<c>）
+#        → PCDC_<key>_<c>（空链，仅作计数身份）
+#   诊断链内**只有跳转**：没有 DROP/ACCEPT/RETURN，不改道、不丢包、不参与封锁与计时。
+#   计数器身份 = 跳转目标链名（与 acct_bytes 读 PCA_<key> 同构）：
+#     · 每条目「目标数」个 PCDT 链 → 每个目标的命中量
+#     · 每条目「未覆盖客户端数」个 PCDC 链 → 每个客户端命中该条目目标的量
+#   只有「有设备条件」且「有可枚举目标」的网址条目才装（时间/协议条目没有目标集）。
+# ============================================================================
+
+# 未覆盖客户端（一行一个 mac；在线优先、按 mac 升序，上限 PC_DIAG_MAX）
+diag_clients() { # $1=module $2=idx
+	local _emac _eip
+	_emac=$(pc_uget "@$1[$2].mac" | tr 'A-F' 'a-f')
+	_eip=$(pc_uget "@$1[$2].ip")
+	# 没有任何设备条件的条目 = 对所有客户端生效 ⇒ 不存在「未覆盖客户端」
+	[ -n "$_emac$_eip" ] || return 0
+	hosts_tsv | awk -v m="$_emac" -v i="$_eip" '
+		$1 == "host" && $2 != "" {
+			mac = tolower($2)
+			if (mac == m) next
+			if (i != "" && $3 == i) next
+			print $5, mac
+		}' | sort -k1,1r -k2,2 | head -n "$PC_DIAG_MAX" | awk '{ print $2 }'
+	return 0
+}
+
+# 条目的目标枚举（与封锁/计数同一套源：IP 目录 + 明文 DNS/SNI 串）
+diag_targets() { # $1=module $2=idx
+	local _f
+	_f="$IPDIR/weburl_$2"
+	[ -f "$_f" ] && grep -v '^$' "$_f"
+	# 注意：weburl_patterns 只吃「下标」（模块名在它内部写死）
+	weburl_patterns "$2"
+	return 0
+}
+
+# PCDT_<key>_<t> 的内容：每个未覆盖客户端一条（跳该客户端的空计数链 PCDC_<key>_<c>）。
+# 该链只被目标规则跳入 ⇒ PCDC 的字节数 = 该客户端命中「该条目目标」的流量。
+diag_client_rules() { # $1=ipcmd $2=key $3=目标序号 $4=客户端文件
+	local _c _key _t _cf _nh _mac
+	_c=$1; _key=$2; _t=$3; _cf=$4
+	[ -n "$PC_RENDER" ] || ensure_chain "$_c" mangle "PCDT_${_key}_$_t"
+	_nh=0
+	while read -r _mac; do
+		[ -n "$_mac" ] || continue
+		_nh=$((_nh + 1))
+		ipt_do "$_c" -t mangle -A "PCDT_${_key}_$_t" -m mac --mac-source "$_mac" -j "PCDC_${_key}_$_nh"
+	done < "$_cf"
+	return 0
+}
+
+# 诊断链的渲染 / 真下发（渲染模式只记文本，绝不碰内核）
+_diag_emit_rules() {
+	local _key _m _i _tf _itf _cf _n _c _c2 _mac _p _algos _nh
+	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
+	_tf="$STATE_DIR/diag.t.$$"; _cf="$STATE_DIR/diag.c.$$"
+	for _key in $(pc_active_keys); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		[ "$_m" = "weburl" ] || continue          # 只有网址条目有可枚举的目标
+		diag_clients "$_m" "$_i" > "$_cf"
+		[ -s "$_cf" ] || continue                 # 无未覆盖客户端 → 一个规则都不装
+		diag_targets "$_m" "$_i" > "$_tf"
+		[ -s "$_tf" ] || continue
+		# ① TAGD → PCAD_<key>（整个条目一条；链内再按目标/客户端分流）
+		for _c2 in "$ipt" "$ipt6"; do
+			[ -n "$PC_RENDER" ] || ensure_chain "$_c2" mangle "PCAD_$_key"
+			ipt_do "$_c2" -t mangle -I "$TAGD" -j "PCAD_$_key"
+		done
+		# ② 客户端计数链（空链，仅作身份）先建好：PCDC_<key>_<c>
+		_nh=0
+		for _mac in $(cat "$_cf"); do
+			_nh=$((_nh + 1))
+			for _c2 in "$ipt" "$ipt6"; do
+				[ -n "$PC_RENDER" ] || ensure_chain "$_c2" mangle "PCDC_${_key}_$_nh"
+			done
+		done
+		# ③a IP 目标（来自 IP 目录）：按地址族给一条 -d，目标序号与
+		#    diag_targets 的输出顺序一致（IP 在前、匹配串在后）——采样靠它对齐。
+		_n=0
+		_itf="$STATE_DIR/diag.ip.$$"
+		[ -f "$IPDIR/weburl_$_i" ] && grep -v '^$' "$IPDIR/weburl_$_i" > "$_itf"
+		while read -r _p; do
+			[ -n "$_p" ] || continue
+			_n=$((_n + 1))
+			case "$_p" in *:*) _c=$ipt6 ;; *) _c=$ipt ;; esac
+			ipt_do "$_c" -t mangle -I "PCAD_$_key" -d "$_p" -j "PCDT_${_key}_$_n"
+			diag_client_rules "$_c" "$_key" "$_n" "$_cf"
+		done < "$_itf"
+		rm -f "$_itf"
+		# ③b 匹配串目标（明文 DNS/SNI，与封锁同源）：两族各两条
+		for _p in $(weburl_patterns "$_i"); do
+			_n=$((_n + 1))
+			for _c in "$ipt" "$ipt6"; do
+				ipt_do "$_c" -t mangle -I "PCAD_$_key" -p UDP --dport 53 \
+					-m string --algo "$_algos" --string "$_p" -j "PCDT_${_key}_$_n"
+				ipt_do "$_c" -t mangle -I "PCAD_$_key" -p TCP -m multiport --dports 80,443 \
+					-m string --algo "$_algos" --string "$_p" -j "PCDT_${_key}_$_n"
+				diag_client_rules "$_c" "$_key" "$_n" "$_cf"
+			done
+		done
+	done
+	rm -f "$_tf" "$_cf"
+	return 0
+}
+
+render_diag_spec() {
+	local _f
+	mkdir -p "$STATE_DIR"
+	_f="$STATE_DIR/dspec.$$"
+	: > "$_f"
+	PC_RENDER="$_f"
+	_diag_emit_rules
+	unset PC_RENDER
+	cat "$_f"
+	rm -f "$_f"
+	return 0
+}
+
+# 与 build_quota_blocks 同构：spec 文本 + TAGD 条数不变就一个 iptables 都不动。
+build_diag_blocks() {
+	local _spec _old _ccnt _lcnt _ip
+	[ -n "$ipt" ] || return 0
+	_spec=$(render_diag_spec)
+	_old=$(cat "$STATE_DIR/diagspec" 2>/dev/null)
+	_ccnt=$(printf '%s\n' "$_spec" | awk -F'|' -v t="$TAGD" '
+		{ if (index($0, " -I " t) > 0) n[$1]++ }
+		END { printf "%d %d", n["v4"]+0, n["v6"]+0 }')
+	_lcnt="$(live_rule_count "$ipt" "$TAGD") $(live_rule_count "$ipt6" "$TAGD")"
+	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
+		return 0
+	fi
+	for _ip in "$ipt" "$ipt6"; do
+		ensure_chain "$_ip" mangle "$TAGD"
+		$_ip -t mangle -F "$TAGD" 2>/dev/null
+	done
+	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收
+	clean_pca_chains
+	_diag_emit_rules
+	printf '%s' "$_spec" > "$STATE_DIR/diagspec"
+	return 0
+}
+
+# ---- 诊断采样与落盘（与额度计数同一阈值、同一「先采样后重建」口径）----
+
+# 今日诊断文件（TAB 分隔：c/t 两种行，见 D19）
+diag_file() { echo "$USAGE_DIR/diag/$(date +%Y%m%d)"; }
+
+# 本分钟增量（与额度计数同一算法：计数器可被重建清零，回零时按「清零后的值」计）
+# 输出增量并把当前值写回基线文件。
+diag_delta() { # $1=当前字节 $2=基线文件
+	local _b _d
+	_b=0
+	[ -f "$2" ] && _b=$(cat "$2" 2>/dev/null)
+	case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
+	if [ "$1" -ge "$_b" ]; then _d=$(( $1 - _b )); else _d=$1; fi
+	echo "$1" > "$2"
+	echo "$_d"
+}
+
+# t <entry_key> <target> <minutes>
+diag_bump_t() { # $1=key $2=target
+	local _f _now
+	_f=$(diag_file); _now=$(date +%H:%M:%S)
+	mkdir -p "$USAGE_DIR/diag"
+	[ -f "$_f" ] || : > "$_f"
+	awk -F'\t' -v OFS='\t' -v k="$1" -v tg="$2" -v now="$_now" '
+		$1 == "t" && $2 == k && $3 == tg { $4 = $4 + 1; hit = 1 }
+		{ print }
+		END { if (!hit) print "t", k, tg, 1 }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+	return 0
+}
+
+# c <entry_key> <mac> <ip> <hostname> <minutes> <first> <last>
+# minutes+1；first 只在首次写入；last 每次刷新（A24/W101）。
+diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
+	local _f _now
+	_f=$(diag_file); _now=$(date +%H:%M:%S)
+	mkdir -p "$USAGE_DIR/diag"
+	[ -f "$_f" ] || : > "$_f"
+	awk -F'\t' -v OFS='\t' -v k="$1" -v mc="$2" -v ip="$3" -v hn="$4" -v now="$_now" '
+		$1 == "c" && $2 == k && $3 == mc {
+			$6 = $6 + 1
+			if ($4 == "" || $4 == "-") $4 = ip
+			if ($5 == "" || $5 == "-") $5 = hn
+			if ($7 == "") $7 = now
+			$8 = now
+			hit = 1
+		}
+		{ print }
+		END { if (!hit) print "c", k, mc, ip, hn, 1, now, now }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+	return 0
+}
+
+# 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
+sample_diag_counters() { # $1=阈值（字节）
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k
+	[ -n "$ipt" ] || return 0
+	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
+	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
+	mkdir -p "$STATE_DIR" "$USAGE_DIR/diag"
+	_thr=$1
+	_dump="$STATE_DIR/diag.dump.$$"; _tf="$STATE_DIR/diag.tg.$$"
+	{ $ipt -t mangle -nvx -L 2>/dev/null; $ipt6 -t mangle -nvx -L 2>/dev/null; } > "$_dump"
+	_hosts=$(hosts_tsv 2>/dev/null)
+	for _key in $(pc_active_keys); do
+		_m=${_key%%_*}; _i=${_key#*_}
+		[ "$_m" = "weburl" ] || continue
+		$ipt -t mangle -n -L "PCAD_$_key" >/dev/null 2>&1 || continue
+		diag_targets "$_m" "$_i" > "$_tf"
+		_n=0
+		while read -r _tg; do
+			[ -n "$_tg" ] || continue
+			_n=$((_n + 1))
+			# 注意：-nvx -L 的计数列是右对齐的（行首有空格），所以按「第一个字段是纯数字」
+			# 识别规则行，不能用 ^[0-9]。
+			_v=$(awk -v c="PCAD_$_key" -v t="PCDT_${_key}_$_n" '
+				/^Chain / { ch = $2; next }
+				$1 ~ /^[0-9]+$/ { if (ch == c && $3 == t) s += $2 }
+				END { printf "%d", s + 0 }' "$_dump")
+			_bf="$STATE_DIR/dbase.${_key}.t$_n"
+			_d=$(diag_delta "$_v" "$_bf")
+			[ "$_d" -gt 0 ] && diag_bump_t "$_key" "$_tg"
+		done < "$_tf"
+		_n=0
+		for _mac in $(diag_clients "$_m" "$_i"); do
+			_n=$((_n + 1))
+			_v=$(awk -v t="PCDC_${_key}_$_n" '
+				$1 ~ /^[0-9]+$/ { if ($3 == t) s += $2 }
+				END { printf "%d", s + 0 }' "$_dump")
+			_bf="$STATE_DIR/dbase.${_key}.c$_n"
+			_d=$(diag_delta "$_v" "$_bf")
+			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] || continue
+			_ip=$(printf '%s\n' "$_hosts" | awk -v m="$_mac" '$1 == "host" && $2 == m { print $3; exit }')
+			_hn=$(printf '%s\n' "$_hosts" | awk -v m="$_mac" '$1 == "host" && $2 == m { print $4; exit }')
+			diag_bump_c "$_key" "$_mac" "$_ip" "$_hn"
+		done
+	done
+	rm -f "$_dump" "$_tf"
+	# 条目被删/禁用后清掉它的诊断基线（与 base.* 同思路）
+	for _bf in "$STATE_DIR"/dbase.*; do
+		[ -e "$_bf" ] || continue
+		_k=${_bf##*/dbase.}
+		_k=${_k%%.*}
+		pc_active_keys | grep -qx "$_k" || rm -f "$_bf"
+	done
+	return 0
+}
+
 # 额度计数链名（供 sample 读取）
 active_acct_keys() { pc_active_keys; }
 
@@ -717,6 +975,8 @@ sample_counters() {
 		_k=${_bf##*/base.}
 		active_acct_keys | grep -qx "$_k" || rm -f "$_bf"
 	done
+	# 诊断明细与额度计数同一口径（同一阈值、同一「先采样后重建」不变量，R21/W101）
+	sample_diag_counters "$_thr"
 }
 
 # ============================================================================
@@ -733,13 +993,16 @@ build_all() {
 		ensure_chain "$_ip" mangle "$TAGQ"
 	done
 	build_acct_rules "$_tt"
-	# PREROUTING 顺序必须是 TAGQ → TAGA（被封的包不再进计数链）。
-	# hook_chain 用 -I 插到链首，所以先挂 TAGA、后挂 TAGQ，最终就是 TAGQ 在前。
+	# PREROUTING 顺序必须是 TAGQ → TAGA → TAGD：封锁链在前（被封的包不再进计数链），
+	# 计数链居中，诊断链最后（只计数、不改道）。hook_chain 用 -I 插到链首，
+	# 所以按 D → A → Q 的顺序挂，最终就是 Q 在前、D 在最后。
 	for _ip in "$ipt" "$ipt6"; do
+		hook_chain "$_ip" mangle PREROUTING "$TAGD"
 		hook_chain "$_ip" mangle PREROUTING "$TAGA"
 		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 	done
 	build_quota_blocks
+	build_diag_blocks
 	apply_offload
 	echo "$_tt" > "$STATE_DIR/daytype"
 }
@@ -747,7 +1010,7 @@ build_all() {
 del_rule() {
 	local _ip _ta _c
 	for _ip in "$ipt" "$ipt6"; do
-		for _ta in "$TAGQ" "$TAGA"; do
+		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
 			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
@@ -960,7 +1223,7 @@ hosts_tsv() {
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 #   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
 stats_tsv() {
-	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl
+	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _dm _di _dname _donl _k
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
@@ -998,8 +1261,9 @@ stats_tsv() {
 			printf 'pool\t%s\t%s\t%s\t%s\n' "$_n" "$_q" "$_u" \
 				"$(pool_members "$_n" "$_tt" | tr '\n' ',' | sed 's/,$//')"
 		done
-		# 历史（最近 30 天）
-		for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | tail -30); do
+		# 历史（最近 30 天）。第 8 轮起 $USAGE_DIR 下多了 diag/ 子目录（诊断明细），
+		# 它不是用量文件，不能进 hist 统计。
+		for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | grep -v '^diag$' | tail -30); do
 			_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
 			printf 'hist\t%s\t%s\n' "$_f" "$_t"
 			awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null
@@ -1009,6 +1273,41 @@ stats_tsv() {
 		# 30 天窗口由 Lua 侧按日期过滤（shell 不做日期算术）。
 		if [ -f "$RESET_LOG" ]; then
 			tail -n 2000 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 {gsub(/-/,"",$1); printf "reset\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+		fi
+		# 诊断明细（第 8 轮 R13/D19）：
+		#   diag    <entry_key> <name> <mac> <ip> <hostname> <online> <today_minutes> <first> <last>
+		#   diagtgt <entry_key> <target> <today_minutes>
+		#   diagday <YYYYMMDD> <entry_key> <mac> <minutes>
+		# 30 天窗口由 Lua 侧按日期过滤/补零（shell 不做日期算术，与 hist 同惯例）。
+		_dd="$USAGE_DIR/diag"
+		if [ -d "$_dd" ]; then
+			_hs="$STATE_DIR/hosts.stats.$$"
+			hosts_tsv > "$_hs" 2>/dev/null
+			_dtf="$_dd/$(pc_today | tr -d '-')"
+			if [ -f "$_dtf" ]; then
+				while IFS="$TAB" read -r _k _key _mac _ip _hn _min _first _last; do
+					[ "$_k" = "c" ] || continue
+					_dm=${_key%%_*}; _di=${_key#*_}
+					_dname=$(pc_uget "@$_dm[$_di].remarks" | tr -d '\t\r\n')
+					# 条目名为空 → 兜底到首个封锁名称（与列表页「条目名称」列同一链路）
+					if [ -z "$_dname" ]; then
+						_dname=$(pc_apps_rows "$(pc_uget "@$_dm[$_di].apps")" | head -n 1 | cut -f1 | tr -d '\t\r\n')
+					fi
+					_donl=$(awk -v m="$_mac" '$1 == "host" && $2 == m { print $5; exit }' "$_hs" 2>/dev/null)
+					case "$_donl" in 1) ;; *) _donl=0 ;; esac
+					printf 'diag\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+						"$_key" "$_dname" "$_mac" "$_ip" "$_hn" "$_donl" "$_min" "$_first" "$_last"
+				done < "$_dtf"
+				awk -F'\t' '$1 == "t" { printf "diagtgt\t%s\t%s\t%s\n", $2, $3, $4 }' "$_dtf"
+			fi
+			for _df in $(ls -1 "$_dd" 2>/dev/null | tail -30); do
+				[ -f "$_dd/$_df" ] || continue
+				awk -F'\t' -v d="$_df" '
+					$1 == "c" { s[$2 SUBSEP $3] += $6 }
+					END { for (k in s) { split(k, kv, SUBSEP); printf "diagday\t%s\t%s\t%s\t%d\n", d, kv[1], kv[2], s[k] } }' \
+					"$_dd/$_df"
+			done
+			rm -f "$_hs"
 		fi
 		[ -n "$_dump" ] && rm -f "$_dump"
 	fi
@@ -1044,6 +1343,7 @@ tick_body() {
 	else
 		sample_counters
 		build_quota_blocks
+		build_diag_blocks
 	fi
 }
 
@@ -1067,6 +1367,7 @@ rebuild_ip_rules() {
 	done
 	build_acct_rules "$_tt"
 	build_quota_blocks
+	build_diag_blocks
 }
 
 # cron 每 ip_refresh 分钟：采样后重解析域名、重建 IP 相关规则。

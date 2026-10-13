@@ -19,10 +19,15 @@ end
 --   hist    <YYYYMMDD> <minutes>
 --   histkey <YYYYMMDD> <key> <minutes>
 --   reset   <YYYYMMDD> <HH:MM:SS> <key> <重置前已用分钟>
+--   diag    <entry_key> <name> <mac> <ip> <hostname> <online> <today_minutes> <first> <last>
+--   diagtgt <entry_key> <target> <today_minutes>
+--   diagday <YYYYMMDD> <entry_key> <mac> <minutes>
 function M.parse(raw)
 	local d = {
 		meta = {}, entries = {}, by_key = {}, pools = {},
 		hist = {}, hist_key = {}, resets = {},
+		-- 第 8 轮（R13/D19）：诊断明细三行
+		diag = {}, diag_tgt = {}, diag_day = {},
 	}
 	for _, line in ipairs(util.split(raw or "", "\n")) do
 		if line ~= "" then
@@ -57,6 +62,24 @@ function M.parse(raw)
 				d.resets[#d.resets + 1] = {
 					date = f[2], time = f[3], key = f[4], before = num(f[5]),
 				}
+			elseif k == "diag" then
+				-- 缺字段一律容错：数值缺省 0、文本缺省空串（老日志/截断行不得让整页崩）
+				d.diag[#d.diag + 1] = {
+					key = f[2] or "", name = f[3] or "", mac = f[4] or "",
+					ip = f[5] or "", hostname = f[6] or "",
+					online = (f[7] == "1"), minutes = num(f[8]),
+					first = f[9] or "", last = f[10] or "",
+				}
+			elseif k == "diagtgt" then
+				d.diag_tgt[#d.diag_tgt + 1] = {
+					key = f[2] or "", target = f[3] or "", minutes = num(f[4]),
+				}
+			elseif k == "diagday" then
+				local dt = f[2]
+				if dt then
+					d.diag_day[dt] = d.diag_day[dt] or {}
+					d.diag_day[dt][(f[3] or "") .. "|" .. (f[4] or "")] = num(f[5])
+				end
 			end
 		end
 	end

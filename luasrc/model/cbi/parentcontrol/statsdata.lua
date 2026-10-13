@@ -317,6 +317,50 @@ function M.collect()
 	while #rr > 60 do table.remove(rr) end
 	d.reset_rows = rr
 
+	-- 9) 诊断明细（第 8 轮 R13/D19/A24）：未被条目覆盖、但命中了条目目标的流量。
+	--    行 = (条目, MAC)：按今日命中分钟降序；每行带 30 天按天合计（与 d.days 对齐、缺日补零）。
+	--    目标列表**仅在**该条目只有一台未覆盖客户端有命中时内联；多台时标注「目标未区分设备」。
+	local dlabel = {}
+	for _, e in ipairs(d.entries) do dlabel[e.key] = e.label end
+	local tgt_by_key = {}
+	for _, tg in ipairs(d.diag_tgt or {}) do
+		tgt_by_key[tg.key] = tgt_by_key[tg.key] or {}
+		local l = tgt_by_key[tg.key]
+		l[#l + 1] = { target = tg.target, minutes = tg.minutes }
+	end
+	local drows = {}
+	for _, r in ipairs(d.diag or {}) do
+		local row = {
+			key = r.key, mac = r.mac, ip = r.ip, hostname = r.hostname,
+			online = r.online, minutes = r.minutes, first = r.first, last = r.last,
+			entry = dlabel[r.key] or r.key,
+			device = M.device_name(r.mac),
+			days30 = {}, total30 = 0, by_date = {},
+		}
+		local perday = (d.diag_day or {})
+		for _, day in ipairs(d.days) do
+			local v = (perday[day.date] or {})[r.key .. "|" .. r.mac] or 0
+			row.days30[#row.days30 + 1] = { date = day.date, label = day.label, minutes = v }
+			row.by_date[day.date] = v
+			row.total30 = row.total30 + v
+		end
+		drows[#drows + 1] = row
+	end
+	table.sort(drows, function(x, y)
+		if x.minutes ~= y.minutes then return x.minutes > y.minutes end
+		return x.mac < y.mac
+	end)
+	local perkey = {}
+	for _, r in ipairs(drows) do perkey[r.key] = (perkey[r.key] or 0) + 1 end
+	for _, r in ipairs(drows) do
+		if perkey[r.key] == 1 then
+			r.targets = tgt_by_key[r.key] or {}
+		else
+			r.multi = true
+		end
+	end
+	d.diag_rows = drows
+
 	return d
 end
 
