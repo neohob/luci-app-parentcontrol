@@ -67,8 +67,9 @@ function M.apps_rows(text)
 	return rows
 end
 
--- 行的显示名（A30 四处同口径：名称空时用域名列表首项兜底）。首项按空白/逗号/分号切分，
--- 与 shell `pc_apps_rows`、前端 `pc-ui.js` 的 splitTokens 同一判据；两者都空 → 返回 ""（调用方跳过）。
+-- 行的显示名（A30：名称空时用域名列表首项兜底）。四处只保证「有效性判据」一致
+-- （名称与域名都空才丢弃）；首项切分在中英标点/竖线上可能不同，且只影响展示名，
+-- 不影响封锁目标集与解析。
 -- 注意：不要用本函数改编辑页输入框的值（apps_rows.htm 走 M.apps_rows，名称必须原样、可为空）。
 local function disp_name(r)
 	if r.name ~= "" then return r.name end
