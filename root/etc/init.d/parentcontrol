@@ -429,14 +429,23 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 }
 
 
+# 清掉本插件的所有自定义链（计数 PCA_、白名单 PCAW_、诊断 PCAD_/PCDT_/PCDC_）。
+# -X 只能删「已无人引用」的链，而链之间有引用关系（诊断 PCAD_ → PCDT_ → PCDC_），
+# 一轮下来可能剩孤儿 —— 所以循环重试到某一轮再也删不掉为止（real iptables 的 -X
+# 成功返回 0、失败非 0，用退出码判断）。
 clean_pca_chains() {
-	local _c
-	for _c in $($ipt -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA_[^ ]*\)$/\1/p'); do
-		$ipt -t mangle -X "$_c" 2>/dev/null
+	local _c _ip _n _round
+	for _ip in "$ipt" "$ipt6"; do
+		[ -n "$_ip" ] || continue
+		for _round in 1 2 3 4 5 6; do
+			_n=0
+			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA[A-Z]*_[^ ]*\)$/\1/p'); do
+				$_ip -t mangle -X "$_c" 2>/dev/null && _n=$((_n + 1))
+			done
+			[ "$_n" -gt 0 ] || break
+		done
 	done
-	for _c in $($ipt6 -t mangle -S 2>/dev/null | sed -n 's/^-N \(PCA_[^ ]*\)$/\1/p'); do
-		$ipt6 -t mangle -X "$_c" 2>/dev/null
-	done
+	return 0
 }
 
 # 计数规则：常开（跳进空链 PCA_<key>，读跳转规则的字节计数）
@@ -474,6 +483,55 @@ pool_usage() { # $1=池名 $2=school|holiday
 # 把某条目封进 TAGQ（设备条件 × 目标）
 block_entry() { # $1=module $2=idx
 	emit_entry_targets "$1" "$2" mangle "$TAGQ" "$TAGQ" "" "-j DROP" all
+}
+
+# ============================================================================
+# 黑白名单（第 8 轮 R12/D16/ADR-019）：mode=white = 该设备「默认全封 + 目标放行」
+# ============================================================================
+
+# 白名单的「全封该设备」：无目标条件（连条目目标也不可达）。额度耗尽时用。
+# 无设备条件的条目绝不装（调用点已由 block_skip_devless 拦下），否则就是全网无条件 DROP。
+block_entry_all() { # $1=module $2=idx
+	emit_dev_rule "$ipt"  mangle "$TAGQ" "$1" "$2" "" "-j DROP" all
+	emit_dev_rule "$ipt6" mangle "$TAGQ" "$1" "$2" "" "-j DROP" all
+}
+
+# 白名单的「时段外全封」：设备条件 × 时间条件，同样无目标条件。
+block_entry_window_all() { # $1=module $2=idx $3=UTC起秒 $4=UTC止秒
+	local _t
+	_t="-m time --timestart $(pc_sec_hhmmss "$3") --timestop $(pc_sec_hhmmss "$4")"
+	emit_dev_rule "$ipt"  mangle "$TAGQ" "$1" "$2" "$_t" "-j DROP" all
+	emit_dev_rule "$ipt6" mangle "$TAGQ" "$1" "$2" "$_t" "-j DROP" all
+}
+
+# 允许中的白名单条目：条目设备跳进 PCAW_<key>。
+white_entry_jump() { # $1=module $2=idx
+	local _key
+	_key=$(entry_key "$1" "$2")
+	emit_dev_rule "$ipt"  mangle "$TAGQ" "$1" "$2" "" "-j PCAW_$_key" all
+	emit_dev_rule "$ipt6" mangle "$TAGQ" "$1" "$2" "" "-j PCAW_$_key" all
+}
+
+# 白名单链 PCAW_<key> 的内容：
+#   条目目标 RETURN（与封锁同一套目标枚举）→ DNS(53)/DHCP(67/68) RETURN → 末尾 DROP。
+# 内容也走 ipt_do（渲染模式只记文本）⇒「记下来的规则 == 下发的规则」对 PCAW 同样成立，
+# 目标 IP 变化会改变 spec 文本、从而触发重建（不会留下过期的白名单）。
+# 只在真下发时 -N/-F（渲染模式碰内核会瞬时放空白名单）。
+white_chain_fill() { # $1=module $2=idx
+	local _key _ip
+	_key=$(entry_key "$1" "$2")
+	for _ip in "$ipt" "$ipt6"; do
+		[ -n "$PC_RENDER" ] || ensure_chain "$_ip" mangle "PCAW_$_key"
+	done
+	emit_entry_targets "$1" "$2" mangle "PCAW_$_key" "PCAW_$_key" "" "-j RETURN" all
+	for _ip in "$ipt" "$ipt6"; do
+		ipt_do "$_ip" -t mangle -A "PCAW_$_key" -p UDP --dport 53 -j RETURN
+		ipt_do "$_ip" -t mangle -A "PCAW_$_key" -p TCP --dport 53 -j RETURN
+		ipt_do "$_ip" -t mangle -A "PCAW_$_key" -p UDP -m multiport --dports 67,68 -j RETURN
+		ipt_do "$_ip" -t mangle -A "PCAW_$_key" -p UDP -m multiport --sports 67,68 -j RETURN
+		ipt_do "$_ip" -t mangle -A "PCAW_$_key" -j DROP
+	done
+	return 0
 }
 
 # 条目生效的额度/已用：挂了池且池有额度就用池的，否则用条目自己的。
@@ -517,11 +575,33 @@ block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
 # 封锁链的实际下发动作。渲染（判断规则集有没有变）与真下发共用这一份代码，
 # 保证「记下来的规则」永远等于「下发的规则」。
 _quota_emit_rules() { # $1=daytype $2=局域网网段列表
-	local _key _m _i _a _b _ip _tt _lan
+	local _key _m _i _a _b _ip _tt _lan _white
 	_tt=$1; _lan=$2
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		block_skip_devless "$_m" "$_i" "$_lan" && continue
+		_white=0
+		[ "$(pc_uget "@$_m[$_i].mode")" = "white" ] && _white=1
+		if [ "$_white" = 1 ]; then
+			# 白名单（D16/ADR-019）：判定口径与黑名单完全一致（可用时段 + 额度），
+			# 只是「封什么」不同 —— 允许中只放行条目目标（其余全封），被全封则整台设备全封。
+			if [ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" != "1" ]; then
+				set -- $(entry_effective "$_m" "$_i" "$_tt")
+				if [ "$2" -ge "$1" ]; then
+					# 被全封：只发无目标条件的全封，连条目目标也不可达
+					block_entry_all "$_m" "$_i"
+					continue
+				fi
+			fi
+			# 允许中：先发 PCAW 跳转，再发时段外全封 —— -I 是头插，后发射者在前，
+			# 于是「时段外全封」排在「PCAW 跳转」之前先命中；时段内落到 PCAW 跳转。
+			white_entry_jump "$_m" "$_i"
+			white_chain_fill "$_m" "$_i"
+			pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
+				[ -n "$_a" ] && block_entry_window_all "$_m" "$_i" "$_a" "$_b"
+			done
+			continue
+		fi
 		# ① 可用时段之外
 		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
 			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"
@@ -554,9 +634,13 @@ render_quota_spec() { # $1=daytype $2=局域网网段列表
 	return 0
 }
 
-# 规则文本里各协议族的条数（输出 "v4数 v6数"）
+# 规则文本里各协议族的条数（输出 "v4数 v6数"）。只数**插进 TAGQ** 的 -I 行：
+# 同一份 spec 里还记着白名单链 PCAW_* 的内容（-A 行），它们不在封锁链里，
+# 不能混进「链内条数」校验（否则每次都判为变化、每分钟重建 → 制造封锁空窗）。
 spec_rule_counts() {
-	printf '%s\n' "$1" | awk -F'|' '/ -I /{n[$1]++} END{printf "%d %d", n["v4"]+0, n["v6"]+0}'
+	printf '%s\n' "$1" | awk -F'|' -v t="$TAGQ" '
+		{ if (index($0, " -I " t) > 0) n[$1]++ }
+		END { printf "%d %d", n["v4"]+0, n["v6"]+0 }'
 }
 
 live_rule_count() { # $1=ipcmd $2=链名 → 链内规则条数
@@ -588,6 +672,9 @@ build_quota_blocks() {
 		ensure_chain "$_ip" mangle "$TAGQ"
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
+	# TAGQ 已清空 ⇒ 白名单链 PCAW_* 此刻无人引用，顺手回收（条目被禁用/删除/改成黑名单后
+	# 不会留下孤儿链）；下面 white_chain_fill 会为仍在用的白名单条目重新建链。
+	clean_pca_chains
 	_quota_emit_rules "$_tt" "$_lan"
 	printf '%s' "$_spec" > "$STATE_DIR/quotaspec"
 	return 0
