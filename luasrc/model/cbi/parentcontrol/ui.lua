@@ -67,11 +67,20 @@ function M.apps_rows(text)
 	return rows
 end
 
--- 行表里的名称列表（非空名称，保持行序）
+-- 行的显示名（A30 四处同口径：名称空时用域名列表首项兜底）。首项按空白/逗号/分号切分，
+-- 与 shell `pc_apps_rows`、前端 `pc-ui.js` 的 splitTokens 同一判据；两者都空 → 返回 ""（调用方跳过）。
+-- 注意：不要用本函数改编辑页输入框的值（apps_rows.htm 走 M.apps_rows，名称必须原样、可为空）。
+local function disp_name(r)
+	if r.name ~= "" then return r.name end
+	return r.domains:match("^[^%s,;、，；]+") or ""
+end
+
+-- 行表里的名称列表（保持行序；两者都空的行才跳过）
 function M.app_names(text)
 	local out = {}
 	for _, r in ipairs(M.apps_rows(text)) do
-		if r.name ~= "" then out[#out + 1] = r.name end
+		local n = disp_name(r)
+		if n ~= "" then out[#out + 1] = n end
 	end
 	return out
 end
@@ -80,7 +89,8 @@ end
 function M.apps_html(text)
 	local out = {}
 	for _, r in ipairs(M.apps_rows(text)) do
-		if r.name ~= "" then out[#out + 1] = escape(r.name) end
+		local n = disp_name(r)
+		if n ~= "" then out[#out + 1] = escape(n) end
 	end
 	return table.concat(out, "<br>")
 end
