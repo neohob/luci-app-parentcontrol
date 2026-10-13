@@ -218,6 +218,23 @@ mangle PREROUTING）都不再经过**，挂在 PREROUTING 上的规则自然也�
 
 倒序排列。
 
+### 1.8.5（2026-10-13）修复 ipk 安装时的 `Conffiles` 解析告警
+
+**改动**：
+
+1. **修复 `.ipk` 安装告警**：1.8.4 的控制信息里同时写了 Debian 风格的 `Conffiles:` 字段，
+   而 `opkg`/lede 不认它，会在装包时打印
+   `parse_conffiles: Failed to parse Conffiles line for luci-app-parentcontrol`。本次删掉该字段，
+   **配置保护改由 `control.tar.gz` 内的独立 `conffiles` 成员承担**（这本就是 opkg 认的规范，
+   1.8.4 也已经生成了该成员，所以配置保护行为与 1.8.4 完全一致 —— 只是不再有告警）。
+
+**行为**：无任何运行逻辑改动 —— `root/`、`luasrc/`、`htdocs/`、`Makefile` 之外零改动，
+本次只动发布脚本 `.github/workflows/release.yml`。
+
+**真机验收**（ImmortalWrt 23.05 x86/64，iptables-legacy）：`opkg install --force-reinstall`
+零 `parse_conffiles` 告警；`/etc/config/parentcontrol` 与黑白名单 sha256 逐字节不变；
+`mangle` 规则数不变；`.run` 安装路径回归通过（用户文件仍走 `*.pc-new`）。
+
 ### 1.8.4（2026-10-13）统计页全宽 + 「设置」页 + AI 名称解析 + 安装不再覆盖配置
 
 **改动**（本次为一次较大的界面与流程重整，运行逻辑的封锁口径未变）：
