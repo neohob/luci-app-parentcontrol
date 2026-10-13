@@ -18,8 +18,9 @@ TICK_LOCK=${TICK_LOCK:-/tmp/lock/${CONFIG}.tick}
 ipt=$(command -v iptables-legacy || command -v iptables)
 ipt6=$(command -v ip6tables-legacy || command -v ip6tables)
 
-# 统一后只剩两条链（都在 mangle PREROUTING，顺序 TAGQ → TAGA）：
-#   TAGQ 额度/时段封锁、TAGA 用量计数。老版本的 PARENTCONTROL_TIME/PROTOCOL/WEBURL/IP
+# 统一后只剩三条链（都在 mangle PREROUTING，顺序 TAGQ → TAGA → TAGD）：
+#   TAGQ 额度/时段封锁、TAGA 用量计数、TAGD 诊断明细（只计数、不改道）。
+#   老版本的 PARENTCONTROL_TIME/PROTOCOL/WEBURL/IP
 #   已废弃，只在 del_rule 里按字面量清理一次。
 TAGA="PARENTCONTROL_ACCT"
 TAGQ="PARENTCONTROL_QUOTA"
@@ -991,6 +992,10 @@ build_all() {
 		# TAGQ 不在这里 -F：封锁链的清空/重建由 build_quota_blocks 统一负责，
 		# 它在规则集没变时完全不动链（否则每次 reload 都要开一个封锁空窗）
 		ensure_chain "$_ip" mangle "$TAGQ"
+		# F-R5-3：TAGD 也必须在 hook 之前先建出来 —— hook_chain 是「-C || -I」
+		# 且吞 stderr，目标链不存在时 -I 静默失败，诊断链就永远没有跳转而 0
+		# references（del_rule 每次 stop/restart 都会把三条链 -X 掉，真机实测）。
+		ensure_chain "$_ip" mangle "$TAGD"
 	done
 	build_acct_rules "$_tt"
 	# PREROUTING 顺序必须是 TAGQ → TAGA → TAGD：封锁链在前（被封的包不再进计数链），
@@ -1356,12 +1361,16 @@ refresh_ip() {
 # 只重建依赖 IP 解析结果的 mangle 链（网址时段/计数/额度封锁）。
 # 注意：fw4 reload 会清掉这些链与 PREROUTING 跳转，所以必须 ensure/hook，
 # 否则 cron 路径会静默失效（直到下次 restart 或跨天重建）。
+# F-R5-3：TAGD 同样要 ensure + hook（此前缺了它，fw4 reload 后诊断链跳转丢失，
+# cron 也补不回来）；链一律先 ensure 再 hook，hook 顺序 D→A→Q（-I 头插 ⇒ Q→A→D）。
 rebuild_ip_rules() {
 	local _tt _ip
 	_tt=$(pc_today_type)
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGA"
 		ensure_chain "$_ip" mangle "$TAGQ"
+		ensure_chain "$_ip" mangle "$TAGD"
+		hook_chain "$_ip" mangle PREROUTING "$TAGD"
 		hook_chain "$_ip" mangle PREROUTING "$TAGA"
 		hook_chain "$_ip" mangle PREROUTING "$TAGQ"
 	done
