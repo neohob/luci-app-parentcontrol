@@ -1391,14 +1391,15 @@ tick_body() {
 	# 正在 start（重建全套规则）时跳过，避免并发
 	[ -f "$LOCK" ] && return 0
 	if ! pc_uget "@basic[0].enabled" | grep -q '^1$'; then
-		# D28/A35 停用：把设备收敛到「零残留」。稳态（已清理过：STATE_DIR 不存在）
-		# 直接返回 —— cron 每分钟跑，此路径一条 iptables 都不发（W117②）。
-		# 仅当运行期状态目录尚在（= 规则曾建立且尚未清理，如「uci set enabled=0
-		# 后只跑 tick」）才探测；有残留才 del_rule，无残留一条 -D/-F/-X 都不发。
-		if [ -e "$STATE_DIR" ]; then
-			pc_residual_on_device && del_rule
-			rm -rf "$STATE_DIR"
+		# D32/A45 停用：把设备收敛到「零残留」——每 tick **无条件**只读探测（每协议族
+		# 1 次 -S，≤2 次/分钟；写侧稳态仍 0）。旧实现用 [ -e "$STATE_DIR" ] 当探测门槛，
+		# 「规则仍在设备上、但运行期状态目录被删」的形态会永不清理（死角）。
+		# 有残留 → del_rule → 复验，仍残留则 elog（下个 tick 重试）；两种情况都清状态目录。
+		if pc_residual_on_device; then
+			del_rule
+			pc_residual_on_device && elog "停用清理未彻底（仍有残留），下个 tick 重试"
 		fi
+		rm -rf "$STATE_DIR"
 		return 0
 	fi
 	mkdir -p "$STATE_DIR"
