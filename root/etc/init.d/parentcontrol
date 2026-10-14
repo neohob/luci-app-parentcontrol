@@ -892,8 +892,11 @@ diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
 	_f=$(diag_file); _now=$(date +%H:%M:%S)
 	mkdir -p "$USAGE_DIR/diag"
 	[ -f "$_f" ] || : > "$_f"
-	awk -F'\t' -v OFS='\t' -v k="$1" -v mc="$2" -v ip="$3" -v hn="$4" -v now="$_now" \
-		-v nm="$(entry_disp_name "$1")" '
+	# nm/hn 是字符串类传参，改走环境：awk -v 会解释反斜杠转义（a\tb→真 TAB、
+	# a\\b 丢反斜杠、\061→1），ENVIRON 原样透传（A47/review10 Low-1）。
+	# 字符集受控的 k/mc/ip/now 仍用 -v；$4–$8 位置与语义逐字节不变。
+	nm=$(entry_disp_name "$1") hn="$4" \
+		awk -F'\t' -v OFS='\t' -v k="$1" -v mc="$2" -v ip="$3" -v now="$_now" 'BEGIN{ nm = ENVIRON["nm"]; hn = ENVIRON["hn"] }
 		$1 == "c" && $2 == k && $3 == mc {
 			$6 = $6 + 1
 			if ($4 == "" || $4 == "-") $4 = ip
