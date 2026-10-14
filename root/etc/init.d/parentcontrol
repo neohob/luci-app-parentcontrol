@@ -1282,6 +1282,42 @@ stats_tsv() {
 		done
 	done
 	if [ "$_brief" != "brief" ]; then
+		# A50/D34 name 行：展示名「一份权威名单」（on/off/gone 三态），Lua 侧永不回退裸 key。
+		#   name <key> <display> <state>；on=启用中 off=配置在但未启用 gone=配置已无（近 30 天出现过）
+		# 集合 = on ∪ off ∪ gone；gone = 近 30 天 histkey/reset 出现过 − 配置里存在。
+		# gone 的 display：diag c 行第 9 字段快照（单次 awk 汇总全部 diag 文件，不逐文件启 shell）
+		# → 无快照退「条目 #<idx+1>」（key 形如 <module>_<idx>；解析失败退「条目 #?」）。
+		for _m in $PC_MODULES; do
+			for _i in $(pc_ids_all "$_m"); do
+				_key="${_m}_${_i}"
+				if pc_ids_on "$_m" | grep -qx "$_i"; then _st=on; else _st=off; fi
+				_dname=$(entry_disp_name "$_key")
+				printf 'name\t%s\t%s\t%s\n' "$_key" "$_dname" "$_st"
+			done
+		done
+		# gone 集合与快照：单次 awk 汇总（近 30 天 histkey/reset − 配置存在的 key）
+		{
+			for _m in $PC_MODULES; do
+				for _i in $(pc_ids_all "$_m"); do printf '%s\t%s\n' "${_m}_${_i}" 1; done
+			done
+			awk -F'\t' '{ n[$2]=1 } END { for (k in n) print k }' \
+				$(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | tail -30)
+			awk -F'\t' 'NF >= 4 { n[$3]=1 } END { for (k in n) print k }' \
+				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
+			tail -n 2000 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 { n[$3]=1 } END { for (k in n) print k }'
+			awk -F'\t' '$1 == "c" && $9 != "" && !($2 in s) { s[$2]=$9 } END { for (k in s) print "snap:" k "\t" s[k] }' \
+				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
+		} | awk -F'\t' '
+			NF == 1 { seen[$1]=1; next }
+			{ gots[$1]=$2; next }
+			END {
+				for (k in seen) {
+					if (gots[k] != "") continue   # 配置里存在（on/off 已在上面输出）
+					nm = gots["snap:" k] ""
+					if (nm == "") { _di = k; sub(/^[a-z]+_/, "", _di); nm = (_di ~ /^[0-9]+$/) ? "条目 #" _di + 1 : "条目 #?" }
+					printf "name\t%s\t%s\tgone\n", k, nm
+				}
+			}'
 		# 共享池
 		for _i in $(pc_ids_all quota); do
 			_n=$(pc_uget "@quota[$_i].name"); [ -n "$_n" ] || continue
