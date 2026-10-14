@@ -877,8 +877,7 @@ diag_bump_t() { # $1=key $2=target
 	return 0
 }
 
-# D31/A44：条目展示名（诊断区 live 查询与 c 行第 9 字段快照共用）：
-# remarks → apps 首行名 → 空串。输出前去掉 TAB/CR/LF（TAB 是诊断文件字段分隔符）。
+# D31/A44：条目展示名（诊断区 live 与 c 行快照共用）：remarks → apps 首行名 → 空串；去 TAB/CR/LF。
 entry_disp_name() { # $1=entry_key（<模块>_<下标>）
 	local _m=${1%%_*} _i=${1#*_} _n
 	_n=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
@@ -886,10 +885,8 @@ entry_disp_name() { # $1=entry_key（<模块>_<下标>）
 	printf '%s' "$_n"
 }
 
-# c <entry_key> <mac> <ip> <hostname> <minutes> <first> <last> <name>
-# minutes+1；first 只在首次写入；last 每次刷新（A24/W101）。
-# $4–$8 的位置与语义不变；$9 = 展示名快照（D31/A44：条目删除后诊断区的唯一名称来源），
-# 每次 bump 重写（条目改名后快照跟着更新）。
+# c <entry_key> <mac> <ip> <hostname> <minutes> <first> <last> <name>；minutes+1、first 只写一次、
+# last 每次刷新（A24/W101）。$4–$8 位置/语义不变；$9=展示名快照（D31/A44，每次 bump 重写）。
 diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
 	local _f _now
 	_f=$(diag_file); _now=$(date +%H:%M:%S)
@@ -1317,9 +1314,7 @@ stats_tsv() {
 				while IFS="$TAB" read -r _k _key _mac _ip _hn _min _first _last _snap; do
 					[ "$_k" = "c" ] || continue
 					_di=${_key#*_}
-					# D31/A44 名称三档回退：① live（remarks → apps 首项，条目仍在配置里时最权威）
-					# ② 行内第 9 字段快照（条目已删除时唯一来源；旧 8 字段文件此处为空）
-					# ③ 条目 #<下标+1> —— 任何情况都不得输出裸 key weburl_N。
+					# D31/A44 三档回退：① live ② 行内第 9 字段快照（条目已删除时唯一来源；旧 8 字段文件为空）③ 条目 #N；绝不裸 key
 					_dname=$(entry_disp_name "$_key")
 					[ -n "$_dname" ] || _dname=$_snap
 					[ -n "$_dname" ] || _dname="条目 #$((_di + 1))"
@@ -1391,9 +1386,8 @@ tick_body() {
 	# 正在 start（重建全套规则）时跳过，避免并发
 	[ -f "$LOCK" ] && return 0
 	if ! pc_uget "@basic[0].enabled" | grep -q '^1$'; then
-		# D32/A45 停用：把设备收敛到「零残留」——每 tick **无条件**只读探测（每协议族
-		# 1 次 -S，≤2 次/分钟；写侧稳态仍 0）。旧实现用 [ -e "$STATE_DIR" ] 当探测门槛，
-		# 「规则仍在设备上、但运行期状态目录被删」的形态会永不清理（死角）。
+		# D32/A45 停用：每 tick **无条件**只读探测（≤2 次 -S；写侧稳态仍 0）——旧实现用
+		# [ -e "$STATE_DIR" ] 当门槛，「规则在但状态目录被删」会永不清理（死角）。
 		# 有残留 → del_rule → 复验，仍残留则 elog（下个 tick 重试）；两种情况都清状态目录。
 		if pc_residual_on_device; then
 			del_rule
