@@ -66,6 +66,7 @@ function M.apps_rows(text)
 	end
 	return rows
 end
+-- [/M.apps_rows]
 
 -- 行的显示名（A30：名称空时用域名列表首项兜底）。四处只保证「有效性判据」一致
 -- （名称与域名都空才丢弃）；首项切分在中英标点/竖线上可能不同，且只影响展示名，
