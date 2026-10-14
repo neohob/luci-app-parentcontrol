@@ -76,6 +76,7 @@ local function disp_name(r)
 	if r.name ~= "" then return r.name end
 	return r.domains:match("^[^%s,;、，；]+") or ""
 end
+-- [/ui.lua disp_name]
 
 -- 行表里的名称列表（保持行序；两者都空的行才跳过）
 function M.app_names(text)
