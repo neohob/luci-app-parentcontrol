@@ -877,24 +877,37 @@ diag_bump_t() { # $1=key $2=target
 	return 0
 }
 
-# c <entry_key> <mac> <ip> <hostname> <minutes> <first> <last>
+# D31/A44：条目展示名（诊断区 live 查询与 c 行第 9 字段快照共用）：
+# remarks → apps 首行名 → 空串。输出前去掉 TAB/CR/LF（TAB 是诊断文件字段分隔符）。
+entry_disp_name() { # $1=entry_key（<模块>_<下标>）
+	local _m=${1%%_*} _i=${1#*_} _n
+	_n=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
+	[ -n "$_n" ] || _n=$(pc_apps_rows "$(pc_uget "@$_m[$_i].apps")" | head -n 1 | cut -f1 | tr -d '\t\r\n')
+	printf '%s' "$_n"
+}
+
+# c <entry_key> <mac> <ip> <hostname> <minutes> <first> <last> <name>
 # minutes+1；first 只在首次写入；last 每次刷新（A24/W101）。
+# $4–$8 的位置与语义不变；$9 = 展示名快照（D31/A44：条目删除后诊断区的唯一名称来源），
+# 每次 bump 重写（条目改名后快照跟着更新）。
 diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
 	local _f _now
 	_f=$(diag_file); _now=$(date +%H:%M:%S)
 	mkdir -p "$USAGE_DIR/diag"
 	[ -f "$_f" ] || : > "$_f"
-	awk -F'\t' -v OFS='\t' -v k="$1" -v mc="$2" -v ip="$3" -v hn="$4" -v now="$_now" '
+	awk -F'\t' -v OFS='\t' -v k="$1" -v mc="$2" -v ip="$3" -v hn="$4" -v now="$_now" \
+		-v nm="$(entry_disp_name "$1")" '
 		$1 == "c" && $2 == k && $3 == mc {
 			$6 = $6 + 1
 			if ($4 == "" || $4 == "-") $4 = ip
 			if ($5 == "" || $5 == "-") $5 = hn
 			if ($7 == "") $7 = now
 			$8 = now
+			$9 = nm
 			hit = 1
 		}
 		{ print }
-		END { if (!hit) print "c", k, mc, ip, hn, 1, now, now }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+		END { if (!hit) print "c", k, mc, ip, hn, 1, now, now, nm }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
 	return 0
 }
 
@@ -1239,7 +1252,7 @@ hosts_tsv() {
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 #   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
 stats_tsv() {
-	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _dm _di _dname _donl _k
+	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _di _dname _donl _k _snap
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
@@ -1301,14 +1314,15 @@ stats_tsv() {
 			hosts_tsv > "$_hs" 2>/dev/null
 			_dtf="$_dd/$(pc_today | tr -d '-')"
 			if [ -f "$_dtf" ]; then
-				while IFS="$TAB" read -r _k _key _mac _ip _hn _min _first _last; do
+				while IFS="$TAB" read -r _k _key _mac _ip _hn _min _first _last _snap; do
 					[ "$_k" = "c" ] || continue
-					_dm=${_key%%_*}; _di=${_key#*_}
-					_dname=$(pc_uget "@$_dm[$_di].remarks" | tr -d '\t\r\n')
-					# 条目名为空 → 兜底到首个封锁名称（与列表页「条目名称」列同一链路）
-					if [ -z "$_dname" ]; then
-						_dname=$(pc_apps_rows "$(pc_uget "@$_dm[$_di].apps")" | head -n 1 | cut -f1 | tr -d '\t\r\n')
-					fi
+					_di=${_key#*_}
+					# D31/A44 名称三档回退：① live（remarks → apps 首项，条目仍在配置里时最权威）
+					# ② 行内第 9 字段快照（条目已删除时唯一来源；旧 8 字段文件此处为空）
+					# ③ 条目 #<下标+1> —— 任何情况都不得输出裸 key weburl_N。
+					_dname=$(entry_disp_name "$_key")
+					[ -n "$_dname" ] || _dname=$_snap
+					[ -n "$_dname" ] || _dname="条目 #$((_di + 1))"
 					_donl=$(awk -v m="$_mac" '$1 == "host" && $2 == m { print $5; exit }' "$_hs" 2>/dev/null)
 					case "$_donl" in 1) ;; *) _donl=0 ;; esac
 					printf 'diag\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
