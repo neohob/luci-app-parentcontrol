@@ -210,7 +210,7 @@
 				<% if not r.online then %><span class="muted">(<%=T("已离线")%>)</span><% end %></td>
 			<td class="muted"><%=pcdata(r.ip or "")%></td>
 			<td class="muted"><%=pcdata(r.hostname or "")%></td>
-			<td><%=pcdata(r.entry or "")%></td>
+			<td><%=pcdata(r.entry or "")%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %></td>
 			<td class="num"><%=r.minutes%></td>
 			<td class="muted"><%=pcdata(r.first or "")%></td>
 			<td class="muted"><%=pcdata(r.last or "")%></td>
@@ -246,6 +246,9 @@
 	</table>
 	<div class="muted" style="margin-top:6px">
 		<%=T("诊断统计的是「命中了封锁目标、但不在该条目设备范围内」的客户端流量，用来发现绕过（例如设备换了 MAC 导致原条目不再生效）。限制：每个条目最多统计 8 台未覆盖客户端（在线优先）；多台客户端命中同一条目时，目标列表不区分设备。阈值与额度计时一致。")%>
+	</div>
+	<div class="muted" style="margin-top:6px">
+		<%=T("已停用/已删除条目的历史诊断计数仍保留，其封锁规则已清理。")%>
 	</div>
 	<% end %>
 
