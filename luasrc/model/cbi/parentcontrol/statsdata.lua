@@ -336,7 +336,9 @@ function M.collect()
 			-- D29/A36：名称一律取 stats_tsv 已解析的行内 name（remarks → apps 首项）；
 			-- 条目当前不在启用列表（dlabel 无此 key）时，仍用行内 name 显示条目名，
 			-- 只有行内 name 也为空才退回原始 key —— 诊断区永不出现 weburl_N 这类裸 key。
-			entry = (r.name ~= nil and r.name ~= "") or dlabel[r.key] or r.key,
+			-- A43：收尾必须 `and r.name` —— Lua 的 and/or 返回操作数本身，子表达式
+			-- (A and B) 为真时结果是布尔 true，漏掉 and r.name 会把字面量 true 渲染进页面。
+			entry = (r.name ~= nil and r.name ~= "") and r.name or dlabel[r.key] or r.key,
 			device = M.device_name(r.mac),
 			days30 = {}, total30 = 0, by_date = {},
 		}
