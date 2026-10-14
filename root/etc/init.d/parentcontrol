@@ -1343,13 +1343,58 @@ with_tick_lock() {
 
 tick() { with_tick_lock tick_body; }
 
+# D28：设备上是否留有本插件的运行时痕迹 —— mangle 表存在任一 PARENTCONTROL_* 跳转，
+# 或任一 PC[A-Z]*_ 自定义链（PCA_/PCAW_/PCAD_/PCDT_/PCDC_……「PCD 开头」曾漏过，正则必须 PC[A-Z]*_）。
+# 只读探测：每协议族一次 -S；停用清理路径专用（绝不在探测前发 -D/-F/-X）。
+pc_residual_on_device() {
+	local _ip _snap
+	for _ip in "$ipt" "$ipt6"; do
+		[ -n "$_ip" ] || continue
+		_snap=$($_ip -t mangle -S 2>/dev/null)
+		printf '%s\n' "$_snap" | grep -qE '^-A PREROUTING .*-j PARENTCONTROL_' && return 0
+		printf '%s\n' "$_snap" | grep -qE '^-N PC[A-Z]*_' && return 0
+	done
+	return 1
+}
+
+# D28：三条跳转（QUOTA/ACCT/DIAG）在 PREROUTING/mangle 是否齐备（v4 与 v6 都要）。
+# 启用路径的自愈判据：缺任一 → build_all（保证与 restart 同路径、顺序恒为 Q→A→D）。
+pc_hooks_present() {
+	local _ip _snap _ta
+	for _ip in "$ipt" "$ipt6"; do
+		[ -n "$_ip" ] || continue
+		_snap=$($_ip -t mangle -S 2>/dev/null)
+		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
+			printf '%s\n' "$_snap" | grep -qE "^-A PREROUTING .*-j $_ta( |$)" || return 1
+		done
+	done
+	return 0
+}
+
 tick_body() {
 	local _tt
-	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
 	[ -n "$ipt" ] || return 0
 	# 正在 start（重建全套规则）时跳过，避免并发
 	[ -f "$LOCK" ] && return 0
+	if ! pc_uget "@basic[0].enabled" | grep -q '^1$'; then
+		# D28/A35 停用：把设备收敛到「零残留」。稳态（已清理过：STATE_DIR 不存在）
+		# 直接返回 —— cron 每分钟跑，此路径一条 iptables 都不发（W117②）。
+		# 仅当运行期状态目录尚在（= 规则曾建立且尚未清理，如「uci set enabled=0
+		# 后只跑 tick」）才探测；有残留才 del_rule，无残留一条 -D/-F/-X 都不发。
+		if [ -e "$STATE_DIR" ]; then
+			pc_residual_on_device && del_rule
+			rm -rf "$STATE_DIR"
+		fi
+		return 0
+	fi
 	mkdir -p "$STATE_DIR"
+	# D28/A35 启用但三条跳转缺任一（fw4 reload / 上次 stop 后只靠 cron 的路径）：
+	# build_all 整套重建 —— 它自带 ensure_chain 先建后挂 D→A→Q（最终 Q→A→D），
+	# 与 restart/start 同路径（幂等，可反复跑）。
+	if ! pc_hooks_present; then
+		build_all
+		return 0
+	fi
 	_tt=$(pc_today_type)
 	if [ "$(cat "$STATE_DIR/daytype" 2>/dev/null)" != "$_tt" ]; then
 		# 跨天 / 日子类型变化 → 生效档案变了，整套静态规则重建
