@@ -333,10 +333,15 @@ function M.collect()
 		local row = {
 			key = r.key, mac = r.mac, ip = r.ip, hostname = r.hostname,
 			online = r.online, minutes = r.minutes, first = r.first, last = r.last,
-			entry = dlabel[r.key] or r.key,
+			-- D29/A36：名称一律取 stats_tsv 已解析的行内 name（remarks → apps 首项）；
+			-- 条目当前不在启用列表（dlabel 无此 key）时，仍用行内 name 显示条目名，
+			-- 只有行内 name 也为空才退回原始 key —— 诊断区永不出现 weburl_N 这类裸 key。
+			entry = (r.name ~= nil and r.name ~= "") or dlabel[r.key] or r.key,
 			device = M.device_name(r.mac),
 			days30 = {}, total30 = 0, by_date = {},
 		}
+		-- 条目已停用/已删除：其封锁规则已清理，但历史诊断计数仍保留（模板据此加注说明）
+		row.stale = (dlabel[r.key] == nil)
 		local perday = (d.diag_day or {})
 		for _, day in ipairs(d.days) do
 			local v = (perday[day.date] or {})[r.key .. "|" .. r.mac] or 0
