@@ -15,6 +15,7 @@ end
 -- 列定义（与 root/etc/init.d/parentcontrol 的 stats_tsv printf 一一对应）：
 --   meta    <date> <daytype> <min_kb> <keep> <now>
 --   entry   <key> <module> <idx> <备注> <mac> <额度> <已用> <池> <本分钟KB> <不限额度>
+--   name    <key> <显示名> <on|off|gone>（完整模式才有：on/off/gone 的权威展示名单，A50/D34）
 --   pool    <name> <quota> <used> <members,>
 --   hist    <YYYYMMDD> <minutes>
 --   histkey <YYYYMMDD> <key> <minutes>
@@ -28,6 +29,9 @@ function M.parse(raw)
 		hist = {}, hist_key = {}, resets = {},
 		-- 第 8 轮（R13/D19）：诊断明细三行
 		diag = {}, diag_tgt = {}, diag_day = {},
+		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
+		-- 保持空表 —— 下游回退「条目 #N」，永不裸 key，向后兼容。
+		names = {},
 	}
 	for _, line in ipairs(util.split(raw or "", "\n")) do
 		if line ~= "" then
@@ -46,6 +50,10 @@ function M.parse(raw)
 				}
 				d.entries[#d.entries + 1] = e
 				if e.key then d.by_key[e.key] = e end
+			elseif k == "name" and f[2] then
+				-- A50/D34 权威名单行：state ∈ {on, off, gone}；label 可为空串
+				-- （无备注且无 apps 名），下游回退链对空串再退「条目 #N」。
+				d.names[f[2]] = { label = f[3] or "", state = f[4] or "" }
 			elseif k == "pool" then
 				-- 池额度空串 = 没填 = 不限（注意 entry 行不同：额度 0 是显式的“一分钟都不给”）
 				d.pools[#d.pools + 1] = {
