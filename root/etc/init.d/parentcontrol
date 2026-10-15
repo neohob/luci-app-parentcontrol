@@ -1044,7 +1044,7 @@ del_rule() {
 	for _ip in "$ipt" "$ipt6"; do
 		# A51/D35：PREROUTING 跳转「删到删不动」（外部注入的重复跳转一次收敛）。
 		# 必须先摘跳转再 -X 链：链仍被 PREROUTING 引用时 -X 会失败（真 iptables 行为）。
-		pc_unhook_all_v4 "$_ip"
+		pc_unhook_all_family "$_ip"
 		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
@@ -1454,8 +1454,8 @@ pc_unhook_all() {
 	done
 }
 
-# 单族的删除循环（del_rule 逐族调用；$1 = ipt 或 ipt6 命令）。
-pc_unhook_all_v4() {
+# 单族（$1 = 该族的 iptables 命令，ipt 或 ipt6）的删除循环；del_rule 逐族调用。
+pc_unhook_all_family() {
 	local _ip1 _ta
 	_ip1="$1"
 	[ -n "$_ip1" ] || return 0
