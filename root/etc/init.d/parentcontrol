@@ -1308,17 +1308,19 @@ stats_tsv() {
 			for _m in $PC_MODULES; do
 				for _i in $(pc_ids_all "$_m"); do printf '%s\t%s\n' "${_m}_${_i}" 1; done
 			done
+			# A56（review11 Low-3）：取最近 30 天，必须排序（find 输出顺序不保证）；
+			# 与 :1341/:1377 的 ls -1 风格一致。
 			awk '$1 != "diag" { n[$1]=1 } END { for (k in n) print k }' \
-				$(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | tail -30)
+				$(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | sort | tail -30)
 			# A54（review11 Major-1）：diag 文件契约 $2 = entry_key（$3 是 MAC/target，
 			# 取错会把 MAC/域名写进权威名单 → gone 行 key 位冒出 MAC/域名）。
 			awk -F'\t' 'NF >= 4 { n[$2]=1 } END { for (k in n) print k }' \
-				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
+				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | sort | tail -30)
 			# R11-129：重置日志的 key 集合并入下面的 reset 行流（stats_tsv 末段把
 			# reset 事件按 TAB 行输出，gone 收集器直接吃它的 $3），不再单独 tail 一份。
 			awk -F'\t' 'NF >= 4 && $1 ~ /^[0-9]{4}-/ { key=$3; n[key]=1 } END { for (k in n) print k }' "$RESET_LOG" 2>/dev/null
 			awk -F'\t' '$1 == "c" && $9 != "" && !($2 in s) { s[$2]=$9 } END { for (k in s) print "snap:" k "\t" s[k] }' \
-				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
+				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | sort | tail -30)
 		} | awk -F'\t' '
 			NF == 1 { seen[$1]=1; next }
 			{ gots[$1]=$2; next }
