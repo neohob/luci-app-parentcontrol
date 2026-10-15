@@ -1009,6 +1009,9 @@ sample_counters() {
 # ============================================================================
 build_all() {
 	local _tt _ip
+	# A52/D35：跳转数量/顺序不对（重复跳转、Q/A/D 错序）→ 先拆干净，下面按既有
+	# hook_chain 顺序（D→A→Q 头插 ⇒ 最终 Q→A→D）整套重建；顺序正确时零额外调用。
+	pc_hooks_present || pc_unhook_all
 	_tt=$(pc_today_type)
 	elog "build: day=$_tt"
 	for _ip in "$ipt" "$ipt6"; do
@@ -1040,10 +1043,11 @@ del_rule() {
 	local _ip _ta _c
 	for _ip in "$ipt" "$ipt6"; do
 		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
-			$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done
+		# A51/D35：PREROUTING 跳转「删到删不动」（外部注入的重复跳转一次收敛）
+		pc_unhook_all_v4 "$_ip"
 		# 老版本残留（统一模型之前）：filter 表的时间/协议/网址链、mangle 表的网址/IP 链
 		for _c in INPUT FORWARD OUTPUT; do
 			for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL PARENTCONTROL_WEBURL; do
@@ -1406,17 +1410,50 @@ pc_residual_on_device() {
 }
 
 # D28：三条跳转（QUOTA/ACCT/DIAG）在 PREROUTING/mangle 是否齐备（v4 与 v6 都要）。
-# 启用路径的自愈判据：缺任一 → build_all（保证与 restart 同路径、顺序恒为 Q→A→D）。
+# A52/D35 语义收紧：不止判存在，还判「每族每 tag **恰好一条**」+「-S 输出顺序 Q→A→D」。
+# 任一不满足 → 返回非 0（调用方 build_all 会先 pc_unhook_all 拆干净再整套重建）。
 pc_hooks_present() {
 	local _ip _snap _ta
 	for _ip in "$ipt" "$ipt6"; do
 		[ -n "$_ip" ] || continue
 		_snap=$($_ip -t mangle -S 2>/dev/null)
 		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
-			printf '%s\n' "$_snap" | grep -qE "^-A PREROUTING .*-j $_ta( |$)" || return 1
+			[ "$(printf '%s\n' "$_snap" | grep -cE "^-A PREROUTING .*-j $_ta( |$)")" = "1" ] || return 1
 		done
+		# 顺序：-S 是内核实际顺序；QUOTA 必须先于 ACCT 与 DIAG 出现（行号比较）
+		_q=$(printf '%s\n' "$_snap" | grep -nE "^-A PREROUTING .*-j $TAGQ( |$)" | cut -d: -f1)
+		_a=$(printf '%s\n' "$_snap" | grep -nE "^-A PREROUTING .*-j $TAGA( |$)" | cut -d: -f1)
+		_d=$(printf '%s\n' "$_snap" | grep -nE "^-A PREROUTING .*-j $TAGD( |$)" | cut -d: -f1)
+		[ -n "$_q" ] && [ -n "$_a" ] && [ -n "$_d" ] || return 1
+		[ "$_q" -lt "$_a" ] 2>/dev/null && [ "$_a" -lt "$_d" ] 2>/dev/null || return 1
 	done
 	return 0
+}
+
+# A51/D35：三条跳转的「删到删不动」拆除（两族 × 三 tag）。外部注入的重复跳转
+# （插件自身靠 hook_chain 的 -C 不会产生）也能一次 tick 收敛，而不是每 tick 删一条。
+pc_unhook_all() {
+	local _ip _ta
+	for _ip in "$ipt" "$ipt6"; do
+		[ -n "$_ip" ] || continue
+		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
+			while $_ip -t mangle -C PREROUTING -j "$_ta" 2>/dev/null; do
+				$_ip -t mangle -D PREROUTING -j "$_ta" 2>/dev/null || break
+			done
+		done
+	done
+}
+
+# 单族的删除循环（del_rule 逐族调用；$1 = ipt 或 ipt6 命令）。
+pc_unhook_all_v4() {
+	local _ip1 _ta
+	_ip1="$1"
+	[ -n "$_ip1" ] || return 0
+	for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
+		while $_ip1 -t mangle -C PREROUTING -j "$_ta" 2>/dev/null; do
+			$_ip1 -t mangle -D PREROUTING -j "$_ta" 2>/dev/null || break
+		done
+	done
 }
 
 tick_body() {
