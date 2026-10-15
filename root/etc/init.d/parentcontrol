@@ -1042,12 +1042,13 @@ build_all() {
 del_rule() {
 	local _ip _ta _c
 	for _ip in "$ipt" "$ipt6"; do
+		# A51/D35：PREROUTING 跳转「删到删不动」（外部注入的重复跳转一次收敛）。
+		# 必须先摘跳转再 -X 链：链仍被 PREROUTING 引用时 -X 会失败（真 iptables 行为）。
+		pc_unhook_all_v4 "$_ip"
 		for _ta in "$TAGQ" "$TAGA" "$TAGD"; do
 			$_ip -t mangle -F "$_ta" 2>/dev/null
 			$_ip -t mangle -X "$_ta" 2>/dev/null
 		done
-		# A51/D35：PREROUTING 跳转「删到删不动」（外部注入的重复跳转一次收敛）
-		pc_unhook_all_v4 "$_ip"
 		# 老版本残留（统一模型之前）：filter 表的时间/协议/网址链、mangle 表的网址/IP 链
 		for _c in INPUT FORWARD OUTPUT; do
 			for _ta in PARENTCONTROL_TIME PARENTCONTROL_PROTOCOL PARENTCONTROL_WEBURL; do
