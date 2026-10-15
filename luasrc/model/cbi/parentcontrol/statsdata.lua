@@ -210,6 +210,12 @@ function M.collect()
 	local function key_idx(key)
 		return tonumber(select(2, key:match("^(%w+)_(%d+)$")))
 	end
+	-- A55/review11 Low-1：空串与 nil 同罪 —— dlabel/d.names 里存了空串时，`or` 链会
+	-- 短路出空白名，压掉「条目 #N」兜底。nz() 把空串也视为缺失。
+	local function nz(a, b)
+		if a ~= nil and a ~= "" then return a end
+		return b
+	end
 	for _, day in ipairs(d.days) do
 		for key, v in pairs(ledger[day.date]) do
 			d.key_totals[key] = (d.key_totals[key] or 0) + v
@@ -221,9 +227,9 @@ function M.collect()
 		local _ix = key_idx(key)
 		rows[#rows + 1] = {
 			key = key,
-			-- A50/D34 统一回退链（永不裸 key；idx 解析失败退「条目 #?」）
-			name = dlabel[key] or (d.names[key] and d.names[key].label)
-				or ("条目 #" .. (_ix and _ix + 1 or "?")),
+			-- A50/D34 统一回退链（永不裸 key；A55：nz 让空串也回退，idx 解析失败退「条目 #?」）
+			name = nz(dlabel[key], nz(d.names[key] and d.names[key].label,
+				"条目 #" .. (_ix and _ix + 1 or "?"))),
 			stale = (dstate[key] or "off") ~= "on",
 			device = e and e.device or "",
 			minutes = v,
@@ -329,9 +335,9 @@ function M.collect()
 		local _ix = key_idx(r.key)
 		rr[#rr + 1] = {
 			date = r.date, time = r.time, key = r.key,
-			-- A50/D34 统一回退链（同 key_rows，永不裸 key）
-			name = dlabel[r.key] or (d.names[r.key] and d.names[r.key].label)
-				or ("条目 #" .. (_ix and _ix + 1 or "?")),
+			-- A50/D34 统一回退链（同 key_rows；A55：nz 让空串也回退，永不裸 key）
+			name = nz(dlabel[r.key], nz(d.names[r.key] and d.names[r.key].label,
+				"条目 #" .. (_ix and _ix + 1 or "?"))),
 			stale = (dstate[r.key] or "off") ~= "on",
 			device = e and e.device or "",
 			before = r.before,
@@ -362,9 +368,12 @@ function M.collect()
 			-- D29/A36：名称一律取 stats_tsv 已解析的行内 name（remarks → apps 首项）；
 			-- 条目已停用/已删除时仍有权威名单（dlabel 已并入 d.names）兜底，
 			-- 只有行内 name 也为空才退「条目 #N」—— 诊断区永不出现 weburl_N 这类裸 key。
-			-- A43：收尾必须 `and r.name` —— Lua 的 and/or 返回操作数本身，子表达式
-			-- (A and B) 为真时结果是布尔 true，漏掉 and r.name 会把字面量 true 渲染进页面。
-			entry = (r.name ~= nil and r.name ~= "") and r.name or dlabel[r.key] or r.key,
+			-- A55：nz 让空串行内 name 也回退（shell 侧三档全空时不再渲染空白）。
+			-- A43：行内 name 判空后再进 nz 链 —— Lua 的 and/or 返回操作数本身，子表达式
+			-- (A and B) 为真时结果是布尔 true，会把字面量 true 渲染进页面。
+			entry = (r.name ~= nil and r.name ~= "") and r.name
+				or nz(dlabel[r.key], nz(d.names[r.key] and d.names[r.key].label,
+					"条目 #" .. (_ix and _ix + 1 or "?"))),
 			device = M.device_name(r.mac),
 			days30 = {}, total30 = 0, by_date = {},
 		}
