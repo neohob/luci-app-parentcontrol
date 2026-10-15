@@ -1419,7 +1419,7 @@ pc_residual_on_device() {
 # A52/D35 语义收紧：不止判存在，还判「每族每 tag **恰好一条**」+「-S 输出顺序 Q→A→D」。
 # 任一不满足 → 返回非 0（调用方 build_all 会先 pc_unhook_all 拆干净再整套重建）。
 pc_hooks_present() {
-	local _ip _snap _ta
+	local _ip _snap _ta _q _a _d
 	for _ip in "$ipt" "$ipt6"; do
 		[ -n "$_ip" ] || continue
 		_snap=$($_ip -t mangle -S 2>/dev/null)
