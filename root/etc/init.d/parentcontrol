@@ -1312,7 +1312,9 @@ stats_tsv() {
 				$(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | tail -30)
 			awk -F'\t' 'NF >= 4 { n[$3]=1 } END { for (k in n) print k }' \
 				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
-			tail -n 2000 "$RESET_LOG" 2>/dev/null | awk -F'\t' 'NF >= 4 { n[$3]=1 } END { for (k in n) print k }'
+			# R11-129：重置日志的 key 集合并入下面的 reset 行流（stats_tsv 末段把
+			# reset 事件按 TAB 行输出，gone 收集器直接吃它的 $3），不再单独 tail 一份。
+			awk -F'\t' 'NF >= 4 && $1 ~ /^[0-9]{4}-/ { key=$3; n[key]=1 } END { for (k in n) print k }' "$RESET_LOG" 2>/dev/null
 			awk -F'\t' '$1 == "c" && $9 != "" && !($2 in s) { s[$2]=$9 } END { for (k in s) print "snap:" k "\t" s[k] }' \
 				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
 		} | awk -F'\t' '
