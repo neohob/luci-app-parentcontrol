@@ -139,7 +139,7 @@
 			</tr>
 			<% end %>
 			<tr>
-				<td><%=pcdata(r.name)%></td>
+				<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %></td>
 				<td class="num"><%=r.minutes%> <%=T("分")%></td>
 				<td class="num"><%=math.floor(r.minutes / (d.hist_days > 0 and d.hist_days or 1) + 0.5)%> <%=T("分")%></td>
 				<td><%=bar(r.share)%> <span class="muted"><%=r.share%>%</span></td>
@@ -262,7 +262,7 @@
 		<% for _, r in ipairs(d.reset_rows) do %>
 		<tr>
 			<td class="muted"><%=pcdata(r.date:sub(1,4).."-"..r.date:sub(5,6).."-"..r.date:sub(7,8).." "..r.time)%></td>
-			<td><%=pcdata(r.name)%></td>
+			<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %></td>
 			<td class="muted"><%=pcdata(r.device)%></td>
 			<td class="num"><%=r.before%> <%=T("分")%></td>
 			<td class="muted"><%=T("手动重置")%></td>
