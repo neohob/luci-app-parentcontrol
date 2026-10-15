@@ -367,7 +367,8 @@ function M.collect()
 			online = r.online, minutes = r.minutes, first = r.first, last = r.last,
 			-- D29/A36：名称一律取 stats_tsv 已解析的行内 name（remarks → apps 首项）；
 			-- 条目已停用/已删除时仍有权威名单（dlabel 已并入 d.names）兜底，
-			-- 只有行内 name 也为空才退「条目 #N」—— 诊断区永不出现 weburl_N 这类裸 key。
+			-- 只有行内 name 也为空才退「条目 #N」—— 诊断区永不出现 weburl_N 这类裸 key
+			-- （行内 name 由 shell 三档回退保证非空；本链再对空串兜底，A57 前提）。
 			-- A55：nz 让空串行内 name 也回退（shell 侧三档全空时不再渲染空白）。
 			-- A43：行内 name 判空后再进 nz 链 —— Lua 的 and/or 返回操作数本身，子表达式
 			-- (A and B) 为真时结果是布尔 true，会把字面量 true 渲染进页面。
