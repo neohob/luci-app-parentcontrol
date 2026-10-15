@@ -1299,12 +1299,15 @@ stats_tsv() {
 				printf 'name\t%s\t%s\t%s\n' "$_key" "$_dname" "$_st"
 			done
 		done
-		# gone 集合与快照：单次 awk 汇总（近 30 天 histkey/reset − 配置存在的 key）
+		# gone 集合与快照：单次 awk 汇总（近 30 天 histkey/reset − 配置存在的 key）。
+		# R11-129：用量文件是「空格分隔 <key> <分钟>」（pc_usage_add），与 TAB 的
+		# histkey/reset 不同 —— 这里用默认分隔符（空白）收集；maxdepth 1 进不了
+		# diag/ 子目录，护栏 $1 != "diag" 双保险。
 		{
 			for _m in $PC_MODULES; do
 				for _i in $(pc_ids_all "$_m"); do printf '%s\t%s\n' "${_m}_${_i}" 1; done
 			done
-			awk -F'\t' '{ n[$2]=1 } END { for (k in n) print k }' \
+			awk '$1 != "diag" { n[$1]=1 } END { for (k in n) print k }' \
 				$(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | tail -30)
 			awk -F'\t' 'NF >= 4 { n[$3]=1 } END { for (k in n) print k }' \
 				$(find "$USAGE_DIR" -maxdepth 2 -path '*diag/????????' -type f 2>/dev/null | tail -30)
