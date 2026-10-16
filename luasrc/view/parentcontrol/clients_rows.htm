@@ -1,0 +1,39 @@
+<%+cbi/valueheader%>
+<%
+	-- 设备行表（第 11k 轮 A95-2）：一行一台设备，`MAC|IP`（两侧皆可空）。
+	-- 服务端先渲染已有行（无 JS 时也能看、也能原样保存）；增删 / 序列化由 pc-ui.js
+	-- 的 pcClientsRows 统一实现（唯一 JS 实现，文案与占位符由本模板传入）。
+	-- 真正的表单字段是下面隐藏的 textarea：name = self:cbid(section)，值 = clients 原文
+	-- （原样回写，**不做**大小写归一 —— 归一只用于比较/判定）。
+	local ui = require "luci.model.cbi.parentcontrol.ui"
+	local raw = self:cfgvalue(section) or ""
+	local rows = ui.client_rows(raw, true)
+%>
+<div class="pc-clients" id="pc-clients">
+	<p class="cbi-value-description">
+		<%=translate("一行一台设备：左边填 MAC 地址，右边填该设备的静态 IP（可留空）。同一台设备换 Wi-Fi 会换 MAC，可以把多台都填进来；这里的次序就是规则次序，额度是这些设备合计用的。")%>
+	</p>
+	<div class="pc-clients-list" data-pc-client-list>
+		<% for _, r in ipairs(rows) do %>
+		<div class="pc-client-row" data-pc-client-row>
+			<input type="text" class="pc-client-mac" value="<%=pcdata(r.mac)%>"
+				placeholder="<%=translate("MAC 地址，如 00:11:22:33:44:55")%>" />
+			<input type="text" class="pc-client-ip" value="<%=pcdata(r.ip)%>"
+				placeholder="<%=translate("静态 IP / 主机名（可留空）")%>" />
+			<button type="button" class="cbi-button pc-client-del" data-pc-client-del><%=translate("删除")%></button>
+		</div>
+		<% end %>
+	</div>
+	<button type="button" class="cbi-button cbi-button-add" data-pc-client-add><%=translate("➕ 新增设备")%></button>
+</div>
+<textarea name="<%=self:cbid(section)%>" data-pc-clients-value style="display:none"><%=pcdata(raw)%></textarea>
+<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
+<script type="text/javascript">//<![CDATA[
+	pcClientsRows({
+		root: 'pc-clients',
+		delText: '<%=translate("删除")%>',
+		macPh: '<%=translate("MAC 地址，如 00:11:22:33:44:55")%>',
+		ipPh: '<%=translate("静态 IP / 主机名（可留空）")%>'
+	});
+//]]></script>
+<%+cbi/valuefooter%>

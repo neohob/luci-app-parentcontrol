@@ -1,9 +1,10 @@
--- 条目详细设置页（第 8 轮 D17/ADR-018：一个条目 = 一台设备 + 若干行「封锁名称」）。
--- 字段顺序（D17 写死）：条目名称(remarks) → MAC → 绑定状态 → 静态IP → 封锁名称行表(apps)
---                        → 黑/白名单(mode) → 平日/节假日档案。
+-- 条目详细设置页（第 8 轮 D17/ADR-018：一个条目 = 一台（或多台）被管设备 + 若干行「封锁名称」）。
+-- 字段顺序（第 11k 轮 A95-2 更新）：条目名称(remarks) → 绑定设备行表(clients)
+--                        → 绑定状态(_bind) → 封锁名称行表(apps) → 黑/白名单(mode) → 平日/节假日档案。
 -- 旧的「域名/IP」(domains) 大框与页面级「AI 解析」按钮已撤：前者由行表取代（迁移把
 -- domains 并进 apps 行），后者由行表里的逐行「AI 解析IP」取代（同一个 ai_parse 接口）。
-local o = require "luci.sys"
+-- 第 11k 轮：旧的单值「MAC地址」/「静态IP/主机名」两个控件已撤，改为 clients 设备行表。
+local ui = require "luci.model.cbi.parentcontrol.ui"
 local disp = require "luci.dispatcher"
 local parts = require "luci.model.cbi.parentcontrol.parts"
 
@@ -31,21 +32,20 @@ e = t:option(Value, "remarks", translate("条目名称"),
 	translate("这台被管设备的别名（如 iPad Pro）。只用于在列表里认出它；要封锁什么在下面的「封锁名称」行表里逐条填。"))
 e.rmempty = true
 
--- ② 设备绑定：MAC → 绑定状态 → 静态IP/主机名
-e = t:option(Value, "mac", translate("MAC地址"))
+-- ② 设备绑定（第 11k 轮 A95-2，用户拍板 ①）：一行一台设备 `MAC|IP`（两侧皆可空）。
+-- 同一条目的多台设备共用一份额度/计时（合并计数链）——「iPad 轮换私有地址加旧 MAC」这类
+-- 场景把多台都填进来即可。控件是 TextValue + 行表模板，真正提交的仍是 clients 原文。
+e = t:option(TextValue, "clients", translate("绑定设备"),
+	translate("一行一台设备：左边 MAC 地址，右边该设备的静态 IP（可留空）。同一台设备换 Wi-Fi 会换 MAC，可以把多台都填进来；这一列的次序就是规则次序，额度是这些设备合计的。"))
+e.template = "parentcontrol/clients_rows"
 e.rmempty = true
-o.net.mac_hints(function(mac, name) e:value(mac, "%s (%s)" % {mac, name}) end)
 
--- R10/D18（ADR-021）：绑定健康。绑定的 MAC 不在网 ⇒ 该条目既不计时也不封锁
+-- R10/D18（ADR-021）：绑定健康。绑定的 MAC **全部**不在网 ⇒ 该条目既不计时也不封锁
 -- （典型原因：iOS/iPadOS「私有 Wi-Fi 地址」轮换）。这里只提示与一键重绑，不自动改配置。
 e = t:option(DummyValue, "_bind", translate("绑定状态"),
 	translate("绑定的设备不在网时，这个条目既不计时也不封锁。常见原因是 iOS「私有 Wi-Fi 地址」轮换：可在 iPad 的 Wi-Fi 设置里把该网络改为「固定」。此处只做检测与一键重绑，不会自动修改你的配置。"))
 e.template = "parentcontrol/bind_status"
-e.cfgvalue = function(self, section) return self.map:get(section, "mac") or "" end
-
-e = t:option(Value, "ip", translate("静态IP/主机名"),
-	translate("与 MAC 任一命中即生效，防止客户端改 MAC。留空不启用。"))
-e.rmempty = true
+e.cfgvalue = function(self, section) return ui.clients_raw(self.map, section) end
 
 -- ③ 封锁名称行表：一行一个名称（名称给人看，生效靠该行的域名/IP）
 e = t:option(TextValue, "apps", translate("封锁名称"),

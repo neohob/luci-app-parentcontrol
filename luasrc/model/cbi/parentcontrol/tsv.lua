@@ -14,7 +14,9 @@ end
 
 -- 列定义（与 root/etc/init.d/parentcontrol 的 stats_tsv printf 一一对应）：
 --   meta    <date> <daytype> <min_kb> <keep> <now>
---   entry   <key> <module> <idx> <备注> <mac> <额度> <已用> <池> <本分钟KB> <不限额度>
+--   entry   <key> <module> <idx> <备注> <MAC 列表> <额度> <已用> <池> <本分钟KB> <不限额度>
+--           （第 11k 轮 A94：第 5 字段从单个 mac 变为**逗号连接的 MAC 列表**（行序、去重、
+--            空则空串）；它仍只是**一个** TSV 字段 —— 不含 Tab/换行，列数不变）
 --   name    <key> <显示名> <on|off|gone>（完整模式才有：on/off/gone 的权威展示名单，A50/D34）
 --   pool    <name> <quota> <used> <members,>
 --   hist    <YYYYMMDD> <minutes>

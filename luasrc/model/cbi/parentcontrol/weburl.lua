@@ -73,11 +73,10 @@ e.cfgvalue = function(self, section)
 end
 e.rmempty = true
 
+-- A95-4（第 11k 轮）：设备列按行渲染 `mac（设备名）` / `ip`；原单独的「静态IP」列已删
+-- —— 多行后它无法表达「IP 属于哪台设备」，内容已并入设备列。
 e = t:option(DummyValue, "mac", translate("设备"))
 e.cfgvalue = ui.mac
-e.rmempty = true
-
-e = t:option(DummyValue, "ip", translate("静态IP"))
 e.rmempty = true
 
 -- 「封锁条目」列（R11/D17）：apps 各行的名称，逐个 HTML 转义后用 <br> 连接。

@@ -6,8 +6,20 @@ local devnames = require "luci.model.cbi.parentcontrol.devnames"
 
 local M = {}
 
+-- A94/第 11k 轮：`entry` 行的 MAC 字段现在是**逗号连接的 MAC 列表**（一条目多设备）。
+-- 逐个映射设备名（无已知名的用 MAC 原样），以 ` / ` 连接；一个都没有则返回空串
+-- （空串让模板的「未指定设备」兜底生效，也保证未绑设备的条目不进「按设备分析」）。
+-- 诊断明细（diag 行）传单个 MAC 也走这里，行为不变（有名字用名字，否则原样 MAC）。
 function M.device_name(mac)
-	return devnames.name(mac)
+	local out = {}
+	for m in tostring(mac or ""):gmatch("[^,]+") do
+		local t = m:gsub("^%s+", ""):gsub("%s+$", "")
+		if t ~= "" then
+			local n = devnames.name(t)
+			out[#out + 1] = (n ~= "" and n or t)
+		end
+	end
+	return table.concat(out, " / ")
 end
 
 -- 日期递减：交给 os.time（取中午，避开夏令时边界），别再手写日历

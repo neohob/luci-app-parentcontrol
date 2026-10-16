@@ -40,18 +40,6 @@
 		XHR.post(url, { key: key, token: token }, function () { location.reload(); });
 	}
 
-	// R10/D18：「绑定健康」的一键重绑 —— 把值写进指定字段（如 mac）并派发 change，
-	// 让 LuCI 的控件状态跟着更新；**只写输入框，不自动保存**（保存仍由用户点按钮）。
-	function pcSetField(suffix, value) {
-		var el = pcField(suffix);
-		if (!el) return false;
-		el.value = value;
-		if (typeof Event === 'function') {
-			try { el.dispatchEvent(new Event('change')); } catch (e) { /* 老浏览器忽略 */ }
-		}
-		return true;
-	}
-
 	// ------------------------------------------------------------------
 	// R9/D17：封锁名称行表（唯一 JS 实现）。
 	//   · 行增删（「➕ 新增名称」/「删除」）
@@ -199,10 +187,109 @@
 		return { sync: sync, addRow: function (n, d) { list.appendChild(newRow(n, d)); sync(); } };
 	}
 
+	// ------------------------------------------------------------------
+	// 第 11k 轮（A95-2）：设备行表（唯一 JS 实现）。
+	//   · 行增删（「➕ 新增设备」/「删除」）
+	//   · 把行序列化为 `MAC|IP` 逐行写回隐藏 textarea —— input/change 时 + 提交前兜底各同步一次
+	//   · 写入前把行内的 `|` 与换行清成空格（否则会把一行拆成两列/两行）+ 去首尾空白；
+	//     **不做**大小写归一（原样回写用户输入，归一只用于服务端比较/判定）
+	//   文案 / 占位符全部由视图（clients_rows.htm）传入：静态资源不经过 translate()。
+	// ------------------------------------------------------------------
+	function pcCleanCell(v) {
+		return String(v || '').replace(/[\r\n\t|]+/g, ' ').replace(/^\s+|\s+$/g, '');
+	}
+
+	function pcClientsRows(cfg) {
+		var root = document.getElementById(cfg.root);
+		if (!root) return null;
+		var list = root.querySelector('[data-pc-client-list]');
+		var store = document.querySelector('[data-pc-clients-value]');
+		if (!list || !store) return null;
+
+		function el(tag, cls, attrs) {
+			var e = document.createElement(tag);
+			if (cls) e.className = cls;
+			if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
+			return e;
+		}
+		function newRow(mac, ip) {
+			var row = el('div', 'pc-client-row', { 'data-pc-client-row': '' });
+			var mi = el('input', 'pc-client-mac', { type: 'text', placeholder: cfg.macPh || '' });
+			mi.value = mac || '';
+			var ii = el('input', 'pc-client-ip', { type: 'text', placeholder: cfg.ipPh || '' });
+			ii.value = ip || '';
+			var del = el('button', 'cbi-button pc-client-del', { type: 'button', 'data-pc-client-del': '' });
+			del.appendChild(document.createTextNode(cfg.delText || '×'));
+			row.appendChild(mi); row.appendChild(ii); row.appendChild(del);
+			return row;
+		}
+		function rowNodes() { return list.querySelectorAll('[data-pc-client-row]'); }
+		// 行 → textarea：`MAC|IP` 逐行；两栏都空的行丢掉（不留空行）
+		function sync() {
+			var out = [], rs = rowNodes();
+			for (var i = 0; i < rs.length; i++) {
+				var m = rs[i].querySelector('.pc-client-mac');
+				var p = rs[i].querySelector('.pc-client-ip');
+				var mac = pcCleanCell(m ? m.value : '');
+				var ip = pcCleanCell(p ? p.value : '');
+				if (mac === '' && ip === '') continue;
+				out.push(mac + '|' + ip);
+			}
+			store.value = out.join('\n');
+		}
+
+		root.addEventListener('click', function (ev) {
+			var t = ev.target;
+			if (!t || !t.closest) return;
+			var add = t.closest('[data-pc-client-add]');
+			if (add && root.contains(add)) {
+				list.appendChild(newRow('', ''));
+				var mi = list.lastChild.querySelector('.pc-client-mac');
+				if (mi) mi.focus();
+				sync();
+				return;
+			}
+			var del = t.closest('[data-pc-client-del]');
+			if (del) {
+				var row = del.closest('[data-pc-client-row]');
+				if (row) list.removeChild(row);
+				sync();
+			}
+		});
+		list.addEventListener('input', sync);
+		list.addEventListener('change', sync);
+		// 提交前兜底再同步一次（键盘外的路径，例如浏览器自动填充）
+		var form = root.closest ? root.closest('form') : null;
+		if (form) form.addEventListener('submit', sync);
+		document.addEventListener('submit', sync, true);
+		sync();
+		return { sync: sync, addRow: function (n, p) { list.appendChild(newRow(n, p)); sync(); } };
+	}
+
+	// A95-3：一键重绑 —— 只把「oldMac 那一行」的 MAC 输入框改写为 newMac（保留该行 IP、
+	// 不动其它行）；只写输入框，不自动保存（保存仍由用户点页面底部的按钮）。
+	function pcClientsRebind(oldMac, newMac) {
+		var want = pcCleanCell(oldMac).toLowerCase();
+		if (want === '') return false;
+		var rows = document.querySelectorAll('[data-pc-client-row]');
+		for (var i = 0; i < rows.length; i++) {
+			var mi = rows[i].querySelector('.pc-client-mac');
+			if (!mi) continue;
+			if (pcCleanCell(mi.value).toLowerCase() !== want) continue;
+			mi.value = newMac;
+			if (typeof Event === 'function') {
+				try { mi.dispatchEvent(new Event('change')); } catch (e) { /* 老浏览器忽略 */ }
+			}
+			return true;
+		}
+		return false;
+	}
+
 	window.pcField = pcField;
 	window.pcSetMsg = pcSetMsg;
 	window.pcPost = pcPost;
 	window.pcResetQuota = pcResetQuota;
-	window.pcSetField = pcSetField;
 	window.pcAppsRows = pcAppsRows;
+	window.pcClientsRows = pcClientsRows;
+	window.pcClientsRebind = pcClientsRebind;
 })(window, document);

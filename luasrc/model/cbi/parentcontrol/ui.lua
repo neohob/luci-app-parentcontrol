@@ -78,6 +78,76 @@ local function disp_name(r)
 end
 -- [/ui.lua disp_name]
 
+-- ============================================================================
+-- 设备清单 clients（第 11k 轮 A88）：与 shell 侧 pc_clients_rows 同源的解析镜像。
+-- 一行一台设备 `MAC|IP`；语义与 common.sh 逐条一致：
+--   split \r\n/\n → 该行去首尾空白 → 跳空行 → 按**首个** | 切分 → 两侧去空白
+--   → 两侧皆空丢弃 → MAC 小写用于比较/投影 → (mac,ip) 全同去重（保序）。
+-- 解析只此一处（Lua 侧）；keep_case 只影响**展示**（编辑页要原样回写用户输入），
+-- 不影响判定 —— 投影（bound_macs）与 bind_state 一律用小写。
+-- ============================================================================
+function M.client_rows(text, keep_case)
+	local rows, seen = {}, {}
+	for line in tostring(text or ""):gmatch("[^\r\n]+") do
+		line = trim(line)
+		if line ~= "" then
+			local mac, ip = line:match("^([^|]*)|(.*)$")
+			if mac then
+				mac, ip = trim(mac), trim(ip)
+			else
+				mac, ip = line, ""
+			end
+			if not (mac == "" and ip == "") then
+				local key = mac:lower() .. "|" .. ip
+				if not seen[key] then
+					seen[key] = true
+					rows[#rows + 1] = { mac = keep_case and mac or mac:lower(), ip = ip }
+				end
+			end
+		end
+	end
+	return rows
+end
+-- [/M.client_rows]
+
+-- 原始 clients 文本；缺失时由老 mac/ip 合成 `mac|ip`（A87-2 双源兼容，运行时回退）
+function M.clients_raw(map, section)
+	local c = map:get(section, "clients") or ""
+	if c ~= "" then return c end
+	local mac = map:get(section, "mac") or ""
+	local ip = map:get(section, "ip") or ""
+	if mac == "" and ip == "" then return "" end
+	return mac .. "|" .. ip
+end
+-- [/M.clients_raw]
+
+-- 绑定 MAC 集合（小写、去重、保序）—— 与 shell 侧 pc_clients_macs 同口径
+function M.bound_macs(map, section)
+	local out, seen = {}, {}
+	for _, r in ipairs(M.client_rows(M.clients_raw(map, section))) do
+		if r.mac ~= "" and not seen[r.mac] then
+			seen[r.mac] = true
+			out[#out + 1] = r.mac
+		end
+	end
+	return out
+end
+-- [/M.bound_macs]
+
+-- 绑定状态纯函数（A95-1/A95-3；为可测性冻结）：
+--   "none" = 无绑定 MAC；"up" = 至少一个在线；"off" = 有绑定 MAC 但全部不在网。
+-- 语义（原 D18 的自然推广）：**部分 MAC 不在网不算失效**（设备仍被管住，如手机+平板同条目），
+-- **全部不在网**才算失效（典型形态：iPad 轮换了私有地址、旧 MAC 全消失）。
+-- online(mac) -> true|false|nil；只有**确定** true 才算在线（nil = 无从判断，不计在线）。
+function M.bind_state(macs, online)
+	if not macs or #macs == 0 then return "none" end
+	for _, m in ipairs(macs) do
+		if online(m) == true then return "up" end
+	end
+	return "off"
+end
+-- [/M.bind_state]
+
 -- 行表里的名称列表（保持行序；两者都空的行才跳过）
 function M.app_names(text)
 	local out = {}
@@ -169,30 +239,39 @@ function M.profiles(self, section)
 	return i18n.translate("平日") .. " " .. sd .. " · " .. i18n.translate("节假日") .. " " .. hd
 end
 
--- 列表里的「设备」列：MAC（已知设备名）；没填 MAC 就是全部客户端；填了静态IP 也一并显示。
--- 第 8 轮（R10/D18）：绑定设备不在网时加一个 ⚠（只看不改 —— 绝不自动修改用户配置）。
+-- 列表里的「设备」列：逐行渲染 `MAC（已知设备名）` 与 `IP`，` / ` 连接（A95-4）。
+-- 没有任何设备行就是全部客户端。第 8 轮（R10/D18）：绑定 MAC **全部**不在网时加一个 ⚠
+-- （判定走 M.bind_state；只看不改 —— 绝不自动修改用户配置）。
+-- 原来的单独「静态IP」列已撤销：多行后它无法表达「IP 属于哪台设备」，内容并入本列。
 function M.mac(self, section)
-	local mac = self.map:get(section, "mac") or ""
-	local ip = self.map:get(section, "ip") or ""
+	local map = self.map
+	local macs = M.bound_macs(map, section)
 	local out = {}
-	if mac ~= "" then
-		local n = devnames.name(mac)
-		out[#out + 1] = n and (mac .. " （" .. n .. "）") or mac
+	for _, m in ipairs(macs) do
+		local n = devnames.name(m)
+		out[#out + 1] = n and (m .. " （" .. n .. "）") or m
 	end
-	if ip ~= "" then out[#out + 1] = ip end
+	local iseen = {}
+	for _, r in ipairs(M.client_rows(M.clients_raw(map, section))) do
+		if r.ip ~= "" and not iseen[r.ip] then
+			iseen[r.ip] = true
+			out[#out + 1] = r.ip
+		end
+	end
 	if #out == 0 then return i18n.translate("全部客户端") end
 	local s = table.concat(out, " / ")
-	if mac ~= "" and hosts.online(mac) == false then s = s .. " ⚠" end
+	if M.bind_state(macs, hosts.online) == "off" then s = s .. " ⚠" end
 	return s
 end
 
--- 绑定已失效（绑了 MAC 但该 MAC 不在网）的已启用条目数 —— 列表页页顶汇总提示用。
--- 判定与编辑页「绑定状态」同源（hosts.lua）：不自动改配置，只提示。
+-- 绑定已失效（有绑定 MAC 但**全部**不在网）的已启用条目数 —— 列表页页顶汇总提示用。
+-- 判定与编辑页「绑定状态」同源（M.bind_state + hosts.lua）：不自动改配置，只提示。
 function M.offline_bindings(map)
 	local n = 0
 	map.uci:foreach("parentcontrol", "weburl", function(s)
-		if s.enable == "1" and s.mac and s.mac ~= "" and hosts.online(s.mac) == false then
-			n = n + 1
+		if s.enable == "1" then
+			local macs = M.bound_macs(map, s[".name"])
+			if M.bind_state(macs, hosts.online) == "off" then n = n + 1 end
 		end
 	end)
 	return n
