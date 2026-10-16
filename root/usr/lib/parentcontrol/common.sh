@@ -46,6 +46,12 @@ _pc_snap_src() {
 
 # 一次 awk 把快照压成 LIT/IDX（见上）。值只剥**最外层成对引号**（与真机 uci show 的
 # `key='value'` 一致）；用 index() 找第一个 '='，容忍值里含 '='（如带查询串的 URL）。
+#
+# A73/D45（真机事实，conductor 用 `uci -c` 临时 confdir 逐字节取证）：`uci show` 把值内的
+# 单引号印成 **4 字节 `'\''`（hex 27 5c 27 27）**，而 `uci -q get` 原样返回单字节 `'`。
+# 转义面**只有单引号一种**（反斜杠 / 双引号 / `$` / 空格 / `=` 在 uci show 里均原样）。
+# ⇒ 剥完最外层引号后必须把 `'\''` 还原为 `'`，否则快照值 `it'\''s` ≠ 直连 `it's`，
+# 违反 §11.15.2 等价性硬门槛（受影响字段：remarks / ai.apikey 等）。
 _pc_snap_build() { # $1=快照文件
 	local _all _mk
 	_mk=__pcsnapidx__      # LIT 与 IDX 的分段标记（只可能出现在键行之外）
@@ -60,6 +66,10 @@ _pc_snap_build() { # $1=快照文件
 				q1 = substr(v, 1, 1); q2 = substr(v, length(v), 1)
 				if ((q1 == "\047" && q2 == "\047") || (q1 == "\"" && q2 == "\"")) v = substr(v, 2, length(v) - 2)
 			}
+			# A73：把真机 uci show 转义出来的 4 字节序列还原为单字节引号（见函数头注释）。
+			# 用 index()+substr() 循环，不用动态正则。
+			while ((q = index(v, "\047\\\047\047")) > 0)
+				v = substr(v, 1, q - 1) "\047" substr(v, q + 4)
 			lit = lit s "\t" v "\n"
 			if (index(s, ".") != 0) next          # 含 "." ⇒ 选项行，不是节行
 			if (substr(s, 1, 1) == "@") {         # 匿名节：类型从地址里取
