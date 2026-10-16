@@ -230,6 +230,54 @@ pc_opts_all() { # $1=模块 $2=字段
 	pc_uci_scan | awk -F'|' -v t="$1" -v o="$2" '$1 == t && $3 == o && $4 != "" { print $4 }' | sort -u
 }
 
+# ---------- 设备清单 clients（第 11k 轮 A87/A88）----------
+# clients 值为纯文本：一行一台设备，`<MAC>|<IP>`，两侧皆可空（A87-1）。
+# 解析只此一处（shell 侧），Lua 侧镜像见 ui.client_rows（A88）。
+
+# 原始 clients 文本；缺失时由老 mac/ip 合成 `mac|ip`（A87-2 双源兼容）
+pc_clients_raw() { # $1=模块 $2=下标
+	local _c _m _i
+	_c=$(pc_uget "@$1[$2].clients")
+	[ -n "$_c" ] && { printf '%s\n' "$_c"; return 0; }
+	_m=$(pc_uget "@$1[$2].mac")
+	_i=$(pc_uget "@$1[$2].ip")
+	[ -z "$_m$_i" ] && return 0
+	printf '%s|%s\n' "$_m" "$_i"
+}
+
+# 规范化：split \r\n/\n → 去首尾空白 → 跳过空行 → 按首个 | 切分 → 两侧去空白 →
+#           两侧皆空丢弃 → MAC 小写比较 → (mac,ip) 完全相同去重（保序）。
+# 输出每行 `mac|ip`（IP 为空时省略 `|`；MAC 为空时保留前导 `|`）。
+pc_clients_rows() { # $1=模块 $2=下标
+	pc_clients_raw "$1" "$2" | awk '
+		{
+			line = $0
+			sub(/\r$/, "", line)
+			gsub(/^[ \t]+|[ \t]+$/, "", line)
+			if (line == "") next
+			p = index(line, "|")
+			if (p > 0) { m = substr(line, 1, p - 1); ip = substr(line, p + 1) }
+			else       { m = line; ip = "" }
+			gsub(/^[ \t]+|[ \t]+$/, "", m)
+			gsub(/^[ \t]+|[ \t]+$/, "", ip)
+			if (m == "" && ip == "") next
+			ml = tolower(m)
+			key = ml "|" ip
+			if (seen[key]++) next
+			if (ip == "") print ml; else print ml "|" ip
+		}'
+}
+
+# 绑定 MAC 集合（小写、去重、保序）
+pc_clients_macs() { # $1=模块 $2=下标
+	pc_clients_rows "$1" "$2" | awk -F'|' '$1 != "" && !seen[$1]++ { print $1 }'
+}
+
+# 绑定 IP 集合（去重、保序）
+pc_clients_ips() { # $1=模块 $2=下标
+	pc_clients_rows "$1" "$2" | awk -F'|' '$2 != "" && !seen[$2]++ { print $2 }'
+}
+
 # ---------- 日期 ----------
 pc_today() { date +%Y-%m-%d; }
 pc_weekday() { date +%u; }   # 1=Mon .. 7=Sun
@@ -549,7 +597,7 @@ pc_apps_rows() { # $1=apps 多行文本
 # 只改 uci，不 commit（由调用方决定）。
 # ============================================================================
 pc_migrate_config() {
-	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n _ai_ep _ai_md _ai_key _ai_v _ai_del _ai_secs
+	local _k _i _m _w _d _f _has_sd _has_hd _sfx _md _ws _we _on _had_dual _unl _dt _eq _a _r _out _n _ai_ep _ai_md _ai_key _ai_v _ai_del _ai_secs _cl_m _cl_ip _cl_c
 	# 0) 迁移会删老字段、并可能改变封锁行为，不可逆 —— 先留一份带时间戳的备份。
 	#    （README 里承诺了这件事，就必须真的做；$PC_CONF_DIR 下没有配置文件时自动跳过。
 	#      PC_CONF_DIR / BACKUP_DIR 是可覆盖钩子（默认值 = 生产路径），供白盒测试把
@@ -663,6 +711,26 @@ pc_migrate_config() {
 		[ -n "$_ai_md" ]  && pc_uset "$PC_CONF.ai.model=$_ai_md"
 		[ -n "$_ai_key" ] && pc_uset "$PC_CONF.ai.apikey=$_ai_key"
 	fi
+
+	# 2d) clients 归一化（第 11k 轮 A87/A92）：老 mac/ip 单值 → clients 一行。
+	#     目标格式见 A87-1（一行一台设备，`<MAC>|<IP>`，两侧皆可空）。
+	#       * mac/ip 皆空 → 一个字节都不动（幂等）
+	#       * clients 非空 → 只删老字段（双源防幽灵，不覆盖用户已填的表）
+	#       * 否则 → 把 `mac|ip` 写进 clients 后再删老字段
+	for _m in $PC_MODULES; do
+		for _i in $(pc_ids_all "$_m"); do
+			_cl_m=$(pc_uget "@$_m[$_i].mac")
+			_cl_ip=$(pc_uget "@$_m[$_i].ip")
+			[ -z "$_cl_m$_cl_ip" ] && continue
+			_cl_c=$(pc_uget "@$_m[$_i].clients")
+			if [ -z "$_cl_c" ]; then
+				pc_uset "$PC_CONF.@$_m[$_i].clients=${_cl_m}|${_cl_ip}"
+				_pclog "migrate: $_m[$_i] mac/ip → clients 一行"
+			fi
+			pc_udelete "$PC_CONF.@$_m[$_i].mac"
+			pc_udelete "$PC_CONF.@$_m[$_i].ip"
+		done
+	done
 
 	# 3) 统一为「可用时段 + 额度」模型。老配置有两代：
 	#      a) 双档案时代：<sfx>_mode ∈ off|time|quota|block（另有 <sfx>_start/<sfx>_end）

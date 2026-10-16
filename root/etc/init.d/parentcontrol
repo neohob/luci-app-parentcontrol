@@ -96,36 +96,46 @@ addr_is_family() {
 	esac
 }
 
-# 计数用的“设备条件”：ip 优先（避免 mac+ip 双计），但地址必须与协议族匹配 ——
-# ip6tables 里 `-s <IPv4>` 是非法语句（静默失败，该条目的 v6 流量就完全不计额度了），
-# 所以条目只填了 IPv4 时 v6 链回退到 mac。两族各自独立统计，同族内不会重复计数。
-# 输出：条件串 / ALL（条目没有任何设备条件 = 对全部客户端计数）/ 空（本族无法识别）
+# 计数用的“设备条件”：逐行遍历 clients（A90/A88）。每行：
+#   ip 属于本族 → `-s <ip>`；否则有 mac → `-m mac --mac-source <mac>`；两者都不可用则跳过该行。
+# 无任何 clients 行 ⇒ 输出 ALL（条目没有任何设备条件 = 对全部客户端计数）。
+# 输出：每行一个条件串 / ALL / 空（本族无法识别任何行）
 devcount() { # $1=ipcmd $2=module $3=idx
-	local _ip _mac _fam6
-	_ip=$(pc_uget "@$2[$3].ip")
-	_mac=$(pc_uget "@$2[$3].mac")
+	local _fam6 _rows _row _m _ip
 	_fam6=0
 	[ "$1" = "$ipt6" ] && _fam6=1
-	if [ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6"; then echo "-s $_ip"
-	elif [ -n "$_mac" ]; then echo "-m mac --mac-source $_mac"
-	elif [ -n "$_ip" ]; then return 0
-	else echo "ALL"
-	fi
+	_rows=$(pc_clients_rows "$2" "$3")
+	[ -z "$_rows" ] && { echo "ALL"; return 0; }
+	for _row in $_rows; do
+		case "$_row" in
+		*"|"*) _m=${_row%%|*}; _ip=${_row#*|} ;;
+		*)     _m=$_row; _ip="" ;;
+		esac
+		if [ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6"; then echo "-s $_ip"
+		elif [ -n "$_m" ]; then echo "-m mac --mac-source $_m"
+		fi
+	done
 }
 
-# 封锁/时段用：对条目的每个设备身份各加一条规则（mac 与 ip 任一命中即生效）
+# 封锁/时段用：对条目的每台设备各加规则（mac 与 ip 任一命中即生效）；
+# 逐行遍历 clients（A90）：每行 mac 一条、ip（同族）一条；只有「无任何行」才退化成对全部客户端。
 add_dev_rules() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
-	local _mac _ip _n _fam6
-	_mac=$(pc_uget "@$4[$5].mac")
-	_ip=$(pc_uget "@$4[$5].ip")
+	local _rows _row _m _ip _n _fam6
 	_fam6=0
 	[ "$1" = "$ipt6" ] && _fam6=1
+	_rows=$(pc_clients_rows "$4" "$5")
 	_n=0
-	[ -n "$_mac" ] && { ipt_do "$1" -t "$2" -I "$3" -m mac --mac-source "$_mac" $6 $7; _n=1; }
-	# 静态 IP 只对同族链有意义（往 ip6tables 里塞 IPv4 地址只会静默失败）
-	[ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6" && { ipt_do "$1" -t "$2" -I "$3" -s "$_ip" $6 $7; _n=1; }
+	for _row in $_rows; do
+		case "$_row" in
+		*"|"*) _m=${_row%%|*}; _ip=${_row#*|} ;;
+		*)     _m=$_row; _ip="" ;;
+		esac
+		[ -n "$_m" ] && { ipt_do "$1" -t "$2" -I "$3" -m mac --mac-source "$_m" $6 $7; _n=1; }
+		# 静态 IP 只对同族链有意义（往 ip6tables 里塞 IPv4 地址只会静默失败）
+		[ -n "$_ip" ] && addr_is_family "$_ip" "$_fam6" && { ipt_do "$1" -t "$2" -I "$3" -s "$_ip" $6 $7; _n=1; }
+	done
 	# 只有「条目本身没有任何设备条件」才退化成对全部客户端 —— 否则会变成无条件 DROP
-	if [ "$_n" = 0 ] && [ -z "$_mac" ] && [ -z "$_ip" ]; then
+	if [ "$_n" = 0 ] && [ -z "$_rows" ]; then
 		ipt_do "$1" -t "$2" -I "$3" $6 $7
 	fi
 	return 0
@@ -289,8 +299,25 @@ offload_macs() {
 }
 # 注意：不能用 `grep 'weburl'` 找 —— 命名节的行是 `parentcontrol.kids.mac='…'`，
 # 整行不含 "weburl"，会被漏掉（同一类 F5 缺陷）。改按「节类型」判定。
-weburl_macs_all() { pc_opts_all weburl mac; }
-weburl_ips_all() { pc_opts_all weburl ip; }
+# 全部条目绑定的 MAC 并集（A96）：任一 PC_MODULES 的任一节的 clients 中的 MAC。
+# 不按节类型过滤（time/protocol 条目也可能绑定设备），也不看 enable。
+weburl_macs_all() {
+	local _m _i
+	for _m in $PC_MODULES; do
+		for _i in $(pc_ids_all "$_m"); do
+			pc_clients_macs "$_m" "$_i"
+		done
+	done | sort -u
+}
+# 同上，取 IP 并集
+weburl_ips_all() {
+	local _m _i
+	for _m in $PC_MODULES; do
+		for _i in $(pc_ids_all "$_m"); do
+			pc_clients_ips "$_m" "$_i"
+		done
+	done | sort -u
+}
 offload_handle() {
 	nft -a list chain inet fw4 forward 2>/dev/null \
 		| grep 'flow add @ft' | head -1 \
@@ -376,13 +403,14 @@ weburl_patterns() {
 		| grep -E '^[A-Za-z0-9._/-]+$' | sort -u
 }
 
-# 计数用：单一设备条件（ip 优先）加一条规则——避免 mac+ip 两条都被命中而双计
+# 计数用：逐行设备条件各加一条规则（A90）—— 每行 ip 优先、否则 mac，避免 mac+ip 被双计。
+# 逐「行」而非逐「词」迭代：一个条件本身含空格（`-m mac --mac-source <mac>`）。
 add_dev_rule_single() { # $1=ipcmd $2=table $3=chain $4=module $5=idx $6=extra $7=action
 	local _c
-	_c=$(devcount "$1" "$4" "$5")
-	[ -z "$_c" ] && return 0        # 本族无法识别 → 不装规则（装了就成了「全部客户端」）
-	[ "$_c" = "ALL" ] && _c=""
-	ipt_do "$1" -t "$2" -I "$3" $_c $6 $7
+	devcount "$1" "$4" "$5" | while IFS= read -r _c; do
+		[ "$_c" = "ALL" ] && _c=""
+		ipt_do "$1" -t "$2" -I "$3" $_c $6 $7
+	done
 	return 0
 }
 
@@ -577,8 +605,7 @@ block_entry_window() { # $1=module $2=idx $3=UTC起秒 $4=UTC止秒
 # 防自锁守卫：无设备条件（= 对全部客户端生效）且拿不到局域网网段时不能封锁 ——
 # 无差别 PREROUTING DROP 会把路由器自己也封死。返回 0 表示"应当跳过这条"。
 block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
-	[ -n "$(pc_uget "@$1[$2].mac")" ] && return 1
-	[ -n "$(pc_uget "@$1[$2].ip")" ] && return 1
+	[ -n "$(pc_clients_rows "$1" "$2")" ] && return 1
 	[ -n "$3" ] && return 1
 	elog "quota: $1[$2] 无设备条件且拿不到局域网网段，跳过封锁以防自锁"
 	return 0
@@ -712,18 +739,29 @@ build_quota_blocks() {
 
 # 未覆盖客户端（一行一个 mac；在线优先、按 mac 升序，上限 PC_DIAG_MAX）
 diag_clients() { # $1=module $2=idx
-	local _emac _eip
-	_emac=$(pc_uget "@$1[$2].mac" | tr 'A-F' 'a-f')
-	_eip=$(pc_uget "@$1[$2].ip")
+	local _emacs _eips
+	_emacs=$(pc_clients_macs "$1" "$2")
+	_eips=$(pc_clients_ips "$1" "$2")
 	# 没有任何设备条件的条目 = 对所有客户端生效 ⇒ 不存在「未覆盖客户端」
-	[ -n "$_emac$_eip" ] || return 0
-	hosts_tsv | awk -v m="$_emac" -v i="$_eip" '
-		$1 == "host" && $2 != "" {
-			mac = tolower($2)
-			if (mac == m) next
-			if (i != "" && $3 == i) next
-			print $5, mac
-		}' | sort -k1,1r -k2,2 | head -n "$PC_DIAG_MAX" | awk '{ print $2 }'
+	[ -n "$_emacs$_eips" ] || return 0
+	# 排除集经 ENVIRON 传入（多值、按行分隔）：-v 无法承载含空格/$/反斜杠的值（A93/C5）
+	(
+		export PC_DIAG_EX_MACS="$_emacs"
+		export PC_DIAG_EX_IPS="$_eips"
+		hosts_tsv | awk '
+			BEGIN {
+				n = split(ENVIRON["PC_DIAG_EX_MACS"], a, "\n")
+				for (k = 1; k <= n; k++) if (a[k] != "") exm[a[k]] = 1
+				n = split(ENVIRON["PC_DIAG_EX_IPS"], b, "\n")
+				for (k = 1; k <= n; k++) if (b[k] != "") exi[b[k]] = 1
+			}
+			$1 == "host" && $2 != "" {
+				mac = tolower($2)
+				if (mac in exm) next
+				if ($3 != "" && ($3 in exi)) next
+				print $5, mac
+			}' | sort -k1,1r -k2,2 | head -n "$PC_DIAG_MAX" | awk '{ print $2 }'
+	)
 	return 0
 }
 
@@ -1283,7 +1321,8 @@ stats_tsv_inner() {
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
 			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")
-			_mac=$(pc_uget "@$_m[$_i].mac")
+			# 第 5 字段 = 该条目绑定的全部 MAC（逗号连接，A94）；printf 参数个数/顺序不变
+			_mac=$(pc_clients_macs "$_m" "$_i" | paste -sd, -)
 			_q=0; _u=0; _pool=""
 			set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
 			_q=$1; _u=$2; _pool=${3:-}
