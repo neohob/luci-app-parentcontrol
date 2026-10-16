@@ -93,12 +93,12 @@ _pc_snap_build() { # $1=快照文件
 	' "$1")
 	PC_UCI_SNAP_LIT="$_PC_SNAP_NL${_all%%"$_PC_SNAP_NL$_mk"*}$_PC_SNAP_NL"
 	PC_UCI_SNAP_IDX="${_all#*"$_PC_SNAP_NL$_mk"}$_PC_SNAP_NL"
-	# A74：无任何行时上面两式退化成 "\n\n"（非空串但无实义）。归零为真·空，让
-	# 「LIT 空 ⟺ 快照不可用」成为可靠判据（每行必含一个 TAB 分隔键值 ⇒ 无 TAB 即无行）。
-	case "$PC_UCI_SNAP_LIT" in
-	*"$_PC_SNAP_TAB"*) ;;                 # 至少一行 ⇒ 保留
-	*) PC_UCI_SNAP_LIT=; PC_UCI_SNAP_IDX= ;;
-	esac
+	# A76-3/D46：空判据 = **填充串相等**。无任何行时上面两式退化成恰好两个换行（非空串但
+	# 无实义），归零为真·空 ⇒「LIT 空 ⟺ 快照不可用」不再依赖 _PC_SNAP_TAB 是否非空
+	# （_PC_SNAP_TAB 仍用于 LIT/IDX 的查询前缀，只是不再当空判据）。
+	if [ "$PC_UCI_SNAP_LIT" = "$_PC_SNAP_NL$_PC_SNAP_NL" ]; then
+		PC_UCI_SNAP_LIT=; PC_UCI_SNAP_IDX=
+	fi
 }
 
 # 开快照：整个 run 只 `uci show` 一次（已开则空操作）。失败就退回直连。
