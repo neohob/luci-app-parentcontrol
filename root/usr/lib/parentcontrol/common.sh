@@ -31,6 +31,7 @@ BACKUP_DIR=${BACKUP_DIR:-/etc/parentcontrol/backup}
 PC_UCI_SNAP=${PC_UCI_SNAP:-}   # 快照文件路径；空 = 未启用（全部回落直连 uci）
 PC_UCI_SNAP_LIT=
 PC_UCI_SNAP_IDX=
+PC_CL_DIR=   # 第 11k 轮：clients 直连读缓存目录（= 快照文件 + ".d"，随快照同生共死）
 _PC_SNAP_NL='
 '
 _PC_SNAP_TAB=$(printf '\t')
@@ -113,12 +114,16 @@ pc_uci_snap_begin() {
 	_f=${PC_UCI_SNAP_FILE:-${TMPDIR:-/tmp}/parentcontrol-uci.$$}
 	( umask 077; uci show "$PC_CONF" 2>/dev/null > "$_f" ) || { rm -f "$_f"; return 0; }
 	PC_UCI_SNAP=$_f
+	PC_CL_DIR=$_f.d
+	rm -rf "$PC_CL_DIR"   # 新快照代 ⇒ 清派生缓存（防 PID 复用读到上一进程残留）
 	_pc_snap_build "$_f"
 	if [ -z "$PC_UCI_SNAP_LIT" ]; then   # A74：文件空 / 解析无输出 ⇒ 不留半成品，全量回落直连
 		rm -f "$_f"
+		rm -rf "$PC_CL_DIR"
 		PC_UCI_SNAP=
 		PC_UCI_SNAP_LIT=
 		PC_UCI_SNAP_IDX=
+		PC_CL_DIR=
 	fi
 	return 0
 }
@@ -126,9 +131,11 @@ pc_uci_snap_begin() {
 # 关快照：删文件 + 清查找串（幂等）。
 pc_uci_snap_drop() {
 	[ -n "$PC_UCI_SNAP" ] && rm -f "$PC_UCI_SNAP"
+	[ -n "$PC_CL_DIR" ] && rm -rf "$PC_CL_DIR"
 	PC_UCI_SNAP=
 	PC_UCI_SNAP_LIT=
 	PC_UCI_SNAP_IDX=
+	PC_CL_DIR=            # 第 11k 轮：clients 直连读缓存随快照失效一并清（写操作也会走这里）
 	return 0
 }
 
@@ -236,8 +243,29 @@ pc_opts_all() { # $1=模块 $2=字段
 
 # 原始 clients 文本；缺失时由老 mac/ip 合成 `mac|ip`（A87-2 双源兼容）
 pc_clients_raw() { # $1=模块 $2=下标
-	local _c _m _i
+	local _c _m _i _f
+	# A87-3/A88（第 11k 轮实测偏差，必读）：clients 是**多行**值（一行一台设备）。真机
+	# `uci show` 把值内的真换行**原样**印出（uci/src/cli.c: uci_print_value 只转义单引号），
+	# 而线导向快照 LIT（§11.17.4 L-7）按行解析 ⇒ 多行值在快照下只剩**首行**且保留外层
+	# 单引号（实测快照值 = `'mac1|ip1`），与直连 `uci -q get` 不等价 ⇒ 多设备在 tick/stats
+	# 里只剩第一台。故：快照返回值以单引号开头 ⇒ 视为被截断，改**直连** `uci -q get` 取全值。
+	# 热路径按「条目 × 累积 IP」反复取同一条目 ⇒ 同一条目在同一快照代内只直连一次：
+	# 值落到快照旁的缓存文件（$PC_CL_DIR，随快照一起清），后续命中只花一次 cat。
 	_c=$(pc_uget "@$1[$2].clients")
+	case "$_c" in
+	"'"*)
+		if [ -n "$PC_CL_DIR" ]; then
+			_f=$PC_CL_DIR/$1_$2
+			if [ ! -f "$_f" ]; then
+				mkdir -p "$PC_CL_DIR" 2>/dev/null
+				( umask 077; uci -q get "$PC_CONF.@$1[$2].clients" > "$_f" 2>/dev/null )
+			fi
+			_c=$(cat "$_f" 2>/dev/null)
+		else
+			_c=$(uci -q get "$PC_CONF.@$1[$2].clients")
+		fi
+		;;
+	esac
 	[ -n "$_c" ] && { printf '%s\n' "$_c"; return 0; }
 	_m=$(pc_uget "@$1[$2].mac")
 	_i=$(pc_uget "@$1[$2].ip")
