@@ -31,7 +31,9 @@ BACKUP_DIR=${BACKUP_DIR:-/etc/parentcontrol/backup}
 PC_UCI_SNAP=${PC_UCI_SNAP:-}   # 快照文件路径；空 = 未启用（全部回落直连 uci）
 PC_UCI_SNAP_LIT=
 PC_UCI_SNAP_IDX=
-PC_CL_DIR=   # 第 11k 轮：clients 直连读缓存目录（= 快照文件 + ".d"，随快照同生共死）
+# A98/D48（§11.22）：多行值（LIT 里只剩首行）的键集合，形如 NL+key+NL…。命中即直连取全值。
+PC_UCI_SNAP_TRUNC=
+PC_CL_DIR=   # 第 11k 轮：直连读缓存目录（= 快照文件 + ".d"，随快照同生共死）
 _PC_SNAP_NL='
 '
 _PC_SNAP_TAB=$(printf '\t')
@@ -56,15 +58,27 @@ _pc_snap_src() {
 # ⇒ 剥完最外层引号后必须把 `'\''` 还原为 `'`，否则快照值 `it'\''s` ≠ 直连 `it's`，
 # 违反 §11.15.2 等价性硬门槛（受影响字段：remarks / ai.apikey 等）。
 _pc_snap_build() { # $1=快照文件
-	local _all _mk
+	local _all _mk _mk2 _t
 	_mk=__pcsnapidx__      # LIT 与 IDX 的分段标记（只可能出现在键行之外）
-	_all=$(awk -v c="$PC_CONF" -v mk="$_mk" '
+	_mk2=__pcsnaptrunc__   # A98：IDX 与 TRUNC 的分段标记（同上，只可能出现在键行之外）
+	_all=$(awk -v c="$PC_CONF" -v mk="$_mk" -v mk2="$_mk2" '
 		{
 			if (index($0, c ".") != 1) next
 			p = index($0, "=")
 			if (p <= length(c) + 1) next
 			s = substr($0, length(c) + 2, p - length(c) - 2)
 			v = substr($0, p + 1)
+			# A98/D48（§11.22.2）：值内的真换行在 uci show 里原样印出 ⇒ 行导向解析只吃得到
+			# 首行。**完整（单行）值**必为 `'` + esc(值) + `'`：末字符是收尾引号，且末尾 4 字节
+			# 绝不等于转义三元组 `'\''`（该三元组只出现在值内 ⇒ 收尾引号必然缺席）。两者任一
+			# 不成立 ⇒ 本行是某多行值的首行（被截断）。判定必须看**原始** v（剥引号之前）。
+			# 注：设计书 §11.22.2 的字面写法（只判「首字符 `'` 且末字符非 `'`」）漏掉两种形态：
+			# 多行值首行恰以引号结尾（raw=`'abc'\''`）与多行值首行为空（raw=`'`）—— 两者末字符
+			# 都是 `'`，但收尾引号其实在后续行；实证见 test/init_test.sh W164/W165。
+			if (substr(v, 1, 1) == "\047") {
+				_vl = length(v)
+				if (_vl < 2 || substr(v, _vl, 1) != "\047" || (_vl >= 4 && substr(v, _vl - 3, 4) == "\047\\\047\047")) trunc = trunc s "\n"
+			}
 			# 双引号分支：真机 uci show 只用单引号包裹（§11.17.1 实测），此处为防御性保留
 			if (length(v) >= 2) {                  # 只剥最外层成对引号（"\047" = 单引号）
 				q1 = substr(v, 1, 1); q2 = substr(v, length(v), 1)
@@ -92,15 +106,22 @@ _pc_snap_build() { # $1=快照文件
 			pos = cnt[ty] + 0; cnt[ty]++
 			idx = idx "@" ty "[" pos "]" "\t" s "\n"
 		}
-		END { printf "\n%s%s\n%s", lit, mk, idx }
+		END { printf "\n%s%s\n%s%s\n%s", lit, mk, idx, mk2, trunc }
 	' "$1")
 	PC_UCI_SNAP_LIT="$_PC_SNAP_NL${_all%%"$_PC_SNAP_NL$_mk"*}$_PC_SNAP_NL"
-	PC_UCI_SNAP_IDX="${_all#*"$_PC_SNAP_NL$_mk"}$_PC_SNAP_NL"
+	_t="${_all#*"$_PC_SNAP_NL$_mk"}"
+	PC_UCI_SNAP_IDX="${_t%%"$_mk2"*}$_PC_SNAP_NL"
+	# mk2 不会出现在 LIT 里：LIT 的值不含真换行（这正是它被截断的原因），而匹配需要 NL+mk2。
+	# 截断键的 LIT 记录照旧保留（不改 LIT 语义、不影响 IDX 解析）。
+	# 收尾 NL 必须补：`_all=$(awk …)` 是命令替换，会剥掉末尾换行 ⇒ 段里**最后一个**截断键
+	# 拿不到收尾 NL，「NL+key+NL」判据漏判，取值时退化回 LIT 首行（被截断的首行）。
+	# 与 LIT/IDX 同形（两者也各补了一个 $_PC_SNAP_NL）。实证：test/init_test.sh W164②k8。
+	PC_UCI_SNAP_TRUNC="${_t#*"$_mk2"}$_PC_SNAP_NL"
 	# A76-3/D46：空判据 = **填充串相等**。无任何行时上面两式退化成恰好两个换行（非空串但
 	# 无实义），归零为真·空 ⇒「LIT 空 ⟺ 快照不可用」不再依赖 _PC_SNAP_TAB 是否非空
 	# （_PC_SNAP_TAB 仍用于 LIT/IDX 的查询前缀，只是不再当空判据）。
 	if [ "$PC_UCI_SNAP_LIT" = "$_PC_SNAP_NL$_PC_SNAP_NL" ]; then
-		PC_UCI_SNAP_LIT=; PC_UCI_SNAP_IDX=
+		PC_UCI_SNAP_LIT=; PC_UCI_SNAP_IDX=; PC_UCI_SNAP_TRUNC=
 	fi
 }
 
@@ -123,6 +144,7 @@ pc_uci_snap_begin() {
 		PC_UCI_SNAP=
 		PC_UCI_SNAP_LIT=
 		PC_UCI_SNAP_IDX=
+		PC_UCI_SNAP_TRUNC=
 		PC_CL_DIR=
 	fi
 	return 0
@@ -135,7 +157,8 @@ pc_uci_snap_drop() {
 	PC_UCI_SNAP=
 	PC_UCI_SNAP_LIT=
 	PC_UCI_SNAP_IDX=
-	PC_CL_DIR=            # 第 11k 轮：clients 直连读缓存随快照失效一并清（写操作也会走这里）
+	PC_UCI_SNAP_TRUNC=
+	PC_CL_DIR=            # 第 11k 轮：直连读缓存随快照失效一并清（写操作也会走这里）
 	return 0
 }
 
@@ -152,6 +175,10 @@ pc_uget() {
 	if [ -n "$PC_UCI_SNAP" ] && [ -r "$PC_UCI_SNAP" ] && [ -n "$PC_UCI_SNAP_LIT" ]; then
 		local _q _t _n _o _r
 		_q=$1
+		# A98-2/D48：本键的值是多行（快照 LIT 只留了首行）⇒ 直连取全值（按代缓存）。
+		case "$PC_UCI_SNAP_TRUNC" in
+		*"$_PC_SNAP_NL$_q$_PC_SNAP_NL"*) _pc_uget_direct "$_q"; return 0 ;;
+		esac
 		_r=${PC_UCI_SNAP_LIT#*"$_PC_SNAP_NL$_q$_PC_SNAP_TAB"}
 		if [ "$_r" != "$PC_UCI_SNAP_LIT" ]; then printf '%s\n' "${_r%%"$_PC_SNAP_NL"*}"; return 0; fi
 		case "$_q" in "@"*"["*"]"*) ;; *) return 0 ;; esac
@@ -168,6 +195,20 @@ pc_uget() {
 		return 0
 	fi
 	uci -q get "$PC_CONF.$1"
+}
+
+# A98-3/D48（§11.22.2）：多行值在行导向快照下只剩首行 ⇒ 构建期已把这类键记进 TRUNC 段；
+# 命中即直连取全值，并按快照代缓存（同一代内同键只直连一次）。空值也落盘（cat 得空）
+# ⇒「值确实为空」在代内同样只 fork 一次。$1=相对键（不含 $PC_CONF.）。
+_pc_uget_direct() {
+	local _f
+	[ -n "$PC_CL_DIR" ] || { uci -q get "$PC_CONF.$1"; return 0; }
+	_f=$PC_CL_DIR/$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')
+	if [ ! -f "$_f" ]; then
+		mkdir -p "$PC_CL_DIR" 2>/dev/null
+		( umask 077; uci -q get "$PC_CONF.$1" > "$_f" 2>/dev/null )
+	fi
+	cat "$_f" 2>/dev/null
 }
 
 # 把 uci show 规范化成 `类型|下标|字段|值` 流（节行输出 `类型|下标||类型`）。
@@ -243,30 +284,13 @@ pc_opts_all() { # $1=模块 $2=字段
 
 # 原始 clients 文本；缺失时由老 mac/ip 合成 `mac|ip`（A87-2 双源兼容）
 pc_clients_raw() { # $1=模块 $2=下标
-	local _c _m _i _f
-	# A87-3/A88（第 11k 轮实测偏差，必读）：clients 是**多行**值（一行一台设备）。真机
-	# `uci show` 把值内的真换行**原样**印出（uci/src/cli.c: uci_print_value 只转义单引号），
-	# 而线导向快照 LIT（§11.17.4 L-7）按行解析 ⇒ 多行值在快照下只剩**首行**且保留外层
-	# 单引号（实测快照值 = `'mac1|ip1`），与直连 `uci -q get` 不等价 ⇒ 多设备在 tick/stats
-	# 里只剩第一台。故：快照返回值以单引号开头 ⇒ 视为被截断，改**直连** `uci -q get` 取全值。
-	# 热路径按「条目 × 累积 IP」反复取同一条目 ⇒ 同一条目在同一快照代内只直连一次：
-	# 值落到快照旁的缓存文件（$PC_CL_DIR，随快照一起清），后续命中只花一次 cat。
+	local _c _m _i
+	# A87-1：clients 是一行一台设备的纯文本。多行值的快照截断由 pc_uget 统一承担
+	# （A98-4/D48，§11.22）：构建期 TRUNC 标记 + 取值期直连缓存。这里不再自带启发式 ——
+	# 11k 的「快照值以单引号开头」判据对「多行值首行恰以引号结尾」会漏判并返回被污染的值。
 	_c=$(pc_uget "@$1[$2].clients")
-	case "$_c" in
-	"'"*)
-		if [ -n "$PC_CL_DIR" ]; then
-			_f=$PC_CL_DIR/$1_$2
-			if [ ! -f "$_f" ]; then
-				mkdir -p "$PC_CL_DIR" 2>/dev/null
-				( umask 077; uci -q get "$PC_CONF.@$1[$2].clients" > "$_f" 2>/dev/null )
-			fi
-			_c=$(cat "$_f" 2>/dev/null)
-		else
-			_c=$(uci -q get "$PC_CONF.@$1[$2].clients")
-		fi
-		;;
-	esac
 	[ -n "$_c" ] && { printf '%s\n' "$_c"; return 0; }
+	# A87-2：clients 空 ⇒ 由老 mac/ip 合成 `mac|ip`（双源兼容）
 	_m=$(pc_uget "@$1[$2].mac")
 	_i=$(pc_uget "@$1[$2].ip")
 	[ -z "$_m$_i" ] && return 0
