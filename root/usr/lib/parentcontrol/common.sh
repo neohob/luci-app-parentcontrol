@@ -85,16 +85,31 @@ _pc_snap_build() { # $1=快照文件
 	' "$1")
 	PC_UCI_SNAP_LIT="$_PC_SNAP_NL${_all%%"$_PC_SNAP_NL$_mk"*}$_PC_SNAP_NL"
 	PC_UCI_SNAP_IDX="${_all#*"$_PC_SNAP_NL$_mk"}$_PC_SNAP_NL"
+	# A74：无任何行时上面两式退化成 "\n\n"（非空串但无实义）。归零为真·空，让
+	# 「LIT 空 ⟺ 快照不可用」成为可靠判据（每行必含一个 TAB 分隔键值 ⇒ 无 TAB 即无行）。
+	case "$PC_UCI_SNAP_LIT" in
+	*"$_PC_SNAP_TAB"*) ;;                 # 至少一行 ⇒ 保留
+	*) PC_UCI_SNAP_LIT=; PC_UCI_SNAP_IDX= ;;
+	esac
 }
 
 # 开快照：整个 run 只 `uci show` 一次（已开则空操作）。失败就退回直连。
 pc_uci_snap_begin() {
-	[ -n "$PC_UCI_SNAP" ] && [ -r "$PC_UCI_SNAP" ] && return 0
+	# A74：只有「本进程真构建过（LIT 非空）」才算已开 —— 挡住 PID 复用读到上一个进程
+	# 残留文件的僵态（那时 PC_UCI_SNAP 指向可读的旧文件，但本进程 LIT 还是空的）。
+	# 同进程内二次调用仍为空操作（幂等）。
+	[ -n "$PC_UCI_SNAP" ] && [ -n "$PC_UCI_SNAP_LIT" ] && return 0
 	local _f
 	_f=${PC_UCI_SNAP_FILE:-${TMPDIR:-/tmp}/parentcontrol-uci.$$}
 	( umask 077; uci show "$PC_CONF" 2>/dev/null > "$_f" ) || { rm -f "$_f"; return 0; }
 	PC_UCI_SNAP=$_f
 	_pc_snap_build "$_f"
+	if [ -z "$PC_UCI_SNAP_LIT" ]; then   # A74：文件空 / 解析无输出 ⇒ 不留半成品，全量回落直连
+		rm -f "$_f"
+		PC_UCI_SNAP=
+		PC_UCI_SNAP_LIT=
+		PC_UCI_SNAP_IDX=
+	fi
 	return 0
 }
 
@@ -116,7 +131,8 @@ pc_udelete() { uci -q delete "$@"; pc_uci_snap_drop; }
 # 时，按 pc_uci_scan 的同一编号逻辑把位次解析成节名 —— 命名节在 @类型[N] 下标空间里同样占位）。
 # 快照不可用 → 保持原样直连 `uci -q get`。
 pc_uget() {
-	if [ -n "$PC_UCI_SNAP" ] && [ -r "$PC_UCI_SNAP" ]; then
+	# A74：判据必须与 begin 一致（LIT 非空）⇒ 空/半截快照文件下与 pc_uci_scan 同源回落直连。
+	if [ -n "$PC_UCI_SNAP" ] && [ -r "$PC_UCI_SNAP" ] && [ -n "$PC_UCI_SNAP_LIT" ]; then
 		local _q _t _n _o _r
 		_q=$1
 		_r=${PC_UCI_SNAP_LIT#*"$_PC_SNAP_NL$_q$_PC_SNAP_TAB"}
