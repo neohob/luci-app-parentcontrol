@@ -62,6 +62,7 @@ _pc_snap_build() { # $1=快照文件
 			if (p <= length(c) + 1) next
 			s = substr($0, length(c) + 2, p - length(c) - 2)
 			v = substr($0, p + 1)
+			# 双引号分支：真机 uci show 只用单引号包裹（§11.17.1 实测），此处为防御性保留
 			if (length(v) >= 2) {                  # 只剥最外层成对引号（"\047" = 单引号）
 				q1 = substr(v, 1, 1); q2 = substr(v, length(v), 1)
 				if ((q1 == "\047" && q2 == "\047") || (q1 == "\"" && q2 == "\"")) v = substr(v, 2, length(v) - 2)
