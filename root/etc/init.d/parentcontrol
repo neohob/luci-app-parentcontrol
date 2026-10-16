@@ -1256,7 +1256,9 @@ hosts_tsv() {
 #   hist     <YYYYMMDD> <当天总分钟>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 #   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
-stats_tsv() {
+stats_tsv() { pc_uci_snap_begin; stats_tsv_inner "$@"; pc_uci_snap_drop; }
+
+stats_tsv_inner() {
 	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _di _dname _donl _k _snap
 	_brief="${1:-}"
 	_tt=$(pc_today_type)
@@ -1405,7 +1407,10 @@ with_tick_lock() {
 	return 0
 }
 
-tick() { with_tick_lock tick_body; }
+# A70/D43：三个只读入口开/关 uci 快照（热路径逐次 fork uci 是稳态 tick 的主要成本）。
+# 用「begin … drop」顺序保证异常返回也不留 /tmp 残留；**不用 EXIT trap** —— 那会顶掉
+# 测试套件的清理 trap（test/lib.sh 的 _t_cleanup），导致临时目录滞留。
+tick() { pc_uci_snap_begin; with_tick_lock tick_body; pc_uci_snap_drop; }
 
 # D28：设备上是否留有本插件的运行时痕迹 —— mangle 表存在任一 PARENTCONTROL_* 跳转，
 # 或任一 PC[A-Z]*_ 自定义链（PCA_/PCAW_/PCAD_/PCDT_/PCDC_……「PCD 开头」曾漏过，正则必须 PC[A-Z]*_）。
@@ -1505,7 +1510,9 @@ tick_body() {
 	fi
 }
 
-refresh_ip() {
+refresh_ip() { pc_uci_snap_begin; refresh_ip_inner; pc_uci_snap_drop; }
+
+refresh_ip_inner() {
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || return 0
 	[ -n "$ipt" ] || return 0
 	with_tick_lock refresh_ip_body
