@@ -35,9 +35,11 @@ _PC_SNAP_NL='
 '
 _PC_SNAP_TAB=$(printf '\t')
 
-# 快照内容来源：有快照读快照，否则直连 `uci show`（也是 pc_uci_scan 的输入口）
+# 快照内容来源：有快照读快照，否则直连 `uci show`（也是 pc_uci_scan 的输入口）。
+# A77/D46：判据必须与 pc_uget 同源（LIT 非空）—— 否则「文件在但 LIT 空」时
+# pc_uci_scan 读旧文件、pc_uget 回落直连，两个消费者反向分叉（review15 L-4）。
 _pc_snap_src() {
-	if [ -n "$PC_UCI_SNAP" ] && [ -r "$PC_UCI_SNAP" ]; then
+	if [ -n "$PC_UCI_SNAP" ] && [ -n "$PC_UCI_SNAP_LIT" ] && [ -r "$PC_UCI_SNAP" ]; then
 		cat "$PC_UCI_SNAP"
 	else
 		uci show "$PC_CONF" 2>/dev/null
