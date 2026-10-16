@@ -362,6 +362,7 @@ function M.collect()
 	end
 	local drows = {}
 	for _, r in ipairs(d.diag or {}) do
+		local _ix = key_idx(r.key)
 		local row = {
 			key = r.key, mac = r.mac, ip = r.ip, hostname = r.hostname,
 			online = r.online, minutes = r.minutes, first = r.first, last = r.last,
