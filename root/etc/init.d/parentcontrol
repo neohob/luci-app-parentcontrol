@@ -911,51 +911,56 @@ diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
 	return 0
 }
 
+# 取值助手（A83-2）：$1=表内容（`k|v|…` 以 `|` 串联）$2=键 ⇒ 结果放全局 _MV（有意不加 local）。
+diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _MV=${_MV%%|*}; }
+
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
-	mkdir -p "$STATE_DIR" "$USAGE_DIR/diag"
-	_thr=$1
-	_dump="$STATE_DIR/diag.dump.$$"; _tf="$STATE_DIR/diag.tg.$$"
+	_thr=$1; mkdir -p "$STATE_DIR" "$USAGE_DIR/diag"
+	_dump="$STATE_DIR/diag.dump.$$"; _tf="$STATE_DIR/diag.tg.$$"; _map="$STATE_DIR/diag.map.$$"
 	{ $ipt -t mangle -nvx -L 2>/dev/null; $ipt6 -t mangle -nvx -L 2>/dev/null; } > "$_dump"
-	_hosts=$(hosts_tsv 2>/dev/null)
-	for _key in $(pc_active_keys); do
-		_m=${_key%%_*}; _i=${_key#*_}
-		[ "$_m" = "weburl" ] || continue
-		$ipt -t mangle -n -L "PCAD_$_key" >/dev/null 2>&1 || continue
-		diag_targets "$_m" "$_i" > "$_tf"
-		_n=0
-		while read -r _tg; do
-			[ -n "$_tg" ] || continue
+	# A83-1：单遍化的唯一一次 awk（默认 FS，容忍行首空格计数列）。c|<链>|<目标>|<和> 按 (链,目标)
+	# 累加；t|<目标>|<和> 按目标跨全部链累加（不得加 ^PC 过滤，否则非 PC* 链跳向 PCDC_* 时与旧算法分叉）。
+	awk '
+		/^Chain / { ch = $2; next }
+		$1 ~ /^[0-9]+$/ { s[ch "|" $3] += $2; t[$3] += $2 }
+		END { for (k in s) print "c|" k "|" s[k]; for (k in t) print "t|" k "|" t[k] }' "$_dump" > "$_map"
+	# A83-2：两表一次 read 循环读进变量并 `|` 串成 `…k|v|`（不得用 $(cat)，会多一个 fork）。
+	_map_c=; _map_t=
+	while IFS= read -r _ln; do
+		case "$_ln" in t*) _map_t="$_map_t$_ln|" ;; c*) _map_c="$_map_c$_ln|" ;; esac
+	done < "$_map"
+	_NL='
+'
+	_hosts="$_NL$(hosts_tsv 2>/dev/null)"
+	for _key in $(pc_active_keys); do _m=${_key%%_*}; _i=${_key#*_}
+		[ "$_m" = "weburl" ] || continue; $ipt -t mangle -n -L "PCAD_$_key" >/dev/null 2>&1 || continue
+		_n=0; diag_targets "$_m" "$_i" > "$_tf"; while read -r _tg; do [ -n "$_tg" ] || continue
 			_n=$((_n + 1))
-			# 注意：-nvx -L 的计数列是右对齐的（行首有空格），所以按「第一个字段是纯数字」
-			# 识别规则行，不能用 ^[0-9]。
-			_v=$(awk -v c="PCAD_$_key" -v t="PCDT_${_key}_$_n" '
-				/^Chain / { ch = $2; next }
-				$1 ~ /^[0-9]+$/ { if (ch == c && $3 == t) s += $2 }
-				END { printf "%d", s + 0 }' "$_dump")
+			# 目标侧查 `c|` 表（键带链名，A83-1b）；行首空格计数列 ⇒ 按「首字段纯数字」识别规则行。
+			diag_map_get "$_map_c" "PCAD_$_key|PCDT_${_key}_$_n"; _v=$_MV
 			_bf="$STATE_DIR/dbase.${_key}.t$_n"
-			_d=$(diag_delta "$_v" "$_bf")
+			# A83-3：基线纯 shell（取代 $(diag_delta …)）；缺失/非法按 0；回零按 _v 计；无论是否命中都写回。
+			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
+			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi; printf '%s\n' "$_v" > "$_bf"
 			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && diag_bump_t "$_key" "$_tg"
 		done < "$_tf"
-		_n=0
-		for _mac in $(diag_clients "$_m" "$_i"); do
-			_n=$((_n + 1))
-			_v=$(awk -v t="PCDC_${_key}_$_n" '
-				$1 ~ /^[0-9]+$/ { if ($3 == t) s += $2 }
-				END { printf "%d", s + 0 }' "$_dump")
+		_n=0; for _mac in $(diag_clients "$_m" "$_i"); do _n=$((_n + 1))
+			diag_map_get "$_map_t" "PCDC_${_key}_$_n"; _v=$_MV
 			_bf="$STATE_DIR/dbase.${_key}.c$_n"
-			_d=$(diag_delta "$_v" "$_bf")
+			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
+			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi; printf '%s\n' "$_v" > "$_bf"
 			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] || continue
-			_ip=$(printf '%s\n' "$_hosts" | awk -v m="$_mac" '$1 == "host" && $2 == m { print $3; exit }')
-			_hn=$(printf '%s\n' "$_hosts" | awk -v m="$_mac" '$1 == "host" && $2 == m { print $4; exit }')
+			# A83-4：客户端 _ip/_hn 由同一份 _hosts 纯 shell 查（取代每客户端 2 次 printf|awk）。
+			_r=${_hosts#*"$_NL""host $_mac "}; [ "$_r" = "$_hosts" ] && _r=""; _r=${_r%%"$_NL"*}; _ip=${_r%% *}; _hn=${_r#* }; _hn=${_hn%% *}
 			diag_bump_c "$_key" "$_mac" "$_ip" "$_hn"
 		done
 	done
-	rm -f "$_dump" "$_tf"
+	rm -f "$_dump" "$_tf" "$_map"
 	# 条目被删/禁用后清掉它的诊断基线（与 base.* 同思路）
 	for _bf in "$STATE_DIR"/dbase.*; do
 		[ -e "$_bf" ] || continue
