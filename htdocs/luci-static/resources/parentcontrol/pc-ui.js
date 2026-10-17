@@ -215,6 +215,10 @@
 		function newRow(mac, ip) {
 			var row = el('div', 'pc-client-row', { 'data-pc-client-row': '' });
 			var mi = el('input', 'pc-client-mac', { type: 'text', placeholder: cfg.macPh || '' });
+			// A133-2b（第 11k-8 轮 D55）：JS 新增的行也必须带 list —— 否则用户点「➕ 新增设备」
+			// 后又变回纯手打，会认为没修好。macList 缺省时**不得**设置该属性（否则渲染出
+			// 指向不存在 id 的悬空属性；删掉 datalist 或其它调用点不传时就会出问题）。
+			if (cfg.macList) mi.setAttribute('list', cfg.macList);
 			mi.value = mac || '';
 			var ii = el('input', 'pc-client-ip', { type: 'text', placeholder: cfg.ipPh || '' });
 			ii.value = ip || '';

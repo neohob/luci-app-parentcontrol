@@ -8,7 +8,35 @@
 	local ui = require "luci.model.cbi.parentcontrol.ui"
 	local raw = self:cfgvalue(section) or ""
 	local rows = ui.client_rows(raw, true)
+
+	-- A133（第 11k-8 轮 D55）：恢复 MAC 候选下拉 —— 11k 之前 `Value` 用 `e:value()` 焊候选，
+	-- 换成 clients 行表后退化成纯手打（用户报的回归）。这里用 <datalist>（不是 <select>）：
+	-- 大量设备还没出现在 DHCP 租约 / ARP 里（休眠、刚换 Wi-Fi），强制选择会让人无法绑定。
+	-- 数据源沿用 11k 前已真机验证的 net.mac_hints，**不换源**（design.md §11.30.6）。
+	local MAX_HINTS = 200          -- 上限：租约表可能很长，避免把页面撑爆
+	local seen, hints = {}, {}
+	local ok_sys, sys = pcall(require, "luci.sys")
+	if ok_sys and sys and sys.net and sys.net.mac_hints then
+		sys.net.mac_hints(function(mac, name)
+			if not mac or mac == "" then return end
+			local k = mac:lower()          -- 去重：同一 MAC 可能在租约与 ARP 里各出现一次
+			if seen[k] then return end
+			seen[k] = true
+			hints[#hints + 1] = { mac = mac, name = name or "" }
+		end)
+	end
+	-- 排序：按小写 MAC 字典序（渲染稳定，便于真机对比；去重后小写键唯一 ⇒ 全序）
+	table.sort(hints, function(a, b) return a.mac:lower() < b.mac:lower() end)
 %>
+<datalist id="pc-mac-hints">
+	<% for i = 1, math.min(#hints, MAX_HINTS) do local h = hints[i] %>
+	<% if h.name ~= "" then %>
+	<option value="<%=pcdata(h.mac)%>" label="<%=pcdata(h.name)%>"></option>
+	<% else %>
+	<option value="<%=pcdata(h.mac)%>"></option>
+	<% end %>
+	<% end %>
+</datalist>
 <div class="pc-clients" id="pc-clients">
 	<p class="cbi-value-description">
 		<%=translate("一行一台设备：左边填 MAC 地址，右边填该设备的静态 IP（可留空）。同一台设备换 Wi-Fi 会换 MAC，可以把多台都填进来；这里的次序就是规则次序，额度是这些设备合计用的。")%>
@@ -16,7 +44,7 @@
 	<div class="pc-clients-list" data-pc-client-list>
 		<% for _, r in ipairs(rows) do %>
 		<div class="pc-client-row" data-pc-client-row>
-			<input type="text" class="pc-client-mac" value="<%=pcdata(r.mac)%>"
+			<input type="text" class="pc-client-mac" list="pc-mac-hints" value="<%=pcdata(r.mac)%>"
 				placeholder="<%=translate("MAC 地址，如 00:11:22:33:44:55")%>" />
 			<input type="text" class="pc-client-ip" value="<%=pcdata(r.ip)%>"
 				placeholder="<%=translate("静态 IP / 主机名（可留空）")%>" />
@@ -31,6 +59,7 @@
 <script type="text/javascript">//<![CDATA[
 	pcClientsRows({
 		root: 'pc-clients',
+		macList: 'pc-mac-hints',
 		delText: '<%=translate("删除")%>',
 		macPh: '<%=translate("MAC 地址，如 00:11:22:33:44:55")%>',
 		ipPh: '<%=translate("静态 IP / 主机名（可留空）")%>'
