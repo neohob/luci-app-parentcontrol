@@ -1321,8 +1321,9 @@ stats_tsv_inner() {
 			_key="${_m}_${_i}"
 			_name=$(pc_uget "@$_m[$_i].remarks" | tr -d '\t\r\n')
 			_unl=$(pc_entry_unlimited "$_m" "$_i" "$_tt")
-			# 第 5 字段 = 该条目绑定的全部 MAC（逗号连接，A94）；printf 参数个数/顺序不变
-			_mac=$(pc_clients_macs "$_m" "$_i" | paste -sd, -)
+			# 第 5 字段 = 该条目绑定的全部 MAC（逗号+空格连接，A94/A111）；printf 参数个数/顺序不变
+			# A111（§11.25.2 / F-3）：原先借外部行拼接命令，设备上缺失（rc=127）⇒ 字段恒空。
+			_mac=$(pc_clients_macs "$_m" "$_i" | pc_join_comma)
 			_q=0; _u=0; _pool=""
 			set -- $(entry_effective "$_m" "$_i" "$_tt")   # $1=额度 $2=已用 $3=池名
 			_q=$1; _u=$2; _pool=${3:-}
