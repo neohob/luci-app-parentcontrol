@@ -13,23 +13,13 @@
 	-- 换成 clients 行表后退化成纯手打（用户报的回归）。这里用 <datalist>（不是 <select>）：
 	-- 大量设备还没出现在 DHCP 租约 / ARP 里（休眠、刚换 Wi-Fi），强制选择会让人无法绑定。
 	-- 数据源沿用 11k 前已真机验证的 net.mac_hints，**不换源**（design.md §11.30.6）。
-	local MAX_HINTS = 200          -- 上限：租约表可能很长，避免把页面撑爆
-	local seen, hints = {}, {}
-	local ok_sys, sys = pcall(require, "luci.sys")
-	if ok_sys and sys and sys.net and sys.net.mac_hints then
-		sys.net.mac_hints(function(mac, name)
-			if not mac or mac == "" then return end
-			local k = mac:lower()          -- 去重：同一 MAC 可能在租约与 ARP 里各出现一次
-			if seen[k] then return end
-			seen[k] = true
-			hints[#hints + 1] = { mac = mac, name = name or "" }
-		end)
-	end
-	-- 排序：按小写 MAC 字典序（渲染稳定，便于真机对比；去重后小写键唯一 ⇒ 全序）
-	table.sort(hints, function(a, b) return a.mac:lower() < b.mac:lower() end)
+	-- 第 11k-8b 轮：收集/去重/排序/上限全部搬进 devnames.hints() —— 视图只 require + ipairs
+	-- 消费。视图模板跑在受限沙箱，pcall/table.sort 在那里没有确凿先例（math.* 有），
+	-- 放进视图就等于赌沙箱 env，而宿主侧无 lua、静态门查不出来（C2）。
+	local hints = require("luci.model.cbi.parentcontrol.devnames").hints()
 %>
 <datalist id="pc-mac-hints">
-	<% for i = 1, math.min(#hints, MAX_HINTS) do local h = hints[i] %>
+	<% for _, h in ipairs(hints) do %>
 	<% if h.name ~= "" then %>
 	<option value="<%=pcdata(h.mac)%>" label="<%=pcdata(h.name)%>"></option>
 	<% else %>
