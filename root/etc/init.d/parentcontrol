@@ -1533,7 +1533,19 @@ tick_body() {
 	local _tt
 	[ -n "$ipt" ] || return 0
 	# 正在 start（重建全套规则）时跳过，避免并发
-	[ -f "$LOCK" ] && return 0
+	# A114（design §11.25.2 / F-4）：陈旧 $LOCK 兜底 —— 若 start/restart 中途被杀（OOM、
+	# 拔电、脚本被 kill），旧实现会永久静默 return 0 ⇒ **tick 从此不再生效**（配额/时段
+	# 封堵全部停摆，页面无任何异常提示）。现：锁龄 > 2min（与 with_tick_lock 的 TICK_LOCK
+	# 阈值一致；正常 restart 实测 12.1s）⇒ 判为陈旧、回收并 elog，然后继续本次 tick；
+	# < 2min 仍在正常 start 窗口 ⇒ 保持静默 return 0。
+	if [ -f "$LOCK" ]; then
+		if [ -n "$(find "$LOCK" -mmin +2 2>/dev/null)" ]; then
+			elog "stale lock $LOCK (age>2min) reclaimed"
+			rm -f "$LOCK"
+		else
+			return 0
+		fi
+	fi
 	if ! pc_uget "@basic[0].enabled" | grep -q '^1$'; then
 		# D32/A45 停用：每 tick **无条件**只读探测（≤2 次 -S；写侧稳态仍 0）——旧实现用
 		# [ -e "$STATE_DIR" ] 当门槛，「规则在但状态目录被删」会永不清理（死角）。
