@@ -954,7 +954,7 @@ diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _M
 
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
@@ -1000,12 +1000,23 @@ sample_diag_counters() { # $1=阈值（字节）
 	done
 	rm -f "$_dump" "$_tf" "$_map"
 	# 条目被删/禁用后清掉它的诊断基线（与 base.* 同思路）
+	# A110（design §11.25.2 / F-1）：`pc_active_keys` 提到循环外 —— 原先每个 dbase.* 各起
+	# 1 个 `pc_active_keys` 子 shell + 1 个 `grep -qx` ⇒ N 个文件 = 2N fork。真机 49 个文件
+	# 实测 ~3160ms（test-report §15）；提出去 + 纯 shell 整行匹配后 ≈ 240ms，且整循环只
+	# 剩 1 次 fork（pc_active_keys 本身）≤ 2。用 $_NL 包边做整行匹配（非子串），避免
+	# `weburl_1` 误命中 `weburl_10`。
+	_pak="$_NL$(pc_active_keys)$_NL"
+	_dead=
 	for _bf in "$STATE_DIR"/dbase.*; do
 		[ -e "$_bf" ] || continue
 		_k=${_bf##*/dbase.}
 		_k=${_k%%.*}
-		pc_active_keys | grep -qx "$_k" || rm -f "$_bf"
+		case "$_pak" in *"$_NL$_k$_NL"*) ;; *) _dead="$_dead ${_bf##*/}" ;; esac
 	done
+	# 一次性删（子 shell 里 cd 到 $STATE_DIR 用相对名）：`rm` 逐文件也是 fork，不清账的话
+	# 「整循环 ≤2 fork」就不成立 —— 100 个残留会变成 100 次 rm（实测 90 个差值 ≈154ms）。
+	# dbase.<键> 的名字由 pc_active_keys 的 `模块_下标` 构成，不含空格，故可直接展开。
+	[ -n "$_dead" ] && ( cd "$STATE_DIR" && rm -f $_dead )
 	return 0
 }
 
