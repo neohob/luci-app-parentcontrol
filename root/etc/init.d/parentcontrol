@@ -792,9 +792,15 @@ diag_client_rules() { # $1=ipcmd $2=key $3=目标序号 $4=客户端文件
 
 # 诊断链的渲染 / 真下发（渲染模式只记文本，绝不碰内核）
 _diag_emit_rules() {
-	local _key _m _i _tf _itf _cf _n _c _c2 _mac _p _algos _nh
+	local _key _m _i _tf _itf _cf _n _c _c2 _mac _p _algos _nh _sd
 	_algos=$(pc_uget "@basic[0].algos"); [ -z "$_algos" ] && _algos=kmp
-	_tf="$STATE_DIR/diag.t.$$"; _cf="$STATE_DIR/diag.c.$$"
+	# A116（design §11.25.2 / F-6）：临时文件不得落在持久状态目录 $STATE_DIR。原先
+	# diag.ip/diag.t/diag.c 三个 scratch 都写成 "$STATE_DIR/diag.*.$$"：进程被 OOM/kill
+	# 打断就永久遗留到状态目录里（重启、升级都不清，且会让「状态目录=持久状态」的口径破产）。
+	# 现统一放进一次性 scratch 目录（/tmp，tmpfs，重启自清），函数退出时整目录删掉。
+	_sd=${TMPDIR:-/tmp}/pc-diag.$$
+	mkdir -p "$_sd" 2>/dev/null
+	_tf="$_sd/t"; _cf="$_sd/c"
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		[ "$_m" = "weburl" ] || continue          # 只有网址条目有可枚举的目标
@@ -818,7 +824,7 @@ _diag_emit_rules() {
 		# ③a IP 目标（来自 IP 目录）：按地址族给一条 -d，目标序号与
 		#    diag_targets 的输出顺序一致（IP 在前、匹配串在后）——采样靠它对齐。
 		_n=0
-		_itf="$STATE_DIR/diag.ip.$$"
+		_itf="$_sd/ip"
 		[ -f "$IPDIR/weburl_$_i" ] && grep -v '^$' "$IPDIR/weburl_$_i" > "$_itf"
 		while read -r _p; do
 			[ -n "$_p" ] || continue
@@ -844,7 +850,7 @@ _diag_emit_rules() {
 			done
 		done
 	done
-	rm -f "$_tf" "$_cf"
+	rm -rf "$_sd"
 	return 0
 }
 
@@ -1558,6 +1564,10 @@ tick_body() {
 		return 0
 	fi
 	mkdir -p "$STATE_DIR"
+	# A116（design §11.25.2 / F-6）：清掉历史版本留下的 scratch 残渣（旧实现把 diag.t/c/ip 写在
+	# 持久状态目录，进程被杀就永久遗留）。新实现已改到 /tmp 一次性目录，这里做一次垃圾回收，
+	# 让「$STATE_DIR 只装持久状态」这一口径在升级后也立即成立。
+	rm -f "$STATE_DIR"/diag.t.* "$STATE_DIR"/diag.c.* "$STATE_DIR"/diag.ip.* 2>/dev/null
 	# D28/A35 启用但三条跳转缺任一（fw4 reload / 上次 stop 后只靠 cron 的路径）：
 	# build_all 整套重建 —— 它自带 ensure_chain 先建后挂 D→A→Q（最终 Q→A→D），
 	# 与 restart/start 同路径（幂等，可反复跑）。
