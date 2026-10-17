@@ -10,6 +10,12 @@ PC_MODULES=${PC_MODULES:-"time protocol weburl"}
 HOLIDAY_CACHE=${HOLIDAY_CACHE:-/etc/parentcontrol/holiday}
 USAGE_DIR=${USAGE_DIR:-/etc/parentcontrol/usage}
 BACKUP_DIR=${BACKUP_DIR:-/etc/parentcontrol/backup}
+# 陈旧锁判定（分钟）。start() 与 tick 共用 —— 唯一来源，别在 init.d 里再硬编码。
+# 取值理由（A119/D51）：统一到 2（等效门槛 ≈180 s）。start 侧原为 1（≈120 s），提高一分钟是
+# **有意**的保守化 —— 慢 start（DNS 黑洞下 15–20 个 weburl 条目逐个解析）实测可达 ~180 s；
+# 若 tick 或另一个 start 在 120 s 就判陈旧并抢占，正是 design §11.26.1 L-2 描述的「并发写
+# netfilter」。代价：start 死锁（被 OOM/拔电/杀）后的自恢复从 ~120 s 变为 ~180 s，可接受。
+PC_LOCK_STALE_MIN=${PC_LOCK_STALE_MIN:-2}
 
 # ---------- 基础 ----------
 # ============================================================================

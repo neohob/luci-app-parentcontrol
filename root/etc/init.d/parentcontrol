@@ -1541,12 +1541,12 @@ tick_body() {
 	# 正在 start（重建全套规则）时跳过，避免并发
 	# A114（design §11.25.2 / F-4）：陈旧 $LOCK 兜底 —— 若 start/restart 中途被杀（OOM、
 	# 拔电、脚本被 kill），旧实现会永久静默 return 0 ⇒ **tick 从此不再生效**（配额/时段
-	# 封堵全部停摆，页面无任何异常提示）。现：锁龄 > 2min（与 with_tick_lock 的 TICK_LOCK
-	# 阈值一致；正常 restart 实测 12.1s）⇒ 判为陈旧、回收并 elog，然后继续本次 tick；
-	# < 2min 仍在正常 start 窗口 ⇒ 保持静默 return 0。
+	# 封堵全部停摆，页面无任何异常提示）。现：锁龄 > $PC_LOCK_STALE_MIN min（阈值唯一来源是
+	# common.sh 的 PC_LOCK_STALE_MIN，与 start() 共用；正常 restart 实测 12.1s）⇒ 判为陈旧、
+	# 回收并 elog，然后继续本次 tick；< $PC_LOCK_STALE_MIN min 仍在正常 start 窗口 ⇒ 静默 return 0。
 	if [ -f "$LOCK" ]; then
-		if [ -n "$(find "$LOCK" -mmin +2 2>/dev/null)" ]; then
-			elog "stale lock $LOCK (age>2min) reclaimed"
+		if [ -n "$(find "$LOCK" -mmin +"$PC_LOCK_STALE_MIN" 2>/dev/null)" ]; then
+			elog "stale lock $LOCK (age>${PC_LOCK_STALE_MIN}min) reclaimed"
 			rm -f "$LOCK"
 		else
 			return 0
@@ -1644,7 +1644,7 @@ cron_sync() { # $1=1 写入 / $1=0 移除
 
 start() {
 	[ -f "$LOCK" ] && {
-		[ -n "$(find "$LOCK" -mmin +1 2>/dev/null)" ] || exit 1
+		[ -n "$(find "$LOCK" -mmin +"$PC_LOCK_STALE_MIN" 2>/dev/null)" ] || exit 1
 		elog "removing stale lock $LOCK"
 	}
 	del_rule
