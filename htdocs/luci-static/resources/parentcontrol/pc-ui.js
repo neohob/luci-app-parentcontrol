@@ -278,7 +278,10 @@
 			if (pcCleanCell(mi.value).toLowerCase() !== want) continue;
 			mi.value = newMac;
 			if (typeof Event === 'function') {
-				try { mi.dispatchEvent(new Event('change')); } catch (e) { /* 老浏览器忽略 */ }
+				// A129（第 11k-7 轮 F-B）：必须冒泡 —— pcClientsRows 的 sync 监听委托在
+				// #pc-clients 根节点上，Event 构造器默认 bubbles:false ⇒ change 到不了根，
+				// 隐藏 textarea 不即时同步（靠 submit 兜底；form.submit() 之类路径会写回旧 MAC）。
+				try { mi.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) { /* 老浏览器忽略 */ }
 			}
 			return true;
 		}

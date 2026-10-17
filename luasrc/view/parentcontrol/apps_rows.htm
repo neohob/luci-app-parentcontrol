@@ -28,7 +28,7 @@
 	<button type="button" class="cbi-button cbi-button-add" data-pc-app-add><%=translate("➕ 新增名称")%></button>
 </div>
 <textarea name="<%=self:cbid(section)%>" data-pc-app-value style="display:none"><%=pcdata(raw)%></textarea>
-<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
+<script src="<%=resource%>/parentcontrol/pc-ui.js?v=<%=require("luci.model.cbi.parentcontrol.pkgver").get()%>"></script>
 <script type="text/javascript">//<![CDATA[
 	pcAppsRows({
 		root: 'pc-apps',

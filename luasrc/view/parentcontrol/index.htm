@@ -1,5 +1,5 @@
 <% include("cbi/map") %>
-<script src="<%=resource%>/parentcontrol/pc-ui.js"></script>
+<script src="<%=resource%>/parentcontrol/pc-ui.js?v=<%=require("luci.model.cbi.parentcontrol.pkgver").get()%>"></script>
 <script type="text/javascript">//<![CDATA[
 	// pcResetQuota（重置按钮用）来自公共资源 parentcontrol/pc-ui.js（D11，唯一实现）。
 	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "control", "parentcontrol", "status")%>', null,
