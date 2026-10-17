@@ -204,14 +204,21 @@ pc_uget() {
 # 命中即直连取全值，并按快照代缓存（同一代内同键只直连一次）。空值也落盘（cat 得空）
 # ⇒「值确实为空」在代内同样只 fork 一次。$1=相对键（不含 $PC_CONF.）。
 _pc_uget_direct() {
-	# A106（review18 Low-1）：缓存键 = 「tr 净化」**再拼 .$(cksum) 前段**。只用 tr 净化会把
-	# 不同键压成同名（`@weburl[0].apps` 与 `_weburl_0_.apps` 净化后同是 `_weburl_0_.apps`）
-	# ⇒ 同一快照代内第二个键读到第一个键的缓存值（静默取错值）。拼上原始键的 cksum 前段
-	# 即可分离（cksum 按原始字节算，净化不参与的碰撞面归零）。
-	local _f _c
+	# A113（design §11.25.2 / F-2，Major）：缓存键用**单射转义**，不再用校验和命令。
+	#   第 11l 轮真机发现目标设备没有该校验和命令（F-2）：旧实现把它拼进缓存键，设备上返
+	#   回空 ⇒ 键退化成 `<净化键>.`
+	#   `_c` 为空 ⇒ 键退化成 `<净化键>.` ⇒ A106 修掉的「不同键压成同名、同代内读到别人
+	#   的缓存值」原地复发，且每 tick 多 6–11 行 not-found 噪音。
+	#   转义表（在闭域 [-A-Za-z0-9_@.[]] 上单射）：_ → __ ；@ → _a ；[ → _b ；] → _c。
+	#   `_` 先被转义 ⇒ 所有转义码都以 `_` 开头且前缀无关 ⇒ 不同原键必得不同文件名。
+	#   闭域外的键（含 `/` 等会变成路径分隔符的字符）⇒ 直读、不写不读缓存：宁可多 fork
+	#   一次，也不把缓存文件写到 $PC_CL_DIR 之外。
+	local _f
 	[ -n "$PC_CL_DIR" ] || { uci -q get "$PC_CONF.$1"; return 0; }
-	_c=$(printf '%s' "$1" | cksum)
-	_f=$PC_CL_DIR/$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_').${_c%% *}
+	case "$1" in
+		""|*[!]A-Za-z0-9_@.[-]*) uci -q get "$PC_CONF.$1"; return 0 ;;
+	esac
+	_f=$PC_CL_DIR/$(printf '%s' "$1" | sed 's/_/__/g; s/@/_a/g; s/\[/_b/g; s/\]/_c/g')
 	if [ ! -f "$_f" ]; then
 		mkdir -p "$PC_CL_DIR" 2>/dev/null
 		( umask 077; uci -q get "$PC_CONF.$1" > "$_f" 2>/dev/null )
