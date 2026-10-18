@@ -89,6 +89,12 @@ end
 -- 模型模块经 require 加载、走 Lua 5.1 默认全局环境 —— _collect() 里
 -- pcall(require, "luci.sys") 就是这个模式，且已在真机验证过。
 local _hints
+-- 契约（第 11k-10 轮 A152-I1）：返回值是**模块级 memo 的同一个表**（`_hints`）本身，不是副本 ——
+-- 调用方**不得**写入 / 排序 / 裁剪它。当前两个消费方（`model/cbi/parentcontrol/ui.lua`、
+-- `statsdata.lua`）都只读，且 LuCI 每个请求一个新 VM ⇒ 今天无实际污染；但别名写入会把污染
+-- 带到本 VM 内的下一次调用（含并发的模板渲染）。要改编排请先复制一份再动。
+-- 静态门也查不到别名写入（词法级防御不在本仓护栏预算内，`design.md §11.32.8`），所以这条靠
+-- 注释 + 消费方只读约定，而不是靠断言。
 function M.hints()
 	if _hints then return _hints end
 	local hints = {}
