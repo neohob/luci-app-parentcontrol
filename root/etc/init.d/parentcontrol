@@ -1721,18 +1721,16 @@ tick_body() {
 		fi
 	fi
 	if ! pc_uget "@basic[0].enabled" | grep -q '^1$'; then
-		# D32/A45 停用：每 tick **无条件**只读探测（≤2 次 -S；写侧稳态仍 0）——旧实现用
+		# D32/A45 停用：每 tick **无条件**只读探测（≤2 次 -S；写侧无 nft/conntrack 调用）——旧实现用
 		# [ -e "$STATE_DIR" ] 当门槛，「规则在但状态目录被删」会永不清理（死角）。
 		# 有残留 → del_rule → 复验，仍残留则 elog（下个 tick 重试）；两种情况都清状态目录。
 		if pc_residual_on_device; then
 			del_rule
 			pc_residual_on_device && elog "停用清理未彻底（仍有残留），下个 tick 重试"
-			# A13/D9：del_rule 已不管 offload（D6），而 LuCI 停用**只改 uci**、不会走 stop()
-			# ⇒ 这条 tick 分支是停用后唯一会跑的终止路径，必须自己把 flow add 装回去，
-			# 否则软件 flow offload 永久关闭（相对 ca793ea 是回归，review1 B1）。
-			# restore_offload 自带 nft 双守卫与 A7 静默语义，重复 tick 不刷日志、不重复 insert。
-			restore_offload
 		fi
+		# A23/D15：恢复动作挂「已停用」这个必然项，不挂「有残留」这个可选项（review2 B1）。
+		# 停用只改 uci、不走 stop()；restore_offload 自带 nft 双守卫 + 幂等 + A7 静默 ⇒ 无条件安全。
+		restore_offload
 		rm -rf "$STATE_DIR"
 		return 0
 	fi
@@ -1822,8 +1820,10 @@ start() {
 		[ -n "$(find "$LOCK" -mmin +"$PC_LOCK_STALE_MIN" 2>/dev/null)" ] || exit 1
 		elog "removing stale lock $LOCK"
 	}
-	del_rule
+	# A23-2/D15：停用态下 start 必须是纯 no-op —— enabled 检查必须在 del_rule **之前**，
+	# 否则「停用 + start」会拆链却不再重建，留下「无残留 + flow add 已删」这个 B1 入口。
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 1
+	del_rule
 	[ -n "$ipt" ] || exit 1
 	touch "$LOCK"
 	trap 'rm -f "$LOCK"' EXIT INT TERM
