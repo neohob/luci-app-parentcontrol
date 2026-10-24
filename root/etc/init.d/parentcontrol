@@ -1628,9 +1628,22 @@ stats_tsv_inner() {
 
 with_tick_lock() {
 	mkdir "$TICK_LOCK" 2>/dev/null || {
-		[ -n "$(find "$TICK_LOCK" -mmin +2 2>/dev/null)" ] || return 0
+		[ -n "$(find "$TICK_LOCK" -mmin +"$PC_LOCK_STALE_MIN" 2>/dev/null)" ] || return 0
 		rm -rf "$TICK_LOCK"
 		mkdir "$TICK_LOCK" 2>/dev/null || return 0
+	}
+	"$@"
+	rmdir "$TICK_LOCK" 2>/dev/null
+	return 0
+}
+
+# A24/D17：与 with_tick_lock 同逻辑，唯一差别是拿不到锁返回非 0（ensure 用它登记待办）。
+# 必须共用 PC_LOCK_STALE_MIN（阈值唯一来源），否则 ensure 与 tick 的陈旧接管会分叉（R12）。
+try_tick_lock() {
+	mkdir "$TICK_LOCK" 2>/dev/null || {
+		[ -n "$(find "$TICK_LOCK" -mmin +"$PC_LOCK_STALE_MIN" 2>/dev/null)" ] || return 1
+		rm -rf "$TICK_LOCK"
+		mkdir "$TICK_LOCK" 2>/dev/null || return 1
 	}
 	"$@"
 	rmdir "$TICK_LOCK" 2>/dev/null
@@ -1739,8 +1752,9 @@ tick_body() {
 	# 持久状态目录，进程被杀就永久遗留）。新实现已改到 /tmp 一次性目录，这里做一次垃圾回收，
 	# 让「$STATE_DIR 只装持久状态」这一口径在升级后也立即成立。
 	rm -f "$STATE_DIR"/diag.t.* "$STATE_DIR"/diag.c.* "$STATE_DIR"/diag.ip.* 2>/dev/null
-	# A14-2：同样回收签名草稿的孤儿（进程被杀时 build_quota_blocks 已建的 .cur.$$ 会遗留）
-	rm -f "$STATE_DIR"/offloadsig.cur.* 2>/dev/null
+	# A14-2/A26：同样回收签名草稿的孤儿（进程被杀时 build_quota_blocks 的 .cur.$$ 与
+	# sync_offload 的 tmp.$$ 都会遗留）
+	rm -f "$STATE_DIR"/offloadsig.cur.* "$STATE_DIR"/offloadsig.tmp.* 2>/dev/null
 	# D28/A35 启用但三条跳转缺任一（fw4 reload / 上次 stop 后只靠 cron 的路径）：
 	# build_all 整套重建 —— 它自带 ensure_chain 先建后挂 D→A→Q（最终 Q→A→D），
 	# 与 restart/start 同路径（幂等，可反复跑）。
@@ -1758,6 +1772,11 @@ tick_body() {
 		sample_counters
 		build_quota_blocks
 		build_diag_blocks
+		# A24：ensure 被锁跳过时留下的待办 —— 由本 tick 兑现（≤60 s）。稳态成本 = 一次 [ -f ]。
+		if [ -f "$STATE_DIR/offload_pending" ]; then
+			sync_offload
+			rm -f "$STATE_DIR/offload_pending"
+		fi
 	fi
 }
 
@@ -1858,16 +1877,18 @@ reload() { stop; start; }
 # 硬约束：不取/不写 $LOCK、不 del_rule、不 refresh_ips、不 cron_sync、不 prune_usage、不 clean_log。
 ensure() {
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 0
-	# A15/M3：与 tick 并发会同时写 mangle（且改前共享 offloadsig.cur 会互相截断）。
-	# 拿不到 TICK_LOCK 就跳过本轮 —— 下一个 tick（≤60 s）会补；tick_body 自带
-	# 「三跳转缺任一 ⇒ build_all」（D28/A35），所以链被 fw4 reload 清空不会被永久漏掉。
-	# 注意与 A8「不取/不写 $LOCK」不冲突：$LOCK（start/stop）与 TICK_LOCK（tick）是两个锁。
+	# A15/M3：与 tick 并发会同时写 mangle（共享 offloadsig.cur 会互相截断）。
+	# A24/D11：拿不到 TICK_LOCK 不再静默跳过 —— 登记 offload_pending，由下一个 tick（≤60 s）的
+	# 稳态分支补偿 sync_offload（旧 D11 不成立：稳态 tick 不调 sync_offload ⇒ 被跳过的 purge 无限期
+	# 挂起，review2 M1）。链被 fw4 reload 清空仍由 D28 兜住；$LOCK 与 TICK_LOCK 是两个锁。
 	if pc_hooks_present; then
-		with_tick_lock _ensure_light
+		try_tick_lock _ensure_light || _mark_offload_pending
 	else
-		with_tick_lock _ensure_full
+		try_tick_lock _ensure_full || _mark_offload_pending
 	fi
 }
+# A24：ensure 被锁跳过时的待办登记（零成本标记文件），由 tick 稳态分支兑现。
+_mark_offload_pending() { mkdir -p "$STATE_DIR"; : > "$STATE_DIR/offload_pending"; }
 # A8/A9：hooks 齐备时只跑「自带 spec+条数双重门控」的封锁链重建（链被外部清空时只有它
 # 能发现）与 offload 状态同步（签名门控 ⇒ 稳态零 purge）。
 _ensure_light() { build_quota_blocks; sync_offload; }
