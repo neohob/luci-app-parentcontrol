@@ -350,6 +350,7 @@ offload_sig_build() {
 #   init          旧签名不存在/为空/无 #keys 段（D8 fail-safe：宁可多杀不可漏杀）
 #   device        #hosts 段变了（新增受管设备/条目）
 #   <r>:<key>     某条目的封锁状态从别的值变成 r（r ∈ quota/window/white_all）
+#   unlock:<key>  某条目从封锁态回到 none（解锁 —— 与 init 区分，A18/L2）
 # 输出永不为空（变化了但说不出具体原因时兜底 init），保证日志里一定有 reason=。
 offload_sig_reason() { # $1=旧签名 $2=新签名
 	local _d _r
@@ -375,6 +376,21 @@ offload_sig_reason() { # $1=旧签名 $2=新签名
 			if (ohs == "" && on == 0) { print "init"; exit }
 			r = ""
 			if (ohs != nhs) r = "device"
+			# 解锁（→ none）单独点名 unlock:<key>，与 init（首次构建/无法归因）区分
+			# （A18/L2）。多个条目同时解锁 ⇒ 按 key 升序（busybox awk 无 asort，
+			# 用插入排序），保证日志顺序稳定可断言。
+			nu = 0
+			for (i = 1; i <= nn; i++) {
+				k = nk[i]; v = nv[k]
+				if (v == "none" && ov[k] != "" && ov[k] != "none") uk[++nu] = k
+			}
+			for (i = 2; i <= nu; i++) {
+				t = uk[i]
+				for (j = i - 1; j >= 1 && uk[j] > t; j--) uk[j + 1] = uk[j]
+				uk[j + 1] = t
+			}
+			for (i = 1; i <= nu; i++)
+				r = (r == "") ? "unlock:" uk[i] : r ",unlock:" uk[i]
 			# 进入封锁态（plan 步骤 4.4：新 reason ≠ none）。
 			for (i = 1; i <= nn; i++) {
 				k = nk[i]; v = nv[k]
@@ -442,7 +458,8 @@ sync_offload() {
 		# 签名先落盘（即使一个 -D 都没成功），否则下一 tick 会重复同一原因
 		mkdir -p "$STATE_DIR"
 		# A17/L1：原子落盘 —— 中断时旧签名原地不动（下轮判 mismatch 多杀一次，fail-safe 方向）
-		printf '%s' "$_new" > "$STATE_DIR/offloadsig"
+		printf '%s' "$_new" > "$STATE_DIR/offloadsig.tmp.$$" &&
+			mv -f "$STATE_DIR/offloadsig.tmp.$$" "$STATE_DIR/offloadsig"
 		_hn=$(printf '%s\n' "$_hosts" | grep -c .)
 		[ "$n" -gt 0 ] && elog "offload: purged conntrack reason=$_rsn hosts=$_hn"
 	fi
@@ -1841,13 +1858,18 @@ reload() { stop; start; }
 # 硬约束：不取/不写 $LOCK、不 del_rule、不 refresh_ips、不 cron_sync、不 prune_usage、不 clean_log。
 ensure() {
 	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 0
+	# A15/M3：与 tick 并发会同时写 mangle（且改前共享 offloadsig.cur 会互相截断）。
+	# 拿不到 TICK_LOCK 就跳过本轮 —— 下一个 tick（≤60 s）会补；tick_body 自带
+	# 「三跳转缺任一 ⇒ build_all」（D28/A35），所以链被 fw4 reload 清空不会被永久漏掉。
+	# 注意与 A8「不取/不写 $LOCK」不冲突：$LOCK（start/stop）与 TICK_LOCK（tick）是两个锁。
 	if pc_hooks_present; then
-		# hooks 齐备：只跑「自带 spec+条数双重门控」的封锁链重建（链被外部清空时
-		# 只有它能发现）与 offload 状态同步（签名门控 ⇒ 稳态零 purge）。
-		build_quota_blocks
-		sync_offload
+		with_tick_lock _ensure_light
 	else
-		# 链或跳转被拆（fw4 reload / 外部清理）→ 为保命走全量重建（不取 LOCK）。
-		build_all
+		with_tick_lock _ensure_full
 	fi
 }
+# A8/A9：hooks 齐备时只跑「自带 spec+条数双重门控」的封锁链重建（链被外部清空时只有它
+# 能发现）与 offload 状态同步（签名门控 ⇒ 稳态零 purge）。
+_ensure_light() { build_quota_blocks; sync_offload; }
+# 链或跳转被拆（fw4 reload / 外部清理）→ 为保命走全量重建（不取 $LOCK）。
+_ensure_full() { build_all; }
