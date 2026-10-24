@@ -52,7 +52,8 @@ EXTRA_HELP="
 	stats_tsv        Print full stats for the dashboard as TSV
 	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log
 	ai_http          GET/POST a URL via curl/uclient-fetch/wget (used by the AI domain helper)
-	hosts_tsv        Print LAN hosts as 'host <mac> <ip> <name> <online>' (binding health / diagnostics)"
+	hosts_tsv        Print LAN hosts as 'host <mac> <ip> <name> <online>' (binding health / diagnostics)
+	ensure           Lightweight repair: rebuild quota blocks + offload state only (hotplug iface events)"
 
 elog() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >>$LOG_FILE
@@ -299,21 +300,23 @@ offload_macs() {
 }
 # 注意：不能用 `grep 'weburl'` 找 —— 命名节的行是 `parentcontrol.kids.mac='…'`，
 # 整行不含 "weburl"，会被漏掉（同一类 F5 缺陷）。改按「节类型」判定。
-# 全部条目绑定的 MAC 并集（A96）：任一 PC_MODULES 的任一节的 clients 中的 MAC。
-# 不按节类型过滤（time/protocol 条目也可能绑定设备），也不看 enable。
+# 全部**已启用**条目绑定的 MAC 并集（A96/A5）：任一 PC_MODULES 的任一启用节的 clients 中的 MAC。
+# 不按节类型过滤（time/protocol 条目也可能绑定设备），但**必须**看 enable：
+# 停用条目（enable='0'）的设备既不该被禁卸载，也不该进 conntrack purge 名单
+# （RC-2：旧版用 pc_ids_all 让 weburl_1/weburl_2 这类停用条目也进了杀伤名单）。
 weburl_macs_all() {
 	local _m _i
 	for _m in $PC_MODULES; do
-		for _i in $(pc_ids_all "$_m"); do
+		for _i in $(pc_ids_on "$_m"); do
 			pc_clients_macs "$_m" "$_i"
 		done
 	done | sort -u
 }
-# 同上，取 IP 并集
+# 同上，取 IP 并集（同样只看启用节）
 weburl_ips_all() {
 	local _m _i
 	for _m in $PC_MODULES; do
-		for _i in $(pc_ids_all "$_m"); do
+		for _i in $(pc_ids_on "$_m"); do
 			pc_clients_ips "$_m" "$_i"
 		done
 	done | sort -u
@@ -323,22 +326,106 @@ offload_handle() {
 		| grep 'flow add @ft' | head -1 \
 		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
 }
-apply_offload() {
-	local h n m a
+# 生效状态签名（design §5.1）：两段纯文本，段间以 `#keys` 分隔。
+#   #hosts 段 = 受管 MAC ∪ 受管目标 IP（排序去重）——「受管对象集合」
+#   #keys  段 = 每条启用条目一行 `key|reason`（原始遍历顺序，不排序，保证可比）
+# 关键设计（D2/A3）：签名**不含** weburl 目标 IP 的具体地址，所以 refresh_ip 把
+# 名单从 43 条刷到 45 条**不会**触发 purge —— 那正是用户报的「视频看一半重新 loading」。
+# #hosts 段的作用只是「新增受管对象时杀掉它已有的连接」（conntrack 已建立的流不受新
+# DROP 规则影响，不杀就封不住）。
+offload_sig_build() {
+	printf '#hosts\n'
+	{ offload_macs; weburl_ips_all; } | grep -v '^$' | sort -u
+	printf '#keys\n'
+	[ -f "$STATE_DIR/offloadsig.cur" ] && cat "$STATE_DIR/offloadsig.cur"
+	return 0
+}
+
+# 两次签名的差异 → 逗号分隔的 purge 原因（design §5.2）。
+#   init          旧签名不存在/为空/无 #keys 段（D8 fail-safe：宁可多杀不可漏杀）
+#   device        #hosts 段变了（新增受管设备/条目）
+#   <r>:<key>     某条目的封锁状态从别的值变成 r（r ∈ quota/window/white_all）
+# 输出永不为空（变化了但说不出具体原因时兜底 init），保证日志里一定有 reason=。
+offload_sig_reason() { # $1=旧签名 $2=新签名
+	local _d _r
+	_d="$STATE_DIR/sigcmp.$$"
+	mkdir -p "$_d"
+	printf '%s\n' "$1" > "$_d/old"
+	printf '%s\n' "$2" > "$_d/new"
+	_r=$(awk '
+		FNR == 1   { sect = "h" }
+		/^#hosts$/ { sect = "h"; next }
+		/^#keys$/  { sect = "k"; next }
+		$0 == ""   { next }
+		FILENAME == ARGV[1] {
+			if (sect == "k") { split($0, a, "|"); ov[a[1]] = a[2]; on++ }
+			else ohs = ohs "\n" $0
+			next
+		}
+		{
+			if (sect == "k") { split($0, a, "|"); nv[a[1]] = a[2]; nk[++nn] = a[1] }
+			else nhs = nhs "\n" $0
+		}
+		END {
+			if (ohs == "" && on == 0) { print "init"; exit }
+			r = ""
+			if (ohs != nhs) r = "device"
+			for (i = 1; i <= nn; i++) {
+				k = nk[i]; v = nv[k]
+				# 只报「进入封锁态」（plan 步骤 4.4：新 reason ≠ none）。
+				# 离开封锁态（→ none）不点名，由末尾的 init 兜底（签名变了仍会 purge）。
+				if (v != "" && v != "none" && v != ov[k])
+					r = (r == "") ? v ":" k : r "," v ":" k
+			}
+			if (r == "") r = "init"
+			print r
+		}' "$_d/old" "$_d/new")
+	rm -rf "$_d"
+	[ -n "$_r" ] || _r=init
+	echo "$_r"
+}
+
+# sync_offload（A1/D1）：原「应用 offload」函数的继任者。**杀伤性动作只有一个 —— conntrack -D**，
+# 它现在被「生效状态签名」门控：签名与上次一致 ⇒ 一条连接都不杀、一行日志都不写（A7）。
+# nft flow add 的删/恢复只在**真发生切换**时执行，且单次构建最多各一次（A6）。
+sync_offload() {
+	local h n m a _hosts _new _old _rsn _hn
 	command -v nft >/dev/null 2>&1 || return 0
 	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
-	if [ -n "$(offload_macs)$(weburl_ips_all)" ]; then
-		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
-			h=$(offload_handle)
-			[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+	_hosts=$({ offload_macs; weburl_ips_all; } | grep -v '^$' | sort -u)
+	if [ -z "$_hosts" ]; then
+		# 无受管设备（含「全部条目停用」）：不杀连接，恢复全局 offload（A11/D5）。
+		# 签名一律删掉：否则「先全停再全启」会被判为签名未变而不 purge，
+		# 刚启用的封锁对已建立流不生效。
+		if ! nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+			nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
 			if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
-				elog "offload: ERROR 删除 flow add 规则失败"
+				elog "offload: restored"
 			else
-				elog "offload: disabled"
+				elog "offload: ERROR 恢复 flow add 规则失败"
 			fi
 		fi
+		rm -f "$STATE_DIR/offloadsig" "$STATE_DIR/offloadsig.cur"
+		printf 'on\n' > /tmp/pc_offload_state
+		return 0
+	fi
+	# 有受管设备：确保全局 offload 是关的（真切换才写日志）
+	if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+		h=$(offload_handle)
+		[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
+		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+			elog "offload: ERROR 删除 flow add 规则失败"
+		else
+			elog "offload: disabled"
+		fi
+	fi
+	# 签名门控（A1）：状态没变就到此为止 —— 不 purge、不写日志。
+	_new=$(offload_sig_build)
+	_old=$(cat "$STATE_DIR/offloadsig" 2>/dev/null)
+	if [ "$_new" != "$_old" ]; then
+		_rsn=$(offload_sig_reason "$_old" "$_new")
+		n=0
 		if command -v conntrack >/dev/null 2>&1; then
-			n=0
 			for m in $(offload_macs); do
 				for a in $(ip neigh show 2>/dev/null | grep -i " $m " | awk '{print $1}'); do
 					conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
@@ -347,20 +434,30 @@ apply_offload() {
 			for a in $(weburl_ips_all); do
 				conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
 			done
-			[ "$n" -gt 0 ] && elog "offload: purged conntrack for managed hosts"
 		fi
-		printf 'disabled\n' > /tmp/pc_offload_state
+		# 签名先落盘（即使一个 -D 都没成功），否则下一 tick 会重复同一原因
+		mkdir -p "$STATE_DIR"
+		printf '%s' "$_new" > "$STATE_DIR/offloadsig"
+		_hn=$(printf '%s\n' "$_hosts" | grep -c .)
+		[ "$n" -gt 0 ] && elog "offload: purged conntrack reason=$_rsn hosts=$_hn"
 	fi
+	rm -f "$STATE_DIR/offloadsig.cur"
+	printf 'disabled\n' > /tmp/pc_offload_state
+	return 0
 }
+
 restore_offload() {
-	local h
 	command -v nft >/dev/null 2>&1 || return 0
 	nft list chain inet fw4 forward >/dev/null 2>&1 || return 0
-	h=$(offload_handle)
-	[ -n "$h" ] && nft delete rule inet fw4 forward handle $h 2>/dev/null
-	nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+	# A7：只在真发生切换时才打日志（stop 反复调用不该刷屏）
+	if ! nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+		nft insert rule inet fw4 forward meta l4proto { tcp, udp } flow add @ft 2>/dev/null
+		if nft list chain inet fw4 forward 2>/dev/null | grep -q 'flow add @ft'; then
+			elog "offload: restored"
+		fi
+	fi
 	printf 'on\n' > /tmp/pc_offload_state
-	elog "offload: restored"
+	return 0
 }
 
 # ============================================================================
@@ -613,8 +710,29 @@ block_skip_devless() { # $1=module $2=idx $3=局域网网段列表
 
 # 封锁链的实际下发动作。渲染（判断规则集有没有变）与真下发共用这一份代码，
 # 保证「记下来的规则」永远等于「下发的规则」。
+# A2/D3 侧信道：把一个 key 的封锁状态追加进签名草稿（`key|reason`）。
+# 未设 PC_SIG_OUT（= 真下发那条路径）时零开销：不多一个 fork。
+_sig_emit() { # $1=key $2=reason
+	[ -n "$PC_SIG_OUT" ] && printf '%s|%s\n' "$1" "$2" >> "$PC_SIG_OUT"
+	return 0
+}
+
+# 此刻是否在「可用时段」之外。design §5.1 把 `window` 定义为「**时段外**」——
+# 这是**当前状态**，不是「配了时段」这个静态事实。用静态事实会让签名恒为 window：
+# 跨入/跨出时段永远测不出来，也永远不 purge（A10(a) 要求 none→window 必杀）。
+# 0 = 现在在时段外；1 = 在时段内 / 该条目不限时段。
+qwin_now_out() { # $1=module $2=idx $3=school|holiday
+	local _w _now
+	_w=$(pc_qwin_sec "$1" "$2" "$3")
+	[ -n "$_w" ] || return 1
+	_now=$(pc_hhmmss_to_sec "$(date +%H:%M)")
+	[ -n "$_now" ] || return 1
+	set -- $_w
+	[ "$_now" -lt "$1" ] || [ "$_now" -gt "$2" ]
+}
+
 _quota_emit_rules() { # $1=daytype $2=局域网网段列表
-	local _key _m _i _a _b _ip _tt _lan _white
+	local _key _m _i _a _b _ip _tt _lan _white _out _rsn
 	_tt=$1; _lan=$2
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
@@ -629,6 +747,7 @@ _quota_emit_rules() { # $1=daytype $2=局域网网段列表
 				if [ "$2" -ge "$1" ]; then
 					# 被全封：只发无目标条件的全封，连条目目标也不可达
 					block_entry_all "$_m" "$_i"
+					_sig_emit "$_key" white_all
 					continue
 				fi
 			fi
@@ -639,20 +758,37 @@ _quota_emit_rules() { # $1=daytype $2=局域网网段列表
 			# 时段内落到 PCAW 跳转。
 			white_chain_fill "$_m" "$_i"
 			white_entry_jump "$_m" "$_i"
-			pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
+			# 先存进变量再遍历（不重复调 pc_qwin_out_ranges，但也**不得**用 <<<：
+			# busybox ash 不支持 here-string）。下发顺序与参数与改动前完全一致。
+			_out=$(pc_qwin_out_ranges "$_m" "$_i" "$_tt")
+			printf '%s\n' "$_out" | while read -r _a _b; do
 				[ -n "$_a" ] && block_entry_window_all "$_m" "$_i" "$_a" "$_b"
 			done
+			_rsn=none
+			qwin_now_out "$_m" "$_i" "$_tt" && _rsn=window
+			_sig_emit "$_key" "$_rsn"
 			continue
 		fi
 		# ① 可用时段之外
-		pc_qwin_out_ranges "$_m" "$_i" "$_tt" | while read -r _a _b; do
+		_out=$(pc_qwin_out_ranges "$_m" "$_i" "$_tt")
+		printf '%s\n' "$_out" | while read -r _a _b; do
 			[ -n "$_a" ] && block_entry_window "$_m" "$_i" "$_a" "$_b"
 		done
 		# ② 额度耗尽。额度 0 时 0>=0 恒成立 → 全禁，不需要专门分支；
 		#    勾了「不限额度」则只受 ① 约束。
-		[ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" = "1" ] && continue
+		# reason 优先级（D3/design §5.1）：white_all > quota > window > none。
+		_rsn=none
+		qwin_now_out "$_m" "$_i" "$_tt" && _rsn=window
+		if [ "$(pc_entry_unlimited "$_m" "$_i" "$_tt")" = "1" ]; then
+			_sig_emit "$_key" "$_rsn"
+			continue
+		fi
 		set -- $(entry_effective "$_m" "$_i" "$_tt")
-		[ "$2" -ge "$1" ] && block_entry "$_m" "$_i"
+		if [ "$2" -ge "$1" ]; then
+			block_entry "$_m" "$_i"
+			_rsn=quota
+		fi
+		_sig_emit "$_key" "$_rsn"
 	done
 	# 最后插入「放行到局域网网段」的规则（含路由器自身 IP），SSH/LuCI 才不会被
 	# 自己的封锁断掉。必须排在所有封锁规则之前，而 -I 是插到最前，故放在最后插入。
@@ -702,7 +838,14 @@ build_quota_blocks() {
 	local _tt _lan _spec _old _ccnt _lcnt _ip
 	_tt=$(pc_today_type)
 	_lan=$(pc_lan_nets)
+	# A2/D3：签名草稿（`key|reason` 逐行）由渲染时的侧信道产出，供 sync_offload 用。
+	# 注意不能写成「赋值前缀 + $( )」——`PC_SIG_OUT=x _spec=$(...)` 里那个赋值
+	# **不进子 shell**（本仓 PC_RENDER 已踩过同一个坑）：先赋值、再调函数、最后清空。
+	mkdir -p "$STATE_DIR"
+	: > "$STATE_DIR/offloadsig.cur"
+	PC_SIG_OUT="$STATE_DIR/offloadsig.cur"
 	_spec=$(render_quota_spec "$_tt" "$_lan")
+	PC_SIG_OUT=
 	_ccnt=$(spec_rule_counts "$_spec")
 	_old=$(cat "$STATE_DIR/quotaspec" 2>/dev/null)
 	_lcnt="$(live_rule_count "$ipt" "$TAGQ") $(live_rule_count "$ipt6" "$TAGQ")"
@@ -1095,7 +1238,7 @@ build_all() {
 	done
 	build_quota_blocks
 	build_diag_blocks
-	apply_offload
+	sync_offload
 	echo "$_tt" > "$STATE_DIR/daytype"
 }
 
@@ -1126,7 +1269,6 @@ del_rule() {
 		done
 	done
 	clean_pca_chains
-	restore_offload
 }
 
 prune_usage() {
@@ -1664,9 +1806,14 @@ start() {
 
 stop() {
 	del_rule
+	# A6/D6：offload 决策点从 del_rule 移到这里 —— del_rule 有两个语义完全不同的
+	# 调用方（stop=真拆除，应该恢复；start=重建，不该中途恢复）。不移走就是
+	# 日志里每天几十对「restored → disabled」翻转（RC-3）。
+	restore_offload
 	cron_sync 0
 	rm -f "$LOCK" 2>/dev/null
 	rm -rf "$STATE_DIR" 2>/dev/null
 }
 
 reload() { stop; start; }
+
