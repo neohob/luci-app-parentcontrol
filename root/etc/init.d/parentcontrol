@@ -327,17 +327,22 @@ offload_handle() {
 		| sed -n 's/.*# handle \([0-9][0-9]*\).*/\1/p'
 }
 # 生效状态签名（design §5.1）：两段纯文本，段间以 `#keys` 分隔。
-#   #hosts 段 = 受管 MAC ∪ 受管目标 IP（排序去重）——「受管对象集合」
+#   #hosts 段 = 受管**设备** MAC ∪ 受管**设备** IP（来自 pc_clients_ips，排序去重）
+#               ——「受管对象集合」（A19/I1：是**源**地址，不是 weburl 目标 IP）
 #   #keys  段 = 每条启用条目一行 `key|reason`（原始遍历顺序，不排序，保证可比）
 # 关键设计（D2/A3）：签名**不含** weburl 目标 IP 的具体地址，所以 refresh_ip 把
 # 名单从 43 条刷到 45 条**不会**触发 purge —— 那正是用户报的「视频看一半重新 loading」。
 # #hosts 段的作用只是「新增受管对象时杀掉它已有的连接」（conntrack 已建立的流不受新
 # DROP 规则影响，不杀就封不住）。
 offload_sig_build() {
+	local _c
 	printf '#hosts\n'
 	{ offload_macs; weburl_ips_all; } | grep -v '^$' | sort -u
 	printf '#keys\n'
-	[ -f "$STATE_DIR/offloadsig.cur" ] && cat "$STATE_DIR/offloadsig.cur"
+	# A14/M1：读私有草稿（${PC_SIG_CUR}，由 build_quota_blocks 赋值并带 $$）。
+	# 兜底旧固定路径只为兼容「build_quota_blocks 未被调用」的直接调用场景。
+	_c=${PC_SIG_CUR:-$STATE_DIR/offloadsig.cur}
+	[ -f "$_c" ] && cat "$_c"
 	return 0
 }
 
@@ -370,10 +375,9 @@ offload_sig_reason() { # $1=旧签名 $2=新签名
 			if (ohs == "" && on == 0) { print "init"; exit }
 			r = ""
 			if (ohs != nhs) r = "device"
+			# 进入封锁态（plan 步骤 4.4：新 reason ≠ none）。
 			for (i = 1; i <= nn; i++) {
 				k = nk[i]; v = nv[k]
-				# 只报「进入封锁态」（plan 步骤 4.4：新 reason ≠ none）。
-				# 离开封锁态（→ none）不点名，由末尾的 init 兜底（签名变了仍会 purge）。
 				if (v != "" && v != "none" && v != ov[k])
 					r = (r == "") ? v ":" k : r "," v ":" k
 			}
@@ -405,7 +409,7 @@ sync_offload() {
 				elog "offload: ERROR 恢复 flow add 规则失败"
 			fi
 		fi
-		rm -f "$STATE_DIR/offloadsig" "$STATE_DIR/offloadsig.cur"
+		rm -f "$STATE_DIR/offloadsig" "$PC_SIG_CUR" "$STATE_DIR/offloadsig.cur"
 		printf 'on\n' > /tmp/pc_offload_state
 		return 0
 	fi
@@ -437,11 +441,12 @@ sync_offload() {
 		fi
 		# 签名先落盘（即使一个 -D 都没成功），否则下一 tick 会重复同一原因
 		mkdir -p "$STATE_DIR"
+		# A17/L1：原子落盘 —— 中断时旧签名原地不动（下轮判 mismatch 多杀一次，fail-safe 方向）
 		printf '%s' "$_new" > "$STATE_DIR/offloadsig"
 		_hn=$(printf '%s\n' "$_hosts" | grep -c .)
 		[ "$n" -gt 0 ] && elog "offload: purged conntrack reason=$_rsn hosts=$_hn"
 	fi
-	rm -f "$STATE_DIR/offloadsig.cur"
+	rm -f "$PC_SIG_CUR" "$STATE_DIR/offloadsig.cur"
 	printf 'disabled\n' > /tmp/pc_offload_state
 	return 0
 }
@@ -842,8 +847,12 @@ build_quota_blocks() {
 	# 注意不能写成「赋值前缀 + $( )」——`PC_SIG_OUT=x _spec=$(...)` 里那个赋值
 	# **不进子 shell**（本仓 PC_RENDER 已踩过同一个坑）：先赋值、再调函数、最后清空。
 	mkdir -p "$STATE_DIR"
-	: > "$STATE_DIR/offloadsig.cur"
-	PC_SIG_OUT="$STATE_DIR/offloadsig.cur"
+	# A14/M1：签名草稿用**私有**路径（带 $$）—— build_all 里它要活过整个 build_diag_blocks
+	# 才被 sync_offload 读；固定共享路径会被并发的 ensure 截断 ⇒ 读到空 #keys ⇒ 白杀两次。
+	# 变量赋值必须在同一 shell（不能用 `PC_SIG_CUR=x $( )` 前缀形式，见下条注释）。
+	PC_SIG_CUR="$STATE_DIR/offloadsig.cur.$$"
+	: > "$PC_SIG_CUR"
+	PC_SIG_OUT="$PC_SIG_CUR"
 	_spec=$(render_quota_spec "$_tt" "$_lan")
 	PC_SIG_OUT=
 	_ccnt=$(spec_rule_counts "$_spec")
@@ -1701,6 +1710,11 @@ tick_body() {
 		if pc_residual_on_device; then
 			del_rule
 			pc_residual_on_device && elog "停用清理未彻底（仍有残留），下个 tick 重试"
+			# A13/D9：del_rule 已不管 offload（D6），而 LuCI 停用**只改 uci**、不会走 stop()
+			# ⇒ 这条 tick 分支是停用后唯一会跑的终止路径，必须自己把 flow add 装回去，
+			# 否则软件 flow offload 永久关闭（相对 ca793ea 是回归，review1 B1）。
+			# restore_offload 自带 nft 双守卫与 A7 静默语义，重复 tick 不刷日志、不重复 insert。
+			restore_offload
 		fi
 		rm -rf "$STATE_DIR"
 		return 0
@@ -1710,6 +1724,8 @@ tick_body() {
 	# 持久状态目录，进程被杀就永久遗留）。新实现已改到 /tmp 一次性目录，这里做一次垃圾回收，
 	# 让「$STATE_DIR 只装持久状态」这一口径在升级后也立即成立。
 	rm -f "$STATE_DIR"/diag.t.* "$STATE_DIR"/diag.c.* "$STATE_DIR"/diag.ip.* 2>/dev/null
+	# A14-2：同样回收签名草稿的孤儿（进程被杀时 build_quota_blocks 已建的 .cur.$$ 会遗留）
+	rm -f "$STATE_DIR"/offloadsig.cur.* 2>/dev/null
 	# D28/A35 启用但三条跳转缺任一（fw4 reload / 上次 stop 后只靠 cron 的路径）：
 	# build_all 整套重建 —— 它自带 ensure_chain 先建后挂 D→A→Q（最终 Q→A→D），
 	# 与 restart/start 同路径（幂等，可反复跑）。
