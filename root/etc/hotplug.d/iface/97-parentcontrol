@@ -8,4 +8,9 @@ CONFIG=parentcontrol
 [ "$(uci -q get $CONFIG.@basic[0].enabled)" = "1" ] || exit 0
 
 [ "$ACTION" = ifup -o "$ACTION" = ifupdate ] || exit 0
-/etc/init.d/parentcontrol start
+# [改] 原版这里调 `start`（全量重建：del_rule 拆光三链 → refresh_ips → build_all），
+# 真机实测 09:02:21 restored → 09:02:47 disabled = 26 秒封锁/计数空窗，且每次都白杀一遍
+# 连接。接口事件（ifupdate 在 DHCP 续租/邻居变化/fw4 重载时反复触发）的真实需求只有
+# 「fw4 重载可能清空了我们的 mangle 链，补齐」——所以改调 `ensure`（design D7）：
+# hooks 齐备时只跑 build_quota_blocks + sync_offload，不拆链、不 purge、不 refresh_ips。
+/etc/init.d/parentcontrol ensure

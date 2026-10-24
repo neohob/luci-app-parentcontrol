@@ -43,7 +43,7 @@ CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http hosts_tsv"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http hosts_tsv ensure"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
@@ -1817,3 +1817,21 @@ stop() {
 
 reload() { stop; start; }
 
+# A8/D7：接口事件（ifup/ifupdate）的**轻量**入口，供 /etc/hotplug.d/iface/97-parentcontrol 调。
+# 为什么不用 start：start 的第一件事是 del_rule（三链 -F + -X、摘掉 PREROUTING 跳转），
+# 之后才 refresh_ips（含 DNS 解析，慢）→ build_all 重建。真机实测两次日志时间戳差
+# 15~26 秒，这段窗口里封锁链不在（该封的没封）、计数链不在（漏计时）。
+# 而接口事件的真实需求只有一条：**fw4 重载可能清空了我们的 mangle 链，补齐**。
+# 硬约束：不取/不写 $LOCK、不 del_rule、不 refresh_ips、不 cron_sync、不 prune_usage、不 clean_log。
+ensure() {
+	pc_uget "@basic[0].enabled" | grep -q '^1$' || exit 0
+	if pc_hooks_present; then
+		# hooks 齐备：只跑「自带 spec+条数双重门控」的封锁链重建（链被外部清空时
+		# 只有它能发现）与 offload 状态同步（签名门控 ⇒ 稳态零 purge）。
+		build_quota_blocks
+		sync_offload
+	else
+		# 链或跳转被拆（fw4 reload / 外部清理）→ 为保命走全量重建（不取 LOCK）。
+		build_all
+	fi
+}
