@@ -1718,6 +1718,9 @@ pc_unhook_all_family() {
 
 tick_body() {
 	local _tt
+	# A25（O-8）：回收 /tmp/parentcontrol-uci.<pid> 的死进程残留快照。放在最前 —— 此时
+	# with_tick_lock 已持锁，且本函数内不建快照，删不到正在用的那份。
+	pc_uci_snap_gc
 	[ -n "$ipt" ] || return 0
 	# 正在 start（重建全套规则）时跳过，避免并发
 	# A114（design §11.25.2 / F-4）：陈旧 $LOCK 兜底 —— 若 start/restart 中途被杀（OOM、
