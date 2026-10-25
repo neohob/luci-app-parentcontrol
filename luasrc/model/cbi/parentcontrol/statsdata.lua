@@ -277,6 +277,11 @@ function M.collect()
 	end)
 	d.key_rows = rows
 
+	-- R3/A1：条目子行的展示名/停用态**复用** key_rows 同一份回退链（A50/D34 的 nz 链），
+	-- 避免矩阵里另写一套导致「按设备+条目」与矩阵显示不一致。
+	local kmeta = {}
+	for _, r in ipairs(rows) do kmeta[r.key] = r end
+
 	-- 6b) 按设备每日矩阵：台账按 (设备, day) 归约；设备判定与「按设备分析」同一口径
 	--     （能映射到设备名 device ~= "" 的条目才进表，与上面 dev_totals 完全一致）。
 	local devmap = {}
@@ -303,12 +308,59 @@ function M.collect()
 	end)
 	d.dev_day_rows = ddrows
 
+	-- 6c) 设备 × 条目 × 日期：在 devmap 基础上再拆一层条目。口径与 devmap 完全一致
+	--     （device ~= "" 才进表），因此不变式③ 天然成立；守卫是为未来漂移留的哨兵。
+	local devkey = {}
+	for _, day in ipairs(d.days) do
+		for key, v in pairs(ledger[day.date]) do
+			local ent = labels[key]
+			local dev = (ent and ent.device) or ""
+			if dev ~= "" then
+				local dk = devkey[dev]
+				if not dk then dk = {}; devkey[dev] = dk end
+				local kk = dk[key]
+				if not kk then kk = {}; dk[key] = kk end
+				kk[day.date] = (kk[day.date] or 0) + v
+			end
+		end
+	end
+	local kdrows = {}
+	for _, dr in ipairs(ddrows) do
+		local sub = devkey[dr.device] or {}
+		local keys = {}
+		for k, by in pairs(sub) do
+			local t = 0
+			for _, v in pairs(by) do t = t + v end
+			keys[#keys + 1] = { key = k, total = t, by = by }
+		end
+		-- A1：设备内条目按 total 降序，并列按 key 升序（字符串序，与 key_rows 口径一致）
+		table.sort(keys, function(a, b)
+			if a.total ~= b.total then return a.total > b.total end
+			return a.key < b.key
+		end)
+		kdrows[#kdrows + 1] = { kind = "dev", device = dr.device,
+			total = dr.total, nkey = #keys, by = dr.by }
+		if #keys >= 2 then                      -- A3：单条目设备不产子行
+			for _, k in ipairs(keys) do
+				local m = kmeta[k.key]
+				kdrows[#kdrows + 1] = { kind = "key", device = dr.device,
+					key = k.key,
+					name = m and m.name or k.key,
+					stale = (m and m.stale) or false,
+					total = k.total, by = k.by }
+			end
+		end
+	end
+	d.dev_key_day_rows = kdrows
+
 	-- D12 不变式守卫（F-R2-3）：真守卫，不是注释 —— 归约一旦与源数据对不上
 	-- （如重置被重复叠加、归约口径漂移），页面顶部给出可见标记并留系统日志，
-	-- 绝不静默输出错数。两条不变式：
+	-- 绝不静默输出错数。三条不变式：
 	--   ① Σ_day dev_day_rows[dev].by == dev_rows[dev].minutes（矩阵 vs 设备合计）
 	--   ② 台账合计 == Σ hist_key(窗口) + Σ 窗口内重置（台账是唯一源，不被二次计数；
 	--     第 2 轮复审的注入实验证明：只有②能在 r.before 翻倍时报警）
+	--   ③ 同设备同日 Σ_条目 devkey[dev][*][day] == devmap[dev][day]
+	--     （设备行展开后的子行之和 vs 设备行；R3/A1 新增，防第二层归约悄悄漂移）
 	local drift
 	for _, row in ipairs(d.dev_rows) do
 		local byday = devmap[row.device]
@@ -332,6 +384,20 @@ function M.collect()
 	if total_ledger ~= total_source then
 		drift = (drift and (drift .. "; ") or "")
 			.. "ledger=" .. total_ledger .. " != source=" .. total_source
+	end
+	-- ③ 设备 × 条目 × 日期 == 设备 × 日期（同设备同日各条目之和必须等于设备当天合计）
+	for dev, by in pairs(devmap) do
+		local perday = {}
+		for _, kk in pairs(devkey[dev] or {}) do
+			for dt, v in pairs(kk) do perday[dt] = (perday[dt] or 0) + v end
+		end
+		for dt, v in pairs(by) do
+			if (perday[dt] or 0) ~= v then
+				drift = (drift and (drift .. "; ") or "")
+					.. "dev=" .. dev .. " day=" .. dt
+					.. " entries=" .. (perday[dt] or 0) .. " != dev=" .. v
+			end
+		end
 	end
 	if drift then
 		d.invariant_drift = drift

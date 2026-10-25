@@ -34,6 +34,14 @@
 	.pc-matrix th, .pc-matrix td { white-space: nowrap; text-align: right; }
 	.pc-matrix th:first-child, .pc-matrix td:first-child { text-align: left; }
 	.pc-dev-group td { background: rgba(255, 255, 255, 0.05); border-top: 2px solid #3c3c3c; color: #ccc; }
+	/* pc-dev-entry-matrix：矩阵可按设备展开条目子行（
+	   设备行可点、单条目设备不可点；子行首列缩进 + 虚线分隔便于区分层次）。 */
+	.pc-matrix-dev { cursor: pointer; }
+	.pc-matrix-dev.pc-matrix-leaf { cursor: default; }
+	.pc-matrix-dev:hover td { background: rgba(255,255,255,0.05); }
+	.pc-matrix-caret { display: inline-block; width: 1em; color: #888; }
+	.pc-matrix-key td:first-child { padding-left: 22px; color: #bbb; }
+	.pc-matrix-key td { border-bottom-style: dotted; }
 	/* F3（A1 判据②）：「保存并应用 / 保存 / 复位」动作条由 dispatcher 的 cbi/footer 在
 	   页面层注入（stats.lua 仍是 cbi 节点，模板层删不掉；nofooter 会连 </form> 与主题
 	   页脚一起跳过，风险更大）—— 页内隐藏。判据 = 三按钮不可见（is_visible=false），
@@ -175,21 +183,33 @@
 				<% end %>
 				<th><%=T("合计")%></th>
 			</tr>
-			<% for _, r in ipairs(d.dev_day_rows) do %>
-			<tr>
-				<td><%=pcdata(r.device)%></td>
-				<% for _, day in ipairs(d.days) do
-					local v = r.by[day.date]
-				%>
+			<% local _dev = 0 %>
+			<% for _, r in ipairs(d.dev_key_day_rows) do %>
+			<% if r.kind == "dev" then _dev = _dev + 1 %>
+			<tr class="pc-matrix-dev<%= (r.nkey > 1) and '' or ' pc-matrix-leaf' %>"
+				<%= (r.nkey > 1) and ('data-pc-dev="' .. _dev .. '"') or '' %>
+				<% if r.nkey > 1 then %>onclick="pcMatrixToggle(this)" title="<%=pcdata(T("点击展开/收起它命中的各条目"))%>"<% end %>>
+				<td><span class="pc-matrix-caret"><%= (r.nkey > 1) and '▸' or '' %></span><%=pcdata(r.device)%><% if r.nkey > 1 then %> <span class="muted">（<%=r.nkey%> 个条目）</span><% end %></td>
+				<% for _, day in ipairs(d.days) do local v = r.by[day.date] %>
 				<td><%=v and v or "-"%></td>
 				<% end %>
 				<td><b><%=r.total%></b></td>
 			</tr>
+			<% else %>
+			<tr class="pc-matrix-key" data-pc-owner="<%=_dev%>" style="display:none">
+				<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=pcdata(T("（已停用或已删除）"))%></span><% end %></td>
+				<% for _, day in ipairs(d.days) do local v = r.by[day.date] %>
+				<td><%=v and v or "-"%></td>
+				<% end %>
+				<td><%=r.total%></td>
+			</tr>
+			<% end %>
 			<% end %>
 		</table>
 	</div>
 	<div class="muted" style="margin-top:6px">
 		<%=T("每格是该设备当天计入额度统计的分钟数；「-」= 当天没有该设备的用量记录。列顺序与上方柱状图一致，可横向滚动。")%>
+		<br/><%=T("点设备行可展开它命中的各条目；子行与设备行同一列口径，按该设备下的条目分别计时。")%>
 	</div>
 	<% end %>
 
