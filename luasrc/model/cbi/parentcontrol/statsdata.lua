@@ -333,7 +333,7 @@ function M.collect()
 			for _, v in pairs(by) do t = t + v end
 			keys[#keys + 1] = { key = k, total = t, by = by }
 		end
-		-- A1：设备内条目按 total 降序，并列按 key 升序（字符串序，与 key_rows 口径一致）
+		-- A1：设备内条目按 total 降序，并列按 key 升序（字符串序；key_rows 的比较器**无** key 兜底，见 design §12.4-3）
 		table.sort(keys, function(a, b)
 			if a.total ~= b.total then return a.total > b.total end
 			return a.key < b.key
