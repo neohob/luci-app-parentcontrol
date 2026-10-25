@@ -50,16 +50,22 @@ end
 
 -- D12 不变式守卫（F-R2-3）：真守卫，不是注释 —— 归约一旦与源数据对不上
 -- （如重置被重复叠加、归约口径漂移），页面顶部给出可见标记并留系统日志，绝不静默输出错数。
--- 三条不变式：
+-- 两条不变式（第 6 轮 / design §16.1 删除了原 ③）：
 --   ① Σ_day dev_day_rows[dev].by == dev_rows[dev].minutes（矩阵 vs 设备合计）
 --   ② 台账合计 == Σ hist_key(窗口) + Σ 窗口内重置（台账是唯一源，不被二次计数；
 --     第 2 轮复审的注入实验证明：只有②能在 r.before 翻倍时报警）
---   ③ 同设备同日 Σ_条目 devkey[dev][*][day] == devmap[dev][day]
---     （设备行展开后的子行之和 vs 设备行；R3/A1 新增，防第二层归约悄悄漂移）
 --
+-- 关于被删除的 ③（同设备同日 Σ_条目 devkey[dev][*][day] == devmap[dev][day]）：
+-- 它的两侧在 collect() 里同源归约（都由同一次 hist_key / ledger 遍历得出），一旦有人把两遍
+-- 合并成一遍就恒等、永不可能报警；而合并是语义中性的。⇒ ③ 不是正确性护栏，而是内部形状
+-- 护栏；内部形状只能用静态断言表达，静态断言又必然可伪造（第 5 轮复审 Major-4 用死循环实测
+-- 绕过）。故按 design §16.2 A60 删除。③ 想防的真实 bug 类（子行丢数据）已由行为判据覆盖：
+-- W204⑨（Σ 子行 == 设备行合计）/ W209（渲染）/ 真机 B137⑤⑥（页面数字对账）。
+-- `d.devkey` 仍由调用点传入（W218③ 断言其在场），本函数不再读它 —— 供测试与将来扩展保留。
 -- A38（第 4 轮 / review27）：抽成**纯函数**。判据文本与 collect() 内联版逐字相同，只把原来
--- 捕获的闭包局部表改成从参数 d 取（dev_rows / dev_days / devkey / days / ledger / dates /
--- hist_key / rrows）。这样可以直接喂**人造矛盾数据**断言「报警器真的会响」（W215 行为用例），
+-- 捕获的闭包局部表改成从参数 d 取（dev_rows / dev_days / days / ledger / dates /
+-- hist_key / rrows；devkey 已随 ③ 不再读取，调用点仍传）。这样可以直接喂**人造矛盾数据**
+-- 断言「报警器真的会响」（W215 行为用例），
 -- 而不必再写「这段代码不是死的」这类不可证伪的静态断言 —— helper 抽取、等价假条件
 -- （`if false and X then`）、字符串诱饵都已被复审实测证明能绕过后者。
 -- 入参缺省一律按空表处理（空/半截输入返回 nil、不抛）；不写 d，不依赖全局。
@@ -67,7 +73,6 @@ function M.invariants(d)
 	d = d or {}
 	local dev_rows = d.dev_rows or {}
 	local dev_days = d.dev_days or {}
-	local devkey   = d.devkey   or {}
 	local days     = d.days     or {}
 	local ledger   = d.ledger   or {}
 	local dates    = d.dates    or {}
@@ -96,19 +101,6 @@ function M.invariants(d)
 	if total_ledger ~= total_source then
 		drift = (drift and (drift .. "; ") or "")
 			.. "ledger=" .. total_ledger .. " != source=" .. total_source
-	end
-	for dev, by in pairs(dev_days) do
-		local perday = {}
-		for _, kk in pairs(devkey[dev] or {}) do
-			for dt, v in pairs(kk) do perday[dt] = (perday[dt] or 0) + v end
-		end
-		for dt, v in pairs(by) do
-			if (perday[dt] or 0) ~= v then
-				drift = (drift and (drift .. "; ") or "")
-					.. "dev=" .. dev .. " day=" .. dt
-					.. " entries=" .. (perday[dt] or 0) .. " != dev=" .. v
-			end
-		end
 	end
 	return drift
 end
