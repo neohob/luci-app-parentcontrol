@@ -181,21 +181,25 @@ pc_uci_snap_drop() {
 # 红线：只用设备实测存在的 applet（白名单见 test/fixtures/device_applets.txt）—— 不用校验和、
 # 行拼接、八进制/十六进制转储这类设备上没有的命令。
 #
-# 两条安全阀：
-#   ① kill 不可用 ⇒ 直接返回、一律不删（回退「不删」而非「全删」—— 判不了活就当活的）；
-#   ② 当前进程自己的快照（$PC_UCI_SNAP）与派生缓存目录（$PC_CL_DIR）无条件保留，
-#      即便 kill -0 因为权限/僵尸状态返回非 0（宁可漏删一份，也不能删掉正在用的那份）。
+# 三道保护（review2 L3/L4 修正：旧注释号称「两条安全阀」，其中「kill 不可用」一条
+# 在 dash 下是恒假的空话 —— kill 是内建命令，PATH 里删不掉，只能被同名函数覆盖；
+# 该分支永远走不到，等于没有。真正在挡事的只有下面三道）：
+#   ① 白名单：当前进程自己的快照（$PC_UCI_SNAP）与派生缓存目录（$PC_CL_DIR）无条件保留；
+#   ② $$：文件名里的 PID 等于本进程 PID 的一律不删（白名单变量为空时的兜底）；
+#   ③ kill -0：探针说活就不删 —— 判不了活一律当活的（回退「不删」而非「全删」）。
+# 三者都在「PID 已死」之外额外保护一层：宁可漏删一份，也不能删掉正在用的那份。
 pc_uci_snap_gc() {
-	command -v kill >/dev/null 2>&1 || return 0
 	local _g _b _p
 	for _g in "${TMPDIR:-/tmp}"/parentcontrol-uci.*; do
 		[ -e "$_g" ] || continue
 		# 只认 `parentcontrol-uci.<数字>` 与 `parentcontrol-uci.<数字>.d` 两种代际名，
 		# 其它名字（含 PC_UCI_SNAP_FILE 指向的自定义路径）一律不碰。
+		# 0 也排除：`kill -0 0` 打的是整个进程组，拿它当活体判据会永远判「活」⇒
+		# `parentcontrol-uci.0` 永远收不掉。
 		_b=${_g##*/parentcontrol-uci.}
 		_p=${_b%%.d}
 		case $_p in
-			'' | *[!0-9]*) continue ;;
+			'' | 0 | *[!0-9]*) continue ;;
 		esac
 		[ -n "$PC_UCI_SNAP" ] && [ "$_g" = "$PC_UCI_SNAP" ] && continue
 		[ -n "$PC_CL_DIR" ] && [ "$_g" = "$PC_CL_DIR" ] && continue
