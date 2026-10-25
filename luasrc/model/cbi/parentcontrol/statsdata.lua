@@ -48,6 +48,71 @@ local function date_iso(ymd)
 	return (ymd:gsub("^(%d%d%d%d)(%d%d)(%d%d)$", "%1-%2-%3"))
 end
 
+-- D12 不变式守卫（F-R2-3）：真守卫，不是注释 —— 归约一旦与源数据对不上
+-- （如重置被重复叠加、归约口径漂移），页面顶部给出可见标记并留系统日志，绝不静默输出错数。
+-- 三条不变式：
+--   ① Σ_day dev_day_rows[dev].by == dev_rows[dev].minutes（矩阵 vs 设备合计）
+--   ② 台账合计 == Σ hist_key(窗口) + Σ 窗口内重置（台账是唯一源，不被二次计数；
+--     第 2 轮复审的注入实验证明：只有②能在 r.before 翻倍时报警）
+--   ③ 同设备同日 Σ_条目 devkey[dev][*][day] == devmap[dev][day]
+--     （设备行展开后的子行之和 vs 设备行；R3/A1 新增，防第二层归约悄悄漂移）
+--
+-- A38（第 4 轮 / review27）：抽成**纯函数**。判据文本与 collect() 内联版逐字相同，只把原来
+-- 捕获的闭包局部表改成从参数 d 取（dev_rows / dev_days / devkey / days / ledger / dates /
+-- hist_key / rrows）。这样可以直接喂**人造矛盾数据**断言「报警器真的会响」（W215 行为用例），
+-- 而不必再写「这段代码不是死的」这类不可证伪的静态断言 —— helper 抽取、等价假条件
+-- （`if false and X then`）、字符串诱饵都已被复审实测证明能绕过后者。
+-- 入参缺省一律按空表处理（空/半截输入返回 nil、不抛）；不写 d，不依赖全局。
+function M.invariants(d)
+	d = d or {}
+	local dev_rows = d.dev_rows or {}
+	local dev_days = d.dev_days or {}
+	local devkey   = d.devkey   or {}
+	local days     = d.days     or {}
+	local ledger   = d.ledger   or {}
+	local dates    = d.dates    or {}
+	local hist_key = d.hist_key or {}
+	local rrows    = d.rrows    or {}
+	local drift
+	for _, row in ipairs(dev_rows) do
+		local byday = dev_days[row.device]
+		local total = 0
+		if byday then
+			for _, v in pairs(byday) do total = total + v end
+		end
+		if total ~= row.minutes then
+			drift = (drift and (drift .. "; ") or "")
+				.. row.device .. " matrix=" .. total .. " != rows=" .. row.minutes
+		end
+	end
+	local total_ledger, total_source = 0, 0
+	for _, day in ipairs(days) do
+		for _, v in pairs(ledger[day.date] or {}) do total_ledger = total_ledger + v end
+	end
+	for _, dt in ipairs(dates) do
+		for _, v in pairs(hist_key[dt] or {}) do total_source = total_source + v end
+	end
+	for _, r in ipairs(rrows) do total_source = total_source + r.before end
+	if total_ledger ~= total_source then
+		drift = (drift and (drift .. "; ") or "")
+			.. "ledger=" .. total_ledger .. " != source=" .. total_source
+	end
+	for dev, by in pairs(dev_days) do
+		local perday = {}
+		for _, kk in pairs(devkey[dev] or {}) do
+			for dt, v in pairs(kk) do perday[dt] = (perday[dt] or 0) + v end
+		end
+		for dt, v in pairs(by) do
+			if (perday[dt] or 0) ~= v then
+				drift = (drift and (drift .. "; ") or "")
+					.. "dev=" .. dev .. " day=" .. dt
+					.. " entries=" .. (perday[dt] or 0) .. " != dev=" .. v
+			end
+		end
+	end
+	return drift
+end
+
 -- 采集 + 分析
 function M.collect()
 	local d = tsv.read(false)
@@ -372,44 +437,12 @@ function M.collect()
 	--     第 2 轮复审的注入实验证明：只有②能在 r.before 翻倍时报警）
 	--   ③ 同设备同日 Σ_条目 devkey[dev][*][day] == devmap[dev][day]
 	--     （设备行展开后的子行之和 vs 设备行；R3/A1 新增，防第二层归约悄悄漂移）
-	local drift
-	for _, row in ipairs(d.dev_rows) do
-		local byday = devmap[row.device]
-		local total = 0
-		if byday then
-			for _, v in pairs(byday) do total = total + v end
-		end
-		if total ~= row.minutes then
-			drift = (drift and (drift .. "; ") or "")
-				.. row.device .. " matrix=" .. total .. " != rows=" .. row.minutes
-		end
-	end
-	local total_ledger, total_source = 0, 0
-	for _, day in ipairs(d.days) do
-		for _, v in pairs(ledger[day.date]) do total_ledger = total_ledger + v end
-	end
-	for _, dt in ipairs(dates) do
-		for _, v in pairs(d.hist_key[dt] or {}) do total_source = total_source + v end
-	end
-	for _, r in ipairs(rrows) do total_source = total_source + r.before end
-	if total_ledger ~= total_source then
-		drift = (drift and (drift .. "; ") or "")
-			.. "ledger=" .. total_ledger .. " != source=" .. total_source
-	end
-	-- ③ 设备 × 条目 × 日期 == 设备 × 日期（同设备同日各条目之和必须等于设备当天合计）
-	for dev, by in pairs(devmap) do
-		local perday = {}
-		for _, kk in pairs(devkey[dev] or {}) do
-			for dt, v in pairs(kk) do perday[dt] = (perday[dt] or 0) + v end
-		end
-		for dt, v in pairs(by) do
-			if (perday[dt] or 0) ~= v then
-				drift = (drift and (drift .. "; ") or "")
-					.. "dev=" .. dev .. " day=" .. dt
-					.. " entries=" .. (perday[dt] or 0) .. " != dev=" .. v
-			end
-		end
-	end
+	-- A38：判据本体搬进 M.invariants(d)（纯函数，可喂人造数据做行为测试），这里只是一次调用。
+	local drift = M.invariants({
+		dev_rows = d.dev_rows, dev_days = devmap, devkey = devkey,
+		days = d.days, ledger = ledger, dates = dates,
+		hist_key = d.hist_key, rrows = rrows,
+	})
 	if drift then
 		d.invariant_drift = drift
 		pcall(function()
