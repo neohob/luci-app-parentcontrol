@@ -338,14 +338,25 @@ function M.collect()
 			if a.total ~= b.total then return a.total > b.total end
 			return a.key < b.key
 		end)
+		-- A18/L5：单条目设备（nkey==1）没有可展开的子行，条目名必须**在行内**给出 ——
+		-- 否则「每个设备要能看到它命中的每个条目（封锁名称）」在这个子集上不成立。
+		-- 名字复用 key_rows 的同一份 kmeta 回退链（不另写一套，防两处显示分叉）。
+		local only
+		if #keys == 1 then
+			local m1 = kmeta[keys[1].key]
+			only = { name = m1 and m1.name or "（未知条目）",
+				stale = (m1 and m1.stale) or false }
+		end
 		kdrows[#kdrows + 1] = { kind = "dev", device = dr.device,
-			total = dr.total, nkey = #keys, by = dr.by }
+			total = dr.total, nkey = #keys, by = dr.by, only = only }
 		if #keys >= 2 then                      -- A3：单条目设备不产子行
 			for _, k in ipairs(keys) do
 				local m = kmeta[k.key]
 				kdrows[#kdrows + 1] = { kind = "key", device = dr.device,
 					key = k.key,
-					name = m and m.name or k.key,
+					-- A20/I1：回退链的最后一档**不许**是裸 key（`weburl_3` 之类内部
+					-- 名字会漏到页面上）。kmeta 缺项时给可读占位，绝不回显 key。
+					name = m and m.name or "（未知条目）",
 					stale = (m and m.stale) or false,
 					total = k.total, by = k.by }
 			end
