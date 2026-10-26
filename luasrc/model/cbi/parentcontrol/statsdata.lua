@@ -366,7 +366,7 @@ function M.collect()
 	d.dev_day_rows = ddrows
 
 	-- 6c) 设备 × 条目 × 日期：在 devmap 基础上再拆一层条目。口径与 devmap 完全一致
-	--     （device ~= "" 才进表），因此不变式③ 天然成立；守卫是为未来漂移留的哨兵。
+	--     （device ~= "" 才进表）。第二层归约漂移由测试侧 W204⑥⑦⑨ 承担。
 	local devkey = {}
 	for _, day in ipairs(d.days) do
 		for key, v in pairs(ledger[day.date]) do
