@@ -604,6 +604,10 @@ clean_pca_chains() {
 			[ "$_n" -gt 0 ] || break
 		done
 	done
+	# A3/D2-v2：清链与失效原子。诊断子链被清掉后 diagspec 必须同步失效，否则
+	# build_diag_blocks 的闸门（spec 文本未变）会误判「无事可做」而早退（F1）。
+	# 单点在此：四个调用方（build_acct_rules / build_quota_blocks / build_diag_blocks / del_rule）都经过本函数。
+	rm -f "$STATE_DIR/diagspec"
 	return 0
 }
 
@@ -615,10 +619,6 @@ build_acct_rules() { # $1=school|holiday
 	sample_counters
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
-	# A3/D2：clean_pca_chains 会清掉诊断子链（PCAD_/PCDT_/PCDC_，正则 PC[A-Z]*_ 全覆盖），
-	# 而 TAGD 的跳转还在 ⇒ build_diag_blocks 的闸门会误判「没变」而早退（F1/RC-1 现场）。
-	# 清完立刻让 diagspec 失效，下一次构建必重建。
-	rm -f "$STATE_DIR/diagspec"
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		ensure_chain "$ipt" mangle "PCA_$_key"
@@ -838,11 +838,11 @@ render_quota_spec() { # $1=daytype $2=局域网网段列表
 	return 0
 }
 
-# 规则文本里各协议族的条数（输出 "v4数 v6数"）。只数**插进 TAGQ** 的 -I 行：
+# 规则文本里各协议族的条数（输出 "v4数 v6数"）。只数**插进 $2 指定 tag** 的 -I 行：
 # 同一份 spec 里还记着白名单链 PCAW_* 的内容（-A 行），它们不在封锁链里，
 # 不能混进「链内条数」校验（否则每次都判为变化、每分钟重建 → 制造封锁空窗）。
-spec_rule_counts() {
-	printf '%s\n' "$1" | awk -F'|' -v t="$TAGQ" '
+spec_rule_counts() { # $1=spec文本 $2=要数的 tag（TAGQ 或 TAGD）
+	printf '%s\n' "$1" | awk -F'|' -v t="$2" '
 		{ if (index($0, " -I " t) > 0) n[$1]++ }
 		END { printf "%d %d", n["v4"]+0, n["v6"]+0 }'
 }
@@ -876,7 +876,7 @@ build_quota_blocks() {
 	PC_SIG_OUT="$PC_SIG_CUR"
 	_spec=$(render_quota_spec "$_tt" "$_lan")
 	PC_SIG_OUT=
-	_ccnt=$(spec_rule_counts "$_spec")
+	_ccnt=$(spec_rule_counts "$_spec" "$TAGQ")
 	_old=$(cat "$STATE_DIR/quotaspec" 2>/dev/null)
 	_lcnt="$(live_rule_count "$ipt" "$TAGQ") $(live_rule_count "$ipt6" "$TAGQ")"
 	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
@@ -890,9 +890,6 @@ build_quota_blocks() {
 	# TAGQ 已清空 ⇒ 白名单链 PCAW_* 此刻无人引用，顺手回收（条目被禁用/删除/改成黑名单后
 	# 不会留下孤儿链）；下面 white_chain_fill 会为仍在用的白名单条目重新建链。
 	clean_pca_chains
-	# A3/D2：同上 —— clean_pca_chains 清掉了诊断子链，diagspec 必须失效，否则
-	# build_diag_blocks 闸门（spec 文本 + TAGD 条数都没变）会早退，诊断子链永不重建。
-	rm -f "$STATE_DIR/diagspec"
 	_quota_emit_rules "$_tt" "$_lan"
 	printf '%s' "$_spec" > "$STATE_DIR/quotaspec"
 	return 0
@@ -1043,35 +1040,40 @@ render_diag_spec() {
 	return 0
 }
 
-# 诊断钩子完整性（A1/D1）：v4 与 v6 **分别**判定，任一族不完整即整体不完整。
+# 诊断钩子完整性（A1/D1-v2）：v4 与 v6 **分别**判定，任一族不完整即整体不完整。
 # 返回 0 = 完整、非 0 = 不完整。$1 可传 spec 文本；缺省读 $STATE_DIR/diagspec
-# （闸门里只在「文本与条数都没变」时才会走到这里，此时该文件内容即当前 spec）。
-# D3：每族**只** fork 一次 `-t mangle -S`，一份输出里解析出全部判据 —— 设备上有
-# 87 条诊断链，逐链 fork 会把 tick 拖到分钟级。稳态写侧一次调用都不增加。
-# 判据（D1）：① TAGD 跳转条数 == spec 里的 -I TAGD 条数；② spec 里出现的每个
-# PCAD_<key> 都真实存在；③ 每个 PCAD_<key> 上至少有一条跳转（空壳 = 没接上）。
+# （闸门里只在「文本未变」时才会走到这里，此时该文件内容即当前 spec）。
+# D3-v2：稳态 iptables 调用次数不得增加 —— 每族**只** fork 一次 `-t mangle -S`，
+# 一份输出里解析出全部判据；设备上有 87 条诊断链，逐链 fork 会把 tick 拖到分钟级。
+# 判据（D1-v2，期望/实际同口径「按链规则条数一致」）：
+#   ① TAGD 跳转条数 == spec 里的 -I TAGD 条数（hops=）；
+#   ② 每个 PCAD_<key> 的规则条数 == spec 里该族 -I PCAD_<key> 的行数（chain=cnt）。
+# 「链存在」「至少一跳」都被「条数一致」蕴含；单族目标（另一族 PCAD 合法空壳、
+# spec 该族也无 -I PCAD_ 行）⇒ 双方都不出现该链 ⇒ 判完整（B1 修正）。
 diag_hooks_present() {
 	local _spec _fam _ip _exp _act
 	_spec=${1:-$(cat "$STATE_DIR/diagspec" 2>/dev/null)}
 	_fam=v4
 	for _ip in "$ipt" "$ipt6"; do
 		if [ -n "$_ip" ]; then
-			# 期望（按族）：TAGD 跳转条数 + 应接上的每个 PCAD_ 目标链
+			# 期望（按族）：TAGD 跳转条数 + 该族每个 PCAD_<key> 应接的规则条数
 			_exp=$(printf '%s\n' "$_spec" | awk -F'|' -v f="$_fam" -v t="$TAGD" '
-				$1 == f && index($0, " -I " t) > 0 {
-					hops++
+				$1 == f {
+					if (index($0, " -I " t) > 0) hops++
 					n = split($0, a, " ")
 					for (i = 1; i < n; i++)
-						if (a[i] == "-j" && a[i + 1] ~ /^PCAD_/) { print a[i + 1]; break }
+						if (a[i] == "-I" && a[i + 1] ~ /^PCAD_/) cnt[a[i + 1]]++
 				}
-				END { printf "hops=%d\n", hops + 0 }' | sort)
-			# 实际（同一份 -S 输出）：只有「存在且有跳转」的 PCAD_ 链才算接上
+				END {
+					for (c in cnt) if (cnt[c] > 0) print c "=" cnt[c]
+					printf "hops=%d\n", hops + 0
+				}' | sort)
+			# 实际（同一份 -S 输出）：每个 PCAD_ 链内的 -A 条数 + TAGD 跳转条数
 			_act=$($_ip -t mangle -S 2>/dev/null | awk -v t="$TAGD" '
-				$1 == "-N" && $2 ~ /^PCAD_/ { seen[$2] = 1 }
-				$1 == "-A" && $2 ~ /^PCAD_/ { jump[$2]++ }
+				$1 == "-A" && $2 ~ /^PCAD_/ { cnt[$2]++ }
 				$1 == "-A" && $2 == t { hops++ }
 				END {
-					for (c in seen) if (jump[c] > 0) print c
+					for (c in cnt) if (cnt[c] > 0) print c "=" cnt[c]
 					printf "hops=%d\n", hops + 0
 				}' | sort)
 			[ "$_act" = "$_exp" ] || return 1
@@ -1084,29 +1086,26 @@ diag_hooks_present() {
 # 与 build_quota_blocks 同构：spec 文本 + TAGD 条数不变就一个 iptables 都不动。
 # A2/D1/D4：早退前提再加一条「钩子完整」—— 文本与条数都可能不变而子链已被清空。
 build_diag_blocks() {
-	local _spec _old _ccnt _lcnt _ip
+	local _spec _old _ip
 	[ -n "$ipt" ] || return 0
 	_spec=$(render_diag_spec)
 	_old=$(cat "$STATE_DIR/diagspec" 2>/dev/null)
-	_ccnt=$(printf '%s\n' "$_spec" | awk -F'|' -v t="$TAGD" '
-		{ if (index($0, " -I " t) > 0) n[$1]++ }
-		END { printf "%d %d", n["v4"]+0, n["v6"]+0 }')
-	_lcnt="$(live_rule_count "$ipt" "$TAGD") $(live_rule_count "$ipt6" "$TAGD")"
-	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ] && diag_hooks_present "$_spec"; then
+	# A2/D1-v2/D3-v2：文本未变且钩子完整 ⇒ 一个 iptables 都不动（稳态只读 -S 每族 1 次共 2 次）。
+	# 删掉了旧的 _ccnt/_lcnt 与两次 live_rule_count fork：TAGD 跳数一致已由 diag_hooks_present 的 hops= 覆盖。
+	if [ "$_spec" = "$_old" ] && diag_hooks_present "$_spec"; then
 		return 0
 	fi
-	# A7：走到这里说明闸门没过。文本与条数都没变 ⇒ 唯一原因是钩子不完整，
-	# 打一条可辨识日志（稳态不完整 0 行 —— 完整时上一行就 return 了）。
-	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
+	# A7：走到这里说明闸门没过。文本未变 ⇒ 唯一原因是钩子不完整，
+	# 打一条可辨识日志（稳态完整时上一行就 return 了，故稳态 0 行）。
+	if [ "$_spec" = "$_old" ]; then
 		elog "diag: hooks incomplete → rebuild"
 	fi
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGD"
 		$_ip -t mangle -F "$TAGD" 2>/dev/null
 	done
-	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收
+	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收（clean_pca_chains 内部同步失效 diagspec）
 	clean_pca_chains
-	rm -f "$STATE_DIR/diagspec"   # A3/D2：先失效，重建中途被打断也不会留下旧 spec
 	_diag_emit_rules
 	printf '%s' "$_spec" > "$STATE_DIR/diagspec"
 	return 0
@@ -1347,7 +1346,6 @@ del_rule() {
 		done
 	done
 	clean_pca_chains
-	rm -f "$STATE_DIR/diagspec"   # A3/D2：停用/重启后诊断链已无，闸门必须失效
 }
 
 prune_usage() {
