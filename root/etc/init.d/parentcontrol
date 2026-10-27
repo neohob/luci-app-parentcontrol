@@ -615,6 +615,10 @@ build_acct_rules() { # $1=school|holiday
 	sample_counters
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
 	clean_pca_chains
+	# A3/D2：clean_pca_chains 会清掉诊断子链（PCAD_/PCDT_/PCDC_，正则 PC[A-Z]*_ 全覆盖），
+	# 而 TAGD 的跳转还在 ⇒ build_diag_blocks 的闸门会误判「没变」而早退（F1/RC-1 现场）。
+	# 清完立刻让 diagspec 失效，下一次构建必重建。
+	rm -f "$STATE_DIR/diagspec"
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		ensure_chain "$ipt" mangle "PCA_$_key"
@@ -886,6 +890,9 @@ build_quota_blocks() {
 	# TAGQ 已清空 ⇒ 白名单链 PCAW_* 此刻无人引用，顺手回收（条目被禁用/删除/改成黑名单后
 	# 不会留下孤儿链）；下面 white_chain_fill 会为仍在用的白名单条目重新建链。
 	clean_pca_chains
+	# A3/D2：同上 —— clean_pca_chains 清掉了诊断子链，diagspec 必须失效，否则
+	# build_diag_blocks 闸门（spec 文本 + TAGD 条数都没变）会早退，诊断子链永不重建。
+	rm -f "$STATE_DIR/diagspec"
 	_quota_emit_rules "$_tt" "$_lan"
 	printf '%s' "$_spec" > "$STATE_DIR/quotaspec"
 	return 0
@@ -1036,7 +1043,46 @@ render_diag_spec() {
 	return 0
 }
 
+# 诊断钩子完整性（A1/D1）：v4 与 v6 **分别**判定，任一族不完整即整体不完整。
+# 返回 0 = 完整、非 0 = 不完整。$1 可传 spec 文本；缺省读 $STATE_DIR/diagspec
+# （闸门里只在「文本与条数都没变」时才会走到这里，此时该文件内容即当前 spec）。
+# D3：每族**只** fork 一次 `-t mangle -S`，一份输出里解析出全部判据 —— 设备上有
+# 87 条诊断链，逐链 fork 会把 tick 拖到分钟级。稳态写侧一次调用都不增加。
+# 判据（D1）：① TAGD 跳转条数 == spec 里的 -I TAGD 条数；② spec 里出现的每个
+# PCAD_<key> 都真实存在；③ 每个 PCAD_<key> 上至少有一条跳转（空壳 = 没接上）。
+diag_hooks_present() {
+	local _spec _fam _ip _exp _act
+	_spec=${1:-$(cat "$STATE_DIR/diagspec" 2>/dev/null)}
+	_fam=v4
+	for _ip in "$ipt" "$ipt6"; do
+		if [ -n "$_ip" ]; then
+			# 期望（按族）：TAGD 跳转条数 + 应接上的每个 PCAD_ 目标链
+			_exp=$(printf '%s\n' "$_spec" | awk -F'|' -v f="$_fam" -v t="$TAGD" '
+				$1 == f && index($0, " -I " t) > 0 {
+					hops++
+					n = split($0, a, " ")
+					for (i = 1; i < n; i++)
+						if (a[i] == "-j" && a[i + 1] ~ /^PCAD_/) { print a[i + 1]; break }
+				}
+				END { printf "hops=%d\n", hops + 0 }' | sort)
+			# 实际（同一份 -S 输出）：只有「存在且有跳转」的 PCAD_ 链才算接上
+			_act=$($_ip -t mangle -S 2>/dev/null | awk -v t="$TAGD" '
+				$1 == "-N" && $2 ~ /^PCAD_/ { seen[$2] = 1 }
+				$1 == "-A" && $2 ~ /^PCAD_/ { jump[$2]++ }
+				$1 == "-A" && $2 == t { hops++ }
+				END {
+					for (c in seen) if (jump[c] > 0) print c
+					printf "hops=%d\n", hops + 0
+				}' | sort)
+			[ "$_act" = "$_exp" ] || return 1
+		fi
+		_fam=v6
+	done
+	return 0
+}
+
 # 与 build_quota_blocks 同构：spec 文本 + TAGD 条数不变就一个 iptables 都不动。
+# A2/D1/D4：早退前提再加一条「钩子完整」—— 文本与条数都可能不变而子链已被清空。
 build_diag_blocks() {
 	local _spec _old _ccnt _lcnt _ip
 	[ -n "$ipt" ] || return 0
@@ -1046,8 +1092,13 @@ build_diag_blocks() {
 		{ if (index($0, " -I " t) > 0) n[$1]++ }
 		END { printf "%d %d", n["v4"]+0, n["v6"]+0 }')
 	_lcnt="$(live_rule_count "$ipt" "$TAGD") $(live_rule_count "$ipt6" "$TAGD")"
-	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
+	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ] && diag_hooks_present "$_spec"; then
 		return 0
+	fi
+	# A7：走到这里说明闸门没过。文本与条数都没变 ⇒ 唯一原因是钩子不完整，
+	# 打一条可辨识日志（稳态不完整 0 行 —— 完整时上一行就 return 了）。
+	if [ "$_spec" = "$_old" ] && [ "$_ccnt" = "$_lcnt" ]; then
+		elog "diag: hooks incomplete → rebuild"
 	fi
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGD"
@@ -1055,6 +1106,7 @@ build_diag_blocks() {
 	done
 	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收
 	clean_pca_chains
+	rm -f "$STATE_DIR/diagspec"   # A3/D2：先失效，重建中途被打断也不会留下旧 spec
 	_diag_emit_rules
 	printf '%s' "$_spec" > "$STATE_DIR/diagspec"
 	return 0
@@ -1295,6 +1347,7 @@ del_rule() {
 		done
 	done
 	clean_pca_chains
+	rm -f "$STATE_DIR/diagspec"   # A3/D2：停用/重启后诊断链已无，闸门必须失效
 }
 
 prune_usage() {
