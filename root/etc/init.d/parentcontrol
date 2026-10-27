@@ -1324,8 +1324,12 @@ build_all() {
 	elog "build: day=$_tt"
 	for _ip in "$ipt" "$ipt6"; do
 		ensure_chain "$_ip" mangle "$TAGA"; $_ip -t mangle -F "$TAGA" 2>/dev/null
-		# TAGQ 不在这里 -F：封锁链的清空/重建由 build_quota_blocks 统一负责，
-		# 它在规则集没变时完全不动链（否则每次 reload 都要开一个封锁空窗）
+		# TAGQ 的**清空**其实就由下一行的 ensure_chain 完成：ensure_chain 是「-N || -F」
+		# （:84-86），链已存在时 -N 失败 ⇒ 走 -F 把 TAGQ 清空。所以 build_all() 是**全量重建
+		# 路径**——每次都真的清空 TAGQ，随后由 build_quota_blocks 重建（它看到的已是空链，
+		# _lcnt=0 ≠ _ccnt ⇒ 闸门必然不早退）。清空→填充之间有短暂空链窗口（结构决定，pre-existing）。
+		# **A4「稳态零写」的边界**：它只在 tick_body 路径成立（那里不调 ensure_chain，直接
+		# sample_counters → build_quota_blocks → build_diag_blocks）；build_all() 本身不是稳态探针。
 		ensure_chain "$_ip" mangle "$TAGQ"
 		# F-R5-3：TAGD 也必须在 hook 之前先建出来 —— hook_chain 是「-C || -I」
 		# 且吞 stderr，目标链不存在时 -I 静默失败，诊断链就永远没有跳转而 0
