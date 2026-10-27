@@ -584,31 +584,51 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 }
 
 
-# 清掉本插件的所有自定义链（计数 PCA_、白名单 PCAW_、诊断 PCAD_/PCDT_/PCDC_）。
-# 副作用：末尾删 `$STATE_DIR/diagspec`（清链与失效原子，调用方无需再删 —— 名字看不出
-# 这个副作用，新增调用方别以为可以「只清链、保留 spec」）。
+# 清掉本插件的自定义链。$1 = 链名**开头匹配**的 BRE（缺省 = 全部自有链 PC[A-Z]*_[^ ]*）。
+# 纯清理，**无副作用** —— 不碰 `$STATE_DIR/diagspec`。要让诊断 spec 失效请用
+# clean_diag_chains()（D7：失效只跟随「诊断链被清」）。
+# 两处 sed 细节是踩过的坑，改之前先看：
+#   ① 锚点只能写在 `-N ` 前面，**不能**写进 \(...\) 里 —— BSD sed 把组内的 `^` 当
+#      字面量，`..\('^PCA_'\)$` 会一条也不匹配（清链静默失效，stop() 后残留一堆链）；
+#   ② 本处 sed 用 BRE（无 alternation），三元族用等价类 `PC[AD][DTC]_` 表达
+#      PCAD_/PCDT_/PCDC_（= ERE 的 `PC(AD|DT|DC)_`）。
 # -X 只能删「已无人引用」的链，而链之间有引用关系（诊断 PCAD_ → PCDT_ → PCDC_），
 # 一轮下来可能剩孤儿 —— 所以循环重试到某一轮再也删不掉为止（real iptables 的 -X
 # 成功返回 0、失败非 0，用退出码判断）。
 # F-R5-2：每轮必须**先 -F 再 -X** —— 真 iptables 对非空链 -X 报 "Directory not
 # empty"；只 -X 时第一轮就删不掉任何带内容的链（PCAD_/PCDT_/PCAW_），_n=0 直接
 # break，stop() 后残留几十条 PC*_ 链。先清空再删链，多轮重试解引用依赖。
-clean_pca_chains() {
-	local _c _ip _n _round
+clean_chains_filter() {
+	local _c _ip _n _round _re
+	_re=${1:-'PC[A-Z]*_[^ ]*'}
 	for _ip in "$ipt" "$ipt6"; do
 		[ -n "$_ip" ] || continue
 		for _round in 1 2 3 4 5 6; do
 			_n=0
-			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n 's/^-N \(PC[A-Z]*_[^ ]*\)$/\1/p'); do
+			for _c in $($_ip -t mangle -S 2>/dev/null | sed -n "s/^-N \($_re.*\)\$/\1/p"); do
 				$_ip -t mangle -F "$_c" 2>/dev/null
 				$_ip -t mangle -X "$_c" 2>/dev/null && _n=$((_n + 1))
 			done
 			[ "$_n" -gt 0 ] || break
 		done
 	done
-	# A3/D2-v2：清链与失效原子。诊断子链被清掉后 diagspec 必须同步失效，否则
-	# build_diag_blocks 的闸门（spec 文本未变）会误判「无事可做」而早退（F1）。
-	# 单点在此：四个调用方（build_acct_rules / build_quota_blocks / build_diag_blocks / del_rule）都经过本函数。
+	return 0
+}
+
+# 清诊断族（PCAD_/PCDT_/PCDC_）+ 失效 diagspec：清链与失效原子（D2-v2 语义保留）。
+# 诊断子链被清掉后 diagspec 必须同步失效，否则 build_diag_blocks 的闸门（spec 文本
+# 未变）会误判「无事可做」而早退（F1）。
+clean_diag_chains() {
+	clean_chains_filter 'PC[AD][DTC]_'
+	rm -f "$STATE_DIR/diagspec"
+	return 0
+}
+
+# 兼容壳：清**全部**自有链 + 失效 diagspec。只给 del_rule() 用（全拆，无人重建）；
+# builder 一律不用本函数 —— 它们各自只清自己会在同一函数里重建的那一族
+# （D6 不变式：任一 builder 都不得清除别的 builder 的链）。
+clean_pca_chains() {
+	clean_chains_filter 'PC[A-Z]*_[^ ]*'
 	rm -f "$STATE_DIR/diagspec"
 	return 0
 }
@@ -620,7 +640,9 @@ build_acct_rules() { # $1=school|holiday
 	# 不变量属于这个函数，调用方（build_all / rebuild_ip_rules）无从违反。
 	sample_counters
 	for _ip in "$ipt" "$ipt6"; do $_ip -t mangle -F "$TAGA" 2>/dev/null; done
-	clean_pca_chains
+	# D6：只清自己要重建的计数链，不清诊断族/白名单链（谁清谁重建）。
+	# 不碰 diagspec —— 诊断完整性不受 acct 重建影响（D7）。
+	clean_chains_filter 'PCA_'
 	for _key in $(pc_active_keys); do
 		_m=${_key%%_*}; _i=${_key#*_}
 		ensure_chain "$ipt" mangle "PCA_$_key"
@@ -890,8 +912,10 @@ build_quota_blocks() {
 		$_ip -t mangle -F "$TAGQ" 2>/dev/null
 	done
 	# TAGQ 已清空 ⇒ 白名单链 PCAW_* 此刻无人引用，顺手回收（条目被禁用/删除/改成黑名单后
-	# 不会留下孤儿链）；下面 white_chain_fill 会为仍在用的白名单条目重新建链。
-	clean_pca_chains
+	# 不会留下孤儿链）；下面 _quota_emit_rules 会为仍在用的白名单条目重新建链。
+	# D6：只清自己会重建的 PCAW_（不放宽到 PC[A-Z]*_ —— 那会连诊断链和计数链一起清）；
+	# D7：不碰 diagspec，否则配额重建会强制诊断全量重建（F-3）。
+	clean_chains_filter 'PCAW_'
 	_quota_emit_rules "$_tt" "$_lan"
 	printf '%s' "$_spec" > "$STATE_DIR/quotaspec"
 	return 0
@@ -1106,8 +1130,10 @@ build_diag_blocks() {
 		ensure_chain "$_ip" mangle "$TAGD"
 		$_ip -t mangle -F "$TAGD" 2>/dev/null
 	done
-	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收（clean_pca_chains 内部同步失效 diagspec）
-	clean_pca_chains
+	# TAGD 已清空 ⇒ 旧的 PCAD_/PCDT_/PCDC_ 无人引用，顺手回收。
+	# D7：清诊断族 + 失效 diagspec 是同一件事（clean_diag_chains 内含 rm），否则下次闸门
+	# 会因「spec 文本未变」误判无事可做而早退（F1）；且只清诊断族，不波及 PCA_/PCAW_。
+	clean_diag_chains
 	_diag_emit_rules
 	printf '%s' "$_spec" > "$STATE_DIR/diagspec"
 	return 0
