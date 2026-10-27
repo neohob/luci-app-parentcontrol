@@ -585,6 +585,8 @@ emit_weburl_targets() { # $1=table $2=IP链 $3=字符串链 $4=gate $5=动作 $6
 
 
 # 清掉本插件的所有自定义链（计数 PCA_、白名单 PCAW_、诊断 PCAD_/PCDT_/PCDC_）。
+# 副作用：末尾删 `$STATE_DIR/diagspec`（清链与失效原子，调用方无需再删 —— 名字看不出
+# 这个副作用，新增调用方别以为可以「只清链、保留 spec」）。
 # -X 只能删「已无人引用」的链，而链之间有引用关系（诊断 PCAD_ → PCDT_ → PCDC_），
 # 一轮下来可能剩孤儿 —— 所以循环重试到某一轮再也删不掉为止（real iptables 的 -X
 # 成功返回 0、失败非 0，用退出码判断）。
@@ -1044,7 +1046,7 @@ render_diag_spec() {
 # 返回 0 = 完整、非 0 = 不完整。$1 可传 spec 文本；缺省读 $STATE_DIR/diagspec
 # （闸门里只在「文本未变」时才会走到这里，此时该文件内容即当前 spec）。
 # D3-v2：稳态 iptables 调用次数不得增加 —— 每族**只** fork 一次 `-t mangle -S`，
-# 一份输出里解析出全部判据；设备上有 87 条诊断链，逐链 fork 会把 tick 拖到分钟级。
+# 一份输出里解析出全部判据；实测数十条诊断链，逐链 fork 会把 tick 拖到分钟级。
 # 判据（D1-v2，期望/实际同口径「按链规则条数一致」）：
 #   ① TAGD 跳转条数 == spec 里的 -I TAGD 条数（hops=）；
 #   ② 每个 PCAD_<key> 的规则条数 == spec 里该族 -I PCAD_<key> 的行数（chain=cnt）。
@@ -1083,8 +1085,8 @@ diag_hooks_present() {
 	return 0
 }
 
-# 与 build_quota_blocks 同构：spec 文本 + TAGD 条数不变就一个 iptables 都不动。
-# A2/D1/D4：早退前提再加一条「钩子完整」—— 文本与条数都可能不变而子链已被清空。
+# 闸门：spec 文本未变 + `diag_hooks_present` 判完整（该谓词内含 TAGD 跳数 `hops=`）
+# ⇒ 一个 iptables 都不动。文本未变而诊断子链已被清空时，靠谓词抓住并重建。
 build_diag_blocks() {
 	local _spec _old _ip
 	[ -n "$ipt" ] || return 0
