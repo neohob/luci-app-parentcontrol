@@ -40,8 +40,8 @@
 	.pc-matrix-dev.pc-matrix-leaf { cursor: default; }
 	.pc-matrix-dev:hover td { background: rgba(255,255,255,0.05); }
 	.pc-matrix-caret { display: inline-block; width: 1em; color: #888; }
-	.pc-matrix-key td:first-child { padding-left: 22px; color: #bbb; }
-	.pc-matrix-key td { border-bottom-style: dotted; }
+	.pc-matrix-key td:first-child, .pc-matrix-name td:first-child { padding-left: 22px; color: #bbb; }
+	.pc-matrix-key td, .pc-matrix-name td { border-bottom-style: dotted; }
 	/* F3（A1 判据②）：「保存并应用 / 保存 / 复位」动作条由 dispatcher 的 cbi/footer 在
 	   页面层注入（stats.lua 仍是 cbi 节点，模板层删不掉；nofooter 会连 </form> 与主题
 	   页脚一起跳过，风险更大）—— 页内隐藏。判据 = 三按钮不可见（is_visible=false），
@@ -53,6 +53,23 @@
 <div class="pc-dash">
 	<% if d.invariant_drift then %>
 	<div class="pc-badge bad" style="margin:4px 0"><%=T("统计台账校验失败（D12 不变式失配）：本页数字可能不可信，请把本行内容反馈给开发者。")%> <%=pcdata(d.invariant_drift)%></div>
+	<% end %>
+	<% if d.uncovered and d.uncovered.n > 0 then %>
+	<%-- D6：未覆盖设备提醒。数据只来自现有诊断行（今天、分钟 >= 1），零命中时整块不输出。 --%>
+	<div class="pc-badge bad" style="display:block;margin:6px 0;padding:6px 8px;line-height:1.6">
+		<%=T("发现 ")..d.uncovered.n..T(" 台设备在命中被封锁的域名，但它们不在任何条目的设备名单里 —— 这些流量没有被计时，也不会被封。")%>
+		<% if d.uncovered.total and d.uncovered.total > 0 then %><%=T("今日合计 ")..d.uncovered.total..T(" 分钟")%><% end %>
+		<% if d.uncovered.top and #d.uncovered.top > 0 then %>
+		<br/><%=T("命中最多：")%>
+		<% for _ui, _u in ipairs(d.uncovered.top) do %><% if _ui > 1 then %>、<% end %><%=pcdata(_u.device)%><% if _u.ip and _u.ip ~= "" then %> (<%=pcdata(_u.ip)%>)<% end %> <%=_u.minutes%> <%=T("分")%><% end %>
+		<% end %>
+		<br/><%=T("处理办法：打开对应条目，把上面这些设备加进「限制设备」列表。")%>
+		<% for _ui, _u in ipairs(d.uncovered.top) do %>
+		<% local _mk = tostring(_u.key or ""):match("^(%w+)_(%d+)$") %>
+		<% if _mk then %> <a href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(_u.key)%>"><%=pcdata(_u.entry or _u.key)%></a><% end %>
+		<% end %>
+		<br/><a href="#pc-diag"><%=T("查看下方「未被条目覆盖的命中流量」明细")%></a>
+	</div>
 	<% end %>
 	<div class="pc-kv">
 		<b><%=pcdata(m.date or "-")%></b>
@@ -186,17 +203,17 @@
 			<% local _dev = 0 %>
 			<% for _, r in ipairs(d.dev_key_day_rows) do %>
 			<% if r.kind == "dev" then _dev = _dev + 1 %>
-			<tr class="pc-matrix-dev<%= (r.nkey > 1) and '' or ' pc-matrix-leaf' %>"
-				<%= (r.nkey > 1) and ('data-pc-dev="' .. _dev .. '"') or '' %>
-				<% if r.nkey > 1 then %>onclick="pcMatrixToggle(this)" title="<%=pcdata(T("点击展开/收起它命中的各条目"))%>"<% end %>>
-				<td><span class="pc-matrix-caret"><%= (r.nkey > 1) and '▸' or '' %></span><%=pcdata(r.device)%><% if r.nkey > 1 then %> <span class="muted">（<%=r.nkey%> 个条目）</span><% elseif r.only then %> <span class="muted">（<%=pcdata(r.only.name)%>）</span><% if r.only.stale then %> <span class="muted"><%=pcdata(T("（已停用或已删除）"))%></span><% end %><% end %></td>
+			<tr class="pc-matrix-dev<%= r.expandable and '' or ' pc-matrix-leaf' %>"
+				<%= r.expandable and ('data-pc-dev="' .. _dev .. '"') or '' %>
+				<% if r.expandable then %>onclick="pcMatrixToggle(this)" title="<%=pcdata(T("点击展开/收起明细"))%>"<% end %>>
+				<td><span class="pc-matrix-caret"><%= r.expandable and '▸' or '' %></span><%=pcdata(r.device)%><% if r.nkey > 1 then %> <span class="muted">（<%=r.nkey%> 个条目）</span><% elseif r.expandable then %> <span class="muted">（<%=pcdata(r.only.name)%> · <%=r.nname%> 个名称）</span><% elseif r.only then %> <span class="muted">（<%=pcdata(r.only.name)%>）</span><% if r.only.stale then %> <span class="muted"><%=pcdata(T("（已停用或已删除）"))%></span><% end %><% end %></td>
 				<% for _, day in ipairs(d.days) do local v = r.by[day.date] %>
 				<td><%=v and v or "-"%></td>
 				<% end %>
 				<td><b><%=r.total%></b></td>
 			</tr>
 			<% else %>
-			<tr class="pc-matrix-key" data-pc-owner="<%=_dev%>" style="display:none">
+			<tr class="pc-matrix-<%= (r.kind == "name") and 'name' or 'key' %>" data-pc-owner="<%=_dev%>" style="display:none">
 				<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=pcdata(T("（已停用或已删除）"))%></span><% end %></td>
 				<% for _, day in ipairs(d.days) do local v = r.by[day.date] %>
 				<td><%=v and v or "-"%></td>
@@ -210,17 +227,19 @@
 	<div class="muted" style="margin-top:6px">
 		<%=T("每格是该设备当天计入额度统计的分钟数；「-」= 当天没有该设备的用量记录。列顺序与上方柱状图一致，可横向滚动。")%>
 		<br/><%=T("多条目设备点行可展开它命中的各条目；只有 1 个条目的设备直接在行内标出条目名。子行与设备行同一列口径，按该设备下的条目分别计时。")%>
+		<br/><%=T("若某条目写有多行「封锁名称」，只绑到这一条目的设备点行展开的就是名称（如小红书、我的世界…），行内同时标出条目名与名称个数。")%>
+		<br/><%=T("名称行的分钟数按目标分别计：同一分钟里若有多个名称在命中，每个名称各记 1 分钟，所以名称行合计不小于该条目的分钟数（条目的分钟数才是额度依据）。名称行只是用来看「时间花在哪个名称上」，不参与额度扣减。")%>
 	</div>
 	<% end %>
 
-	<h3><%=T("未被条目覆盖的命中流量（诊断）")%></h3>
+	<h3 id="pc-diag"><%=T("未被条目覆盖的命中流量（诊断）")%></h3>
 	<% if #d.diag_rows == 0 then %>
 		<div class="muted"><%=T("暂无——说明所有命中封锁目标的设备都在条目范围内，或还没有命中。")%></div>
 		<div class="muted" style="margin-top:6px"><%=T("注意：诊断明细与额度计时共用「用量判定阈值(KB/分钟)」（见「网址过滤」页）。该阈值调大时，低于阈值的流量不计入诊断——此时这里会长期为空，看起来像“没人绕过”。")%></div>
 	<% else %>
 	<table>
 		<tr>
-			<th><%=T("设备")%></th><th><%=T("IP")%></th><th><%=T("主机名")%></th><th><%=T("条目")%></th>
+			<th><%=T("设备")%></th><th><%=T("IP")%></th><th><%=T("主机名")%></th><th><%=T("命中的条目")%></th>
 			<th class="num"><%=T("今日分钟")%></th><th><%=T("首次命中")%></th><th><%=T("最近命中")%></th>
 			<th class="num"><%=T("最近 30 天")%></th><th><%=T("命中过的目标")%></th>
 		</tr>
@@ -266,6 +285,7 @@
 	</table>
 	<div class="muted" style="margin-top:6px">
 		<%=T("诊断统计的是「命中了封锁目标、但不在该条目设备范围内」的客户端流量，用来发现绕过（例如设备换了 MAC 导致原条目不再生效）。限制：每个条目最多统计 8 台未覆盖客户端（在线优先）；多台客户端命中同一条目时，目标列表不区分设备。阈值与额度计时一致。")%>
+		<br/><%=T("「命中的条目」这一列是被命中的条目，不是这台设备绑定的条目 —— 正因为这台设备不在该条目的设备名单里，它的流量才没有被计时。")%>
 	</div>
 	<div class="muted" style="margin-top:6px">
 		<%=T("已停用/已删除条目的历史诊断计数仍保留，其封锁规则已清理。")%>

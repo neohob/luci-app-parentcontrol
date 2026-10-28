@@ -106,8 +106,9 @@ function M.invariants(d)
 end
 
 -- 采集 + 分析
-function M.collect()
-	local d = tsv.read(false)
+-- A38 惯例：raw 是**可选的测试缝**（直喂人造 TSV 跑归约）。生产调用一律不传参。
+function M.collect(raw)
+	local d = raw and tsv.parse(raw) or tsv.read(false)
 	d.reset_by_day = {}
 	d.units, d.key_totals, d.dev_totals, d.days = {}, {}, {}, {}
 
@@ -382,6 +383,55 @@ function M.collect()
 		end
 	end
 	local kdrows = {}
+	-- 6d) P-C/D2/D5：把目标分钟归约成「封锁名称行」分钟。
+	--     映射全部来自 shell 旁路（appname/appmap/diagdaytgt）；三者缺任一 ⇒ 全空表
+	--     ⇒ name_n() 恒 0 ⇒ 不产生名称子行，行为完全回退（D7）。
+	local nrnames, nrmap = {}, {}
+	for key, bynr in pairs(d.app_names or {}) do
+		local t = {}
+		for nr, nm in pairs(bynr) do t[tonumber(nr) or 0] = nm end
+		nrnames[key] = t
+	end
+	for key, bytgt in pairs(d.app_map or {}) do
+		local t = {}
+		for tgt, nr in pairs(bytgt) do t[tgt] = tonumber(nr) or 0 end
+		nrmap[key] = t
+	end
+	local function name_n(key)
+		local t = nrnames[key]
+		if not t then return 0 end
+		local n = 0
+		for _ in pairs(t) do n = n + 1 end
+		return n
+	end
+	-- key → 日期 → 名称行号 → 分钟。历史日取 diagdaytgt；**今天取 diagtgt**
+	-- （今天的日文件是滚动快照，在线值才是准的；两者不叠加）。
+	-- D4 语义：某名称当天「它名下目标有流量」就计分钟，同一分钟多名称各自 +1
+	-- ⇒ Σ名称 ≥ 条目（条目分钟仍是额度依据，口径不变）。
+	local kdayname = {}
+	local function bump(key, dt, nr, v)
+		local perf = kdayname[key]
+		if not perf then perf = {}; kdayname[key] = perf end
+		local per = perf[dt]
+		if not per then per = {}; perf[dt] = per end
+		per[nr] = (per[nr] or 0) + v
+	end
+	local today = meta.date and meta.date:gsub("-", "") or nil
+	for _, day in ipairs(d.days) do
+		local per = (d.diag_day_tgt or {})[day.date]
+		if per and day.date ~= today then
+			for key, bytgt in pairs(per) do
+				local m = nrmap[key]
+				if m then
+					for tgt, v in pairs(bytgt) do bump(key, day.date, m[tgt] or 0, v) end
+				end
+			end
+		end
+	end
+	for _, tg in ipairs(d.diag_tgt or {}) do
+		local m = nrmap[tg.key]
+		if m and today then bump(tg.key, today, m[tg.target] or 0, tg.minutes) end
+	end
 	for _, dr in ipairs(ddrows) do
 		local sub = devkey[dr.device] or {}
 		local keys = {}
@@ -398,14 +448,18 @@ function M.collect()
 		-- A18/L5：单条目设备（nkey==1）没有可展开的子行，条目名必须**在行内**给出 ——
 		-- 否则「每个设备要能看到它命中的每个条目（封锁名称）」在这个子集上不成立。
 		-- 名字复用 key_rows 的同一份 kmeta 回退链（不另写一套，防两处显示分叉）。
-		local only
+		local only, nmode = nil, false
 		if #keys == 1 then
 			local m1 = kmeta[keys[1].key]
 			only = { name = m1 and m1.name or "（未知条目）",
 				stale = (m1 and m1.stale) or false }
+			-- D5：单条目但该条目 ≥2 个名称行 ⇒ 子行改成名称（两种子行互斥）
+			nmode = (name_n(keys[1].key) >= 2)
 		end
 		kdrows[#kdrows + 1] = { kind = "dev", device = dr.device,
-			total = dr.total, nkey = #keys, by = dr.by, only = only }
+			total = dr.total, nkey = #keys, by = dr.by, only = only,
+			nname = nmode and name_n(keys[1].key) or 0,
+			expandable = ((#keys >= 2) or nmode) }
 		if #keys >= 2 then                      -- A3：单条目设备不产子行
 			for _, k in ipairs(keys) do
 				local m = kmeta[k.key]
@@ -416,6 +470,37 @@ function M.collect()
 					name = m and m.name or "（未知条目）",
 					stale = (m and m.stale) or false,
 					total = k.total, by = k.by }
+			end
+		elseif nmode then
+			-- D5：单条目 ≥2 个名称行 ⇒ 子行改成「名称」（与条目子行互斥，不叠加）。
+			-- 行序 = apps 行序；未归类（nr 0，如目标已不在任何名称行）排最后。
+			local key = keys[1].key
+			local nm = nrnames[key] or {}
+			local perday = kdayname[key] or {}
+			local has0 = false
+			for _, day in ipairs(d.days) do
+				if (perday[day.date] or {})[0] then has0 = true end
+			end
+			for nr = 1, name_n(key) do
+				local by, total = {}, 0
+				for _, day in ipairs(d.days) do
+					local v = (perday[day.date] or {})[nr] or 0
+					by[day.date] = v
+					total = total + v
+				end
+				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
+					nr = nr, name = nm[nr] or ("名称 #" .. nr),
+					total = total, by = by }
+			end
+			if has0 then
+				local by, total = {}, 0
+				for _, day in ipairs(d.days) do
+					local v = (perday[day.date] or {})[0] or 0
+					by[day.date] = v
+					total = total + v
+				end
+				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
+					nr = 0, name = "（未归类）", total = total, by = by }
 			end
 		end
 	end
@@ -520,6 +605,52 @@ function M.collect()
 		end
 	end
 	d.diag_rows = drows
+
+	-- 9b) P-C/D6：未覆盖设备提醒。数据只来自上面的 diag 行（今天、分钟 >= 1），
+	--     不新增采集、不新增 iptables 调用（D1）。零命中 => n = 0，模板连容器都不渲染。
+	-- 同一台设备命中多个未覆盖条目时按设备聚合：台数不重复计、分钟相加，
+	-- keys 保留它命中的所有条目（模板的「查看」链到分钟最高的那个条目）。
+	local uncmap, uncord = {}, {}
+	for _, r in ipairs(drows) do
+		if (r.minutes or 0) >= 1 then
+			local m = r.mac
+			local u = uncmap[m]
+			if not u then
+				u = { device = r.device, mac = m, ip = r.ip,
+					hostname = r.hostname, minutes = 0, key = r.key,
+					entry = r.entry, keys = {} }
+				uncmap[m] = u
+				uncord[#uncord + 1] = u
+			end
+			u.minutes = u.minutes + (r.minutes or 0)
+			u.keys[#u.keys + 1] = { key = r.key, entry = r.entry,
+				minutes = r.minutes or 0 }
+		end
+	end
+	local unctot = 0
+	for _, u in ipairs(uncord) do
+		unctot = unctot + u.minutes
+		table.sort(u.keys, function(x, y)
+			if x.minutes ~= y.minutes then return x.minutes > y.minutes end
+			return x.key < y.key
+		end)
+		u.key, u.entry = u.keys[1].key, u.keys[1].entry
+	end
+	table.sort(uncord, function(x, y)
+		if x.minutes ~= y.minutes then return x.minutes > y.minutes end
+		return (x.mac or "") < (y.mac or "")
+	end)
+	local utop = {}
+	for i = 1, math.min(3, #uncord) do utop[i] = uncord[i] end
+	d.uncovered = { n = #uncord, total = unctot, top = utop }
+	-- 条目行上的徽标计数：「这一行有 N 台设备在命中」
+	local uncbykey = {}
+	for _, u in ipairs(uncord) do
+		for _, kk in ipairs(u.keys) do
+			uncbykey[kk.key] = (uncbykey[kk.key] or 0) + 1
+		end
+	end
+	for _, r in ipairs(d.key_rows or {}) do r.uncovered = uncbykey[r.key] or 0 end
 
 	return d
 end
