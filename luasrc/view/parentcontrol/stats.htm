@@ -222,7 +222,10 @@
 				<% for _, day in ipairs(d.days) do local v = r.by[day.date] %>
 				<td><%=v and v or "-"%></td>
 				<% end %>
-				<td><%=r.total%></td>
+				<!-- F-2（round70）：名称子行的「合计」列，当天与 30 天窗口全无记录时印 "-"，
+				     与日格同口径：否则 0 会被读成「用了 0 分钟」，而真相是「没有名称维度的记录」。
+				     条目子行（kind == "key"）的合计来自台账，恒有值，保持原样。 -->
+				<td><%=r.total or "-"%></td>
 			</tr>
 			<% end %>
 			<% end %>

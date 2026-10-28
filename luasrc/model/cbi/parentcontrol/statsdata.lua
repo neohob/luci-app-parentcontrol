@@ -491,24 +491,27 @@ function M.collect(raw)
 			for _, day in ipairs(d.days) do
 				if (perday[day.date] or {})[0] then has0 = true end
 			end
+			-- F-2（round70）：整个窗口**一条记录都没有**的名称行，`total` 置 nil 而不是 0 ——
+			-- 模板据此印 `-`（与日格同口径）。写 0 会把「没有名称维度的记录」读成「用了 0 分钟」。
 			for nr = 1, name_n(key) do
-				local by, total = {}, 0
+				local by, total, nrec = {}, 0, 0
 				for _, day in ipairs(d.days) do
 					local v = (perday[day.date] or {})[nr]
-					if v then by[day.date] = v; total = total + v end
+					if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
 				end
 				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
 					nr = nr, name = nm[nr] or ("名称 #" .. nr),
-					total = total, by = by }
+					total = (nrec > 0) and total or nil, by = by }
 			end
 			if has0 then
-				local by, total = {}, 0
+				local by, total, nrec = {}, 0, 0
 				for _, day in ipairs(d.days) do
 					local v = (perday[day.date] or {})[0]
-					if v then by[day.date] = v; total = total + v end
+					if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
 				end
 				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
-					nr = 0, name = "（未归类）", total = total, by = by }
+					nr = 0, name = "（未归类）",
+					total = (nrec > 0) and total or nil, by = by }
 			end
 		end
 	end

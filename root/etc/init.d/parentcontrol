@@ -266,6 +266,11 @@ entry_target_map() { # $1=weburl idx [$2=entry_resolve_cache 的结果，省略�
 		while IFS="$TAB" read -r _nr _d; do
 			[ -n "$_d" ] || continue
 			for _h in $_d; do
+				# F-1（round70）：明文匹配串（weburl_patterns 返回的就是域名本身，如
+				# xiaohongshu.com）与解析目标同属一个名称行 —— 一并写进 .map，否则
+				# `-m string` 命中的分钟会全部落到「（未归类）」，与 IP 规则命中的同一分钟
+				# 重复计（Σ 虚高）。CIDR 写法时 _h 就等于解析目标，尾部 !seen 去重即可。
+				printf '%s\t%s\n' "$_h" "$_nr"
 				_rest=${_cache#*"|$_h$TAB"}
 				[ "$_rest" = "$_cache" ] && continue
 				_rest=${_rest%%"|"*}
