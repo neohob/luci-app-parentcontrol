@@ -237,57 +237,105 @@ resolve_domains() { # $1=域名/CIDR 列表 → 打印目标（IPv4/IPv6）
 	done
 }
 
+# M1（round42 复审 Major）：解析缓存的唯一载体。格式 `|域名<TAB>t1 t2|域名2<TAB>…`，
+# 通过 **stdout** 交给调用方（不用函数作用域全局：lint_locals 要求 `_x` 物必 local，
+# 而本函数跨多行，不像 diag_map_get 那样是单行函数）。一次解析的结果要同时喂给目标文件
+# 与 .map，两边各解析一遍就是 4D→8D。热路径：refresh_ips 持 $TICK_LOCK，解析变慢会让
+# 整 tick 被跳过。
+entry_resolve_cache() { # $1=module $2=idx → 标准输出打印缓存串（去重域名各解析一次）
+	local _h _t _out
+	_out=""
+	for _h in $(entry_domains "$1" "$2"); do
+		case "$_out" in *"|$_h$TAB"*) continue ;; esac
+		_t=$(resolve_domains "$_h" | tr '\n' ' ')
+		_out="$_out|$_h$TAB$_t"
+	done
+	printf '%s' "$_out"
+}
+
 # P-C/D2：目标 → 「封锁名称行」的旁路映射（`<target><TAB><行号>`，行号从 1 起，与
 # pc_apps_rows 的行序一致）。只被统计导出读，**不参与规则渲染**（D3：目标集合/顺序不变）。
 # 同一目标被多行命中时先出现的行胜（R1：并集语义本身就不可分，不做猜测性切分）。
-entry_target_map() { # $1=weburl idx → 打印 "<target><TAB><行号>"
-	local _a _nr _d _t
+entry_target_map() { # $1=weburl idx [$2=entry_resolve_cache 的结果，省略则自算] → 打印 "<target><TAB><行号>"
+	local _a _rows _nr _d _h _rest _tg _cache
+	_cache=${2:-}
+	[ -n "$_cache" ] || _cache=$(entry_resolve_cache weburl "$1")
 	_a=$(pc_uget "@weburl[$1].apps")
 	[ -n "$_a" ] || return 0
-	pc_apps_rows "$_a" \
-		| awk -F'\t' '{ printf "%d\t%s\n", NR, $2 }' \
-		| while IFS="$TAB" read -r _nr _d; do
+	_rows=$(pc_apps_rows "$_a" | awk -F'\t' '{ printf "%d\t%s\n", NR, $2 }')
+	[ -n "$_rows" ] || return 0
+	{
+		# 按行号顺序查缓存输出（「先出现的行胜」由尾部 awk 的 !seen 保证）。
+		# 一行可能有多个域名（pc_apps_rows 把逗号/空格都归成空格），逐个查。
+		while IFS="$TAB" read -r _nr _d; do
 			[ -n "$_d" ] || continue
-			for _t in $(resolve_domains "$_d"); do
-				[ -n "$_t" ] && printf '%s\t%s\n' "$_t" "$_nr"
+			for _h in $_d; do
+				_rest=${_cache#*"|$_h$TAB"}
+				[ "$_rest" = "$_cache" ] && continue
+				_rest=${_rest%%"|"*}
+				for _tg in $_rest; do
+					[ -n "$_tg" ] && printf '%s\t%s\n' "$_tg" "$_nr"
+				done
 			done
-		  done \
-		| awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++'
+		done <<EOF
+$_rows
+EOF
+	} | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++'
 }
 
 refresh_ips() {
-	local _i _f _idx _mf _n
+	local _i _f _idx _mf _n _nl _RC
 	mkdir -p "$IPDIR"
 	command -v resolveip >/dev/null 2>&1 || return 0
 	PC_IPMASK=$(pc_uget "@basic[0].ip_mask"); [ -z "$PC_IPMASK" ] && PC_IPMASK=24
 	for _i in $(pc_ids_on weburl); do
 		_f="$IPDIR/weburl_$_i"
-		{ resolve_entry weburl $_i; [ -f "$_f" ] && cat "$_f"; } 2>/dev/null \
+		_mf="$_f.map"
+		# M1：一次解析，两份产物共用（目标文件 + .map）。解析次数 = 4×去重域名数，
+		# 与基线 refresh_ips 的并集解析**相同**（不得是 4D(K+1)）。
+		_RC=$(entry_resolve_cache weburl "$_i")
+		{ printf '%s' "$_RC" | tr '|' '\n' | cut -f2- | tr ' ' '\n'
+		  [ -f "$_f" ] && cat "$_f"; } 2>/dev/null \
 			| grep -v '^$' | sort -u > "$_f.new"
 		mv "$_f.new" "$_f"
 		# D2/P-C：旁路映射（原子替换）。先写各名称行的归属，再补上并集里没有归属的
 		# 目标（行号 0 = 未归类，例如域名换 IP 后残留的旧目标）—— 这样 .map 的目标
 		# 集合**恒等于** $_f，Lua 侧永远不会因为「映射缺失」而丢分钟数。
+		# L6：三步写入必须检查 rc —— 补 0 行那次 awk 失败（OOM/EIO/磁盘满）若照旧 mv，
+		# 会发布一个缺 \t0 行的半截 .map（目标集合 ⊊ $_f，Lua 侧丢分钟）。失败则保留旧
+		# .map、清掉 .new，并把失败写进日志（不退化成静默）。
 		_mf="$_f.map"
-		entry_target_map $_i > "$_mf.new"
-		awk -F'\t' 'NR == FNR { have[$1] = 1; next }
-			$1 != "" && !have[$1]++ { printf "%s\t0\n", $1 }' "$_mf.new" "$_f" >> "$_mf.new"
-		mv "$_mf.new" "$_mf"
+		if entry_target_map "$_i" "$_RC" > "$_mf.new" 2>/dev/null \
+			&& awk -F'\t' 'NR == FNR { have[$1] = 1; next }
+				$1 != "" && !have[$1]++ { printf "%s\t0\n", $1 }' "$_mf.new" "$_f" >> "$_mf.new" 2>/dev/null; then
+			mv "$_mf.new" "$_mf"
+		else
+			rm -f "$_mf.new"
+			elog "refresh_ips: $_mf 生成失败，保留上一版映射"
+		fi
 	done
 	for _f in "$IPDIR"/weburl_*; do
 		[ -e "$_f" ] || continue
-		case "$_f" in *.map|*.new) continue ;; esac   # 旁路文件不参与「条目已删除」的清理判定
+		# L7：只跳旁路文件本身。`*.new` 是基线本就有的孤儿（写到一半/条目已删的临时文件），
+		# 一并跳掉会把基线原有的 GC 关死 ⇒ 永久留在 overlay/flash 里。
+		case "$_f" in *.map|*.map.new) continue ;; esac
 		_idx=${_f##*weburl_}
 		pc_ids_on weburl | grep -qx "$_idx" || rm -f "$_f" "$IPDIR/weburl_$_idx.map"
 	done
 	# 日志里的条数只数目标文件（*.map/*.new 是旁路，数进去会让这个数字凭空变大）
 	_n=0
 	for _f in "$IPDIR"/weburl_*; do
-		case "$_f" in *.map|*.new) continue ;; esac
+		case "$_f" in *.map|*.map.new) continue ;; esac
 		[ -f "$_f" ] || continue
 		# 用 awk 数行：grep -c 在 0 行时既打印 0、又退出 1 —— 加 `|| echo 0` 会得到
 		# "0\n0"，进 $(( )) 直接算术报错（真机 dash 上报 arithmetic expression）。
-		_n=$((_n + $(awk 'END { print NR }' "$_f")))
+		# L8：awk 自身失败（读不到文件等）时命令替换同样是空串，`$((_n + ))` 会直接
+		# 终止非交互 shell（rebuild_ip_rules 不执行、TICK_LOCK 不释放）。故先做守卫。
+		_nl=$(awk 'END { print NR }' "$_f" 2>/dev/null)
+		case "$_nl" in
+		''|*[!0-9]*) elog "refresh_ips: 数行失败，跳过 $_f"; continue ;;
+		esac
+		_n=$((_n + _nl))
 	done
 	elog "refresh_ips: $_n 条目标 IP"
 }
@@ -1245,12 +1293,27 @@ diag_bump_c() { # $1=key $2=mac $3=ip $4=hostname
 	return 0
 }
 
+# n <entry_key> <名称行号> <minutes>（行号 0 = 未归类）—— D1-v2：名称维度的分钟
+# 由采样侧「按名称按 tick 记一次」记录，Lua 侧不再对目标分钟求和（旧做法会把同一
+# 名称名下多个目标的分钟相加，一个名称 2 个目标各 60 分 ⇒ 行显示 120，与实际不符）。
+diag_bump_n() { # $1=key $2=名称行号
+	local _f _now
+	_f=$(diag_file); _now=$(date +%H:%M:%S)
+	mkdir -p "$USAGE_DIR/diag"
+	[ -f "$_f" ] || : > "$_f"
+	awk -F'\t' -v OFS='\t' -v k="$1" -v nr="$2" '
+		$1 == "n" && $2 == k && $3 == nr { $4 = $4 + 1; hit = 1 }
+		{ print }
+		END { if (!hit) print "n", k, nr, 1 }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+	return 0
+}
+
 # 取值助手（A83-2）：$1=表内容（`k|v|…` 以 `|` 串联）$2=键 ⇒ 结果放全局 _MV（有意不加 local）。
 diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _MV=${_MV%%|*}; }
 
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _bumped
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
@@ -1270,10 +1333,18 @@ sample_diag_counters() { # $1=阈值（字节）
 	done < "$_map"
 	_NL='
 '
+	# D1-v2：本 tick 已记过的「名称桶」（`|key:nr|`）—— 同一 tick 内同一名称只记 1 分钟。
+	# 只在本次调用内有效（每次 tick 重新计），放函数头已经足够。
+	_bumped=""
 	_hosts="$_NL$(hosts_tsv 2>/dev/null)"
 	for _key in $(pc_active_keys); do _m=${_key%%_*}; _i=${_key#*_}
 		[ "$_m" = "weburl" ] || continue; $ipt -t mangle -n -L "PCAD_$_key" >/dev/null 2>&1 || continue
-		_n=0; diag_targets "$_m" "$_i" > "$_tf"; while read -r _tg; do [ -n "$_tg" ] || continue
+		_n=0; diag_targets "$_m" "$_i" > "$_tf"
+		# D1-v2：.map 每 key 只读一次（不进 per-target 循环），拼成 `|target<TAB>nr|…` 供查。
+		# 缺 .map（老 shell / 没跑过 refresh_ips）⇒ 空串 ⇒ 所有目标归 nr=0（未归类，D7 回退）。
+		_req="|"
+		[ -f "$IPDIR/weburl_$_i.map" ] && while IFS= read -r _ln; do _req="$_req$_ln|"; done < "$IPDIR/weburl_$_i.map"
+		while read -r _tg; do [ -n "$_tg" ] || continue
 			_n=$((_n + 1))
 			# 目标侧查 `c|` 表（键带链名，A83-1b）；行首空格计数列 ⇒ 按「首字段纯数字」识别规则行。
 			diag_map_get "$_map_c" "PCAD_$_key|PCDT_${_key}_$_n"; _v=$_MV
@@ -1281,7 +1352,15 @@ sample_diag_counters() { # $1=阈值（字节）
 			# A83-3：基线纯 shell（取代 $(diag_delta …)）；缺失/非法按 0；回零按 _v 计；无论是否命中都写回。
 			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
 			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi; printf '%s\n' "$_v" > "$_bf"
-			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && diag_bump_t "$_key" "$_tg"
+			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] || continue
+			diag_bump_t "$_key" "$_tg"
+			# D1-v2：名称维（同一 tick 同名只记 1 分钟）。目标不在映射里 ⇒ nr=0（未归类）。
+			_nr=0; _rest=${_req#*"|$_tg$TAB"}; [ "$_rest" = "$_req" ] || _nr=${_rest%%"|"*}
+			case "$_nr" in ''|*[!0-9]*) _nr=0 ;; esac
+			case "$_bumped" in
+			*"|$_key:$_nr|"*) : ;;
+			*) diag_bump_n "$_key" "$_nr"; _bumped="$_bumped|$_key:$_nr|" ;;
+			esac
 		done < "$_tf"
 		_n=0; for _mac in $(diag_clients "$_m" "$_i"); do _n=$((_n + 1))
 			diag_map_get "$_map_t" "PCDC_${_key}_$_n"; _v=$_MV
@@ -1731,8 +1810,10 @@ stats_tsv_inner() {
 		# 诊断明细（第 8 轮 R13/D19）：
 		#   diag       <entry_key> <name> <mac> <ip> <hostname> <online> <today_minutes> <first> <last>
 		#   diagtgt    <entry_key> <target> <today_minutes>
+		#   diagntoday <entry_key> <名称行号> <today_minutes>（D1-v2：按名称按 tick 记一次，行号 0=未归类）
 		#   diagday    <YYYYMMDD> <entry_key> <mac> <minutes>
 		#   diagdaytgt <YYYYMMDD> <entry_key> <target> <minutes>（名称维度的历史日分钟，P-C/§ 4）
+		#   diagdayname <YYYYMMDD> <entry_key> <名称行号> <minutes>（D9，同上口径）
 		# 30 天窗口由 Lua 侧按日期过滤/补零（shell 不做日期算术，与 hist 同惯例）。
 		_dd="$USAGE_DIR/diag"
 		if [ -d "$_dd" ]; then
@@ -1753,14 +1834,17 @@ stats_tsv_inner() {
 						"$_key" "$_dname" "$_mac" "$_ip" "$_hn" "$_donl" "$_min" "$_first" "$_last"
 				done < "$_dtf"
 				awk -F'\t' '$1 == "t" { printf "diagtgt\t%s\t%s\t%s\n", $2, $3, $4 }' "$_dtf"
+				awk -F'\t' '$1 == "n" { printf "diagntoday\t%s\t%s\t%s\n", $2, $3, $4 }' "$_dtf"
 			fi
 			for _df in $(ls -1 "$_dd" 2>/dev/null | tail -30); do
 				[ -f "$_dd/$_df" ] || continue
 				awk -F'\t' -v d="$_df" '
 					$1 == "t" && NF >= 4 { tr[++nt] = sprintf("diagdaytgt\t%s\t%s\t%s\t%s", d, $2, $3, $4) }
+					$1 == "n" && NF >= 4 { nr[++nn] = sprintf("diagdayname\t%s\t%s\t%s\t%s", d, $2, $3, $4) }
 					$1 == "c" { s[$2 SUBSEP $3] += $6 }
 					END {
 						for (i = 1; i <= nt; i++) print tr[i]
+						for (i = 1; i <= nn; i++) print nr[i]
 						for (k in s) { split(k, kv, SUBSEP); printf "diagday\t%s\t%s\t%s\t%d\n", d, kv[1], kv[2], s[k] }
 					}' "$_dd/$_df"
 			done

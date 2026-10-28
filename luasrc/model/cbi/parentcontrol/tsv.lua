@@ -32,6 +32,12 @@ end
 --   appmap  <key> <行序号> <target>
 --           —— 目标归属：行序号 0 = 未归类（目标不属于任何名称行，如换了 IP 的残留）；
 --              同一目标只出现一次（多行命中时先出现的行胜）。缺行 = 无映射（D7 完全回退）。
+--   diagntoday  <key> <行序号> <minutes>
+--           —— D9/D1-v2（第 2 轮）：**今天**该名称行的分钟数。由采样侧「按名称按 tick
+--              记一次」写成（同一 tick 内同一名称只 +1，不再把名下多个目标的分钟相加）。
+--              行序号 0 = 未归类。缺行（老 shell / 升级前的日文件）= 该天名称列显示 `-`。
+--   diagdayname <YYYYMMDD> <key> <行序号> <minutes>
+--           —— 同上口径的历史日分钟（30 天窗口）。缺行同样是 `-`，不是 0。
 function M.parse(raw)
 	local d = {
 		meta = {}, entries = {}, by_key = {}, pools = {},
@@ -40,6 +46,8 @@ function M.parse(raw)
 		diag = {}, diag_tgt = {}, diag_day = {},
 		-- P-C/D2：目标 → 封锁名称行（旁路映射，老 shell 缺行 ⇒ 空表 ⇒ 行为完全回退 D7）
 		app_names = {}, app_map = {}, diag_day_tgt = {},
+		-- D9/D1-v2（第 2 轮）：名称维度的分钟（今天 / 历史日），采样侧写的 n 行
+		diag_n_today = {}, diag_day_name = {},
 		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
 		-- 保持空表 —— 下游回退「条目 #N」，永不裸 key，向后兼容。
 		names = {},
@@ -119,6 +127,21 @@ function M.parse(raw)
 				if ky and f[4] and f[4] ~= "" then
 					d.app_map[ky] = d.app_map[ky] or {}
 					d.app_map[ky][f[4]] = num(f[3])
+				end
+			elseif k == "diagntoday" then
+				local ky = f[2]
+				if ky then
+					d.diag_n_today[ky] = d.diag_n_today[ky] or {}
+					d.diag_n_today[ky][num(f[3])] = num(f[4])
+				end
+			elseif k == "diagdayname" then
+				local dt = f[2]
+				local ky = f[3]
+				if dt and ky then
+					d.diag_day_name[dt] = d.diag_day_name[dt] or {}
+					local per = d.diag_day_name[dt][ky]
+					if not per then per = {}; d.diag_day_name[dt][ky] = per end
+					per[num(f[4])] = num(f[5])
 				end
 			end
 		end

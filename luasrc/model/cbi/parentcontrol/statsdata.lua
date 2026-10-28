@@ -383,19 +383,17 @@ function M.collect(raw)
 		end
 	end
 	local kdrows = {}
-	-- 6d) P-C/D2/D5：把目标分钟归约成「封锁名称行」分钟。
-	--     映射全部来自 shell 旁路（appname/appmap/diagdaytgt）；三者缺任一 ⇒ 全空表
-	--     ⇒ name_n() 恒 0 ⇒ 不产生名称子行，行为完全回退（D7）。
-	local nrnames, nrmap = {}, {}
+	-- 6d) P-C/D2/D5：名称维度的分钟（D1-v2 口径见下）。
+	--     名称行文案来自 appname；分钟来自采样侧写的 n 行（diagntoday / diagdayname）。
+	--     appname 缺失 ⇒ name_n() 恒 0 ⇒ 不产生名称子行，行为完全回退（D7）。
+	--     注：`appmap`（目标→行号）自第 2 轮起**不再被 Lua 消费** —— 归约已下沉到采样侧
+	--     按 tick 记账，Lua 再用 appmap 对目标分钟求和就会复活 L1（同一名称多目标被
+	--     计 N 倍）。该 TSV 行仍由 shell 导出并由测试锁死格式/恒等性（W244），供排查。
+	local nrnames = {}
 	for key, bynr in pairs(d.app_names or {}) do
 		local t = {}
 		for nr, nm in pairs(bynr) do t[tonumber(nr) or 0] = nm end
 		nrnames[key] = t
-	end
-	for key, bytgt in pairs(d.app_map or {}) do
-		local t = {}
-		for tgt, nr in pairs(bytgt) do t[tgt] = tonumber(nr) or 0 end
-		nrmap[key] = t
 	end
 	local function name_n(key)
 		local t = nrnames[key]
@@ -404,10 +402,13 @@ function M.collect(raw)
 		for _ in pairs(t) do n = n + 1 end
 		return n
 	end
-	-- key → 日期 → 名称行号 → 分钟。历史日取 diagdaytgt；**今天取 diagtgt**
-	-- （今天的日文件是滚动快照，在线值才是准的；两者不叠加）。
-	-- D4 语义：某名称当天「它名下目标有流量」就计分钟，同一分钟多名称各自 +1
-	-- ⇒ Σ名称 ≥ 条目（条目分钟仍是额度依据，口径不变）。
+	-- key → 日期 → 名称行号 → 分钟。
+	-- D1-v2（第 2 轮）：名称分钟的**唯一来源**是采样侧写的 n 行（今天 `diagntoday`、
+	-- 历史 `diagdayname`）。**不再**对「目标分钟 × appmap」求和 —— 旧做法在同一名称
+	-- 名下多个目标同时活跃时会把该行计 N 倍（复审实测：2 个目标各 60 分 ⇒ 行 120，
+	-- 而设备当天共 30 分），对用户是误导性数字。口径见 design §7.2：同一分钟内同一
+	-- 名称的多个目标都活跃也只 +1，故 Σ名称分钟 ≥ 条目分钟仍成立且不超 1440。
+	-- 缺这两行（老 shell / 升级前的日文件）⇒ 该天名称列**无值**，模板印 `-`（不是 0，D7/L5）。
 	local kdayname = {}
 	local function bump(key, dt, nr, v)
 		local perf = kdayname[key]
@@ -416,21 +417,26 @@ function M.collect(raw)
 		if not per then per = {}; perf[dt] = per end
 		per[nr] = (per[nr] or 0) + v
 	end
+	-- L2：行号越界（> 声称的名称行数或 < 0）折算进「未归类」（nr 0），**不丢分钟**。
+	-- 可达性：陈旧 .map（L9 接受的陈旧窗口）或 appname 行缺失。
+	local function fold_nr(key, nr)
+		nr = tonumber(nr) or 0
+		if nr >= 1 and nr <= name_n(key) then return nr end
+		return 0
+	end
 	local today = meta.date and meta.date:gsub("-", "") or nil
 	for _, day in ipairs(d.days) do
-		local per = (d.diag_day_tgt or {})[day.date]
+		local per = (d.diag_day_name or {})[day.date]
 		if per and day.date ~= today then
-			for key, bytgt in pairs(per) do
-				local m = nrmap[key]
-				if m then
-					for tgt, v in pairs(bytgt) do bump(key, day.date, m[tgt] or 0, v) end
-				end
+			for key, bynr in pairs(per) do
+				for nr, v in pairs(bynr) do bump(key, day.date, fold_nr(key, nr), v) end
 			end
 		end
 	end
-	for _, tg in ipairs(d.diag_tgt or {}) do
-		local m = nrmap[tg.key]
-		if m and today then bump(tg.key, today, m[tg.target] or 0, tg.minutes) end
+	if today then
+		for key, bynr in pairs(d.diag_n_today or {}) do
+			for nr, v in pairs(bynr) do bump(key, today, fold_nr(key, nr), v) end
+		end
 	end
 	for _, dr in ipairs(ddrows) do
 		local sub = devkey[dr.device] or {}
@@ -474,6 +480,8 @@ function M.collect(raw)
 		elseif nmode then
 			-- D5：单条目 ≥2 个名称行 ⇒ 子行改成「名称」（与条目子行互斥，不叠加）。
 			-- 行序 = apps 行序；未归类（nr 0，如目标已不在任何名称行）排最后。
+			-- L5：**没有记录的日期留空（模板印 `-`）**，不填 0 —— 与条目子行同口径，
+			-- 否则 30 列全 0 会把「哪天真的有量」淹掉。
 			local key = keys[1].key
 			local nm = nrnames[key] or {}
 			local perday = kdayname[key] or {}
@@ -484,9 +492,8 @@ function M.collect(raw)
 			for nr = 1, name_n(key) do
 				local by, total = {}, 0
 				for _, day in ipairs(d.days) do
-					local v = (perday[day.date] or {})[nr] or 0
-					by[day.date] = v
-					total = total + v
+					local v = (perday[day.date] or {})[nr]
+					if v then by[day.date] = v; total = total + v end
 				end
 				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
 					nr = nr, name = nm[nr] or ("名称 #" .. nr),
@@ -495,9 +502,8 @@ function M.collect(raw)
 			if has0 then
 				local by, total = {}, 0
 				for _, day in ipairs(d.days) do
-					local v = (perday[day.date] or {})[0] or 0
-					by[day.date] = v
-					total = total + v
+					local v = (perday[day.date] or {})[0]
+					if v then by[day.date] = v; total = total + v end
 				end
 				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
 					nr = 0, name = "（未归类）", total = total, by = by }
