@@ -242,6 +242,14 @@ entry_resolve_cache() { # $1=module $2=idx → 标准输出打印缓存串（去
 	local _h _t _out
 	_out=""
 	for _h in $(entry_domains "$1" "$2"); do
+		# R70-L1（round71）：只挡分隔符，不挡字符集 —— 采样侧把 .map 拼成 `|target<TAB>nr|…`
+		# 用 `|` 分隔，用户文本里带 `|`（如 `q|x.com`）能伪造别人的表项；而 `|` 也是本缓存
+		# 的分隔符，`|q|x.com<TAB>…` 会让查询 `x.com` 时 `${_cache#*"|x.com$TAB"}` 命中那个子串，
+		# 把该行真正的解析目标遮蔽掉（实测：目标消失、分钟全落「（未归类）」）。
+		# 只挡 `|` 与 TAB：IPv6 CIDR（`2402:4e00:1410::/64`）这种合法目标带 `:`，
+		# 按 `[!A-Za-z0-9._/-]` 过滤会把它一并档掉（实测 W239.1/.3 变红）。
+		# 过滤后缓存项里不可能夹 `|` ⇒ 每条都以 `|` 起头，子串匹配只能对齐到条目边界。
+		case "$_h" in *"|"*|*"$TAB"*) continue ;; esac
 		case "$_out" in *"|$_h$TAB"*) continue ;; esac
 		_t=$(resolve_domains "$_h" | tr '\n' ' ')
 		_out="$_out|$_h$TAB$_t"
@@ -270,6 +278,12 @@ entry_target_map() { # $1=weburl idx [$2=entry_resolve_cache 的结果，省略�
 				# xiaohongshu.com）与解析目标同属一个名称行 —— 一并写进 .map，否则
 				# `-m string` 命中的分钟会全部落到「（未归类）」，与 IP 规则命中的同一分钟
 				# 重复计（Σ 虚高）。CIDR 写法时 _h 就等于解析目标，尾部 !seen 去重即可。
+				# R70-L1（round71）：`_h` 来自用户可编辑的「封锁名称/域名」列，而采样侧把
+				# .map 拼成 `|target<TAB>nr|…` 用 `|` 分隔 ⇒ 域名里带 `|`（如 `q|x.com`）
+				# 能伪造出别人的表项（`|x.com<TAB>1|` 被子串命中，乙的分钟记到甲头上）。
+				# 只挡 `|` 与 TAB，别的字符不挡：IPv6 CIDR 带 `:`、明文串带 `-`/`_`，
+				# 都是合法目标（按 weburl_patterns 的完整字符集过滤会把 CIDR 档掉）。
+				case "$_h" in *"|"*|*"$TAB"*) continue ;; esac
 				printf '%s\t%s\n' "$_h" "$_nr"
 				_rest=${_cache#*"|$_h$TAB"}
 				[ "$_rest" = "$_cache" ] && continue
@@ -1344,9 +1358,17 @@ sample_diag_counters() { # $1=阈值（字节）
 		# D1-v2：.map 每 key 只读一次（不进 per-target 循环），拼成 `|target<TAB>nr|…` 供查。
 		# 缺 .map（老 shell / 没跑过 refresh_ips）⇒ 空串 ⇒ 所有目标归 nr=0（未归类，D7 回退）。
 		_req="|"
-		[ -f "$IPDIR/weburl_$_i.map" ] && while IFS= read -r _ln; do _req="$_req$_ln|"; done < "$IPDIR/weburl_$_i.map"
+		# R70-L1（round71）：.map 是本地文件、可能由旧版本 shell 写出，第一列带 `|` 的行
+		# 会污染 `_req` 分隔（`|q|x.com\t1` 使查询 `x.com` 命中 `|x.com\t1|`）⇒ 读入时丢掉。
+		[ -f "$IPDIR/weburl_$_i.map" ] && while IFS= read -r _ln; do
+			case "${_ln%%"$TAB"*}" in *"|"*) continue ;; esac
+			_req="$_req$_ln|"
+		done < "$IPDIR/weburl_$_i.map"
 		while read -r _tg; do [ -n "$_tg" ] || continue
 			_n=$((_n + 1))
+			# R70-L1（round71）：纵深防御 —— 目标串若含 `|` 或 TAB，拼进 _req 会伪造表项，
+			# 直接不记账。放在 _n 自增之后：链序号必须与 _diag_emit_rules 的枚举顺序对齐。
+			case "$_tg" in *"|"*|*"$TAB"*) continue ;; esac
 			# 目标侧查 `c|` 表（键带链名，A83-1b）；行首空格计数列 ⇒ 按「首字段纯数字」识别规则行。
 			diag_map_get "$_map_c" "PCAD_$_key|PCDT_${_key}_$_n"; _v=$_MV
 			_bf="$STATE_DIR/dbase.${_key}.t$_n"
