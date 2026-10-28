@@ -55,7 +55,7 @@
 	<div class="pc-badge bad" style="margin:4px 0"><%=T("统计台账校验失败（D12 不变式失配）：本页数字可能不可信，请把本行内容反馈给开发者。")%> <%=pcdata(d.invariant_drift)%></div>
 	<% end %>
 	<% if d.uncovered and d.uncovered.n > 0 then %>
-	<%-- D6：未覆盖设备提醒。数据只来自现有诊断行（今天、分钟 >= 1），零命中时整块不输出。 --%>
+	<!-- D6：未覆盖设备提醒。数据只来自现有诊断行（今天、分钟 >= 1），零命中时整块不输出。 -->
 	<div class="pc-badge bad" style="display:block;margin:6px 0;padding:6px 8px;line-height:1.6">
 		<%=T("发现 ")..d.uncovered.n..T(" 台设备在命中被封锁的域名，但它们不在任何条目的设备名单里 —— 这些流量没有被计时，也不会被封。")%>
 		<% if d.uncovered.total and d.uncovered.total > 0 then %><%=T("今日合计 ")..d.uncovered.total..T(" 分钟")%><% end %>
@@ -66,7 +66,7 @@
 		<br/><%=T("处理办法：打开对应条目，把上面这些设备加进「限制设备」列表。")%>
 		<% local _seen = {} %>
 		<% for _ui, _u in ipairs(d.uncovered.top) do %>
-		<%-- L10：按条目 key 去重 —— 两台设备 top1 同一条目时不得出重复链接 --%>
+		<!-- L10：按条目 key 去重 —— 两台设备 top1 同一条目时不得出重复链接 -->
 		<% local _mk = tostring(_u.key or ""):match("^(%w+)_(%d+)$") %>
 		<% if _mk and not _seen[_u.key] then _seen[_u.key] = true %>
 		 <a href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(_u.key)%>"><%=pcdata(_u.entry or _u.key)%></a>
@@ -168,7 +168,7 @@
 			</tr>
 			<% end %>
 			<tr>
-				<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %><%-- D6-v2：这一行（条目）有未覆盖设备在命中时给出徽标（数量 + 跳编辑页），零命中不渲染元素。 --%><% if (r.uncovered or 0) > 0 then %> <% local _bu = tostring(r.key or ""):match("^(%w+)_(%d+)$") %><% if _bu then %><a class="pc-badge bad" href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(r.key)%>"><%=r.uncovered%> <%=T("台未覆盖设备命中")%></a><% else %><span class="pc-badge bad"><%=r.uncovered%> <%=T("台未覆盖设备命中")%></span><% end %><% end %></td>
+				<td><%=pcdata(r.name)%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %><!-- D6-v2：这一行（条目）有未覆盖设备在命中时给出徽标（数量 + 跳编辑页），零命中不渲染元素。 --><% if (r.uncovered or 0) > 0 then %> <% local _bu = tostring(r.key or ""):match("^(%w+)_(%d+)$") %><% if _bu then %><a class="pc-badge bad" href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(r.key)%>"><%=r.uncovered%> <%=T("台未覆盖设备命中")%></a><% else %><span class="pc-badge bad"><%=r.uncovered%> <%=T("台未覆盖设备命中")%></span><% end %><% end %></td>
 				<td class="num"><%=r.minutes%> <%=T("分")%></td>
 				<td class="num"><%=math.floor(r.minutes / (d.hist_days > 0 and d.hist_days or 1) + 0.5)%> <%=T("分")%></td>
 				<td><%=bar(r.share)%> <span class="muted"><%=r.share%>%</span></td>
