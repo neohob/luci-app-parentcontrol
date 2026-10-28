@@ -214,12 +214,8 @@ resolve_host() { # $1=host → 打印 IPv4(/24 或 /32) 与 IPv6(/64)
 	done
 }
 
-resolve_entry() { # $1=module $2=idx
-	resolve_domains "$(entry_domains "$1" "$2")"
-}
-
-# 目标解析的唯一实现（resolve_entry 与 entry_target_map 共用 —— 两边各写一份，
-# 解析口径一旦分叉，「目标集合与顺序」就不再一致）。$1=空格分隔的域名/CIDR 列表。
+# 目标解析的唯一实现（由 entry_resolve_cache 提供缓存串，refresh_ips 与 entry_target_map
+# 共用 —— 两边各写一份，解析口径一旦分叉，「目标集合与顺序」就不再一致）。$1=空格分隔的域名/CIDR 列表。
 resolve_domains() { # $1=域名/CIDR 列表 → 打印目标（IPv4/IPv6）
 	local _h _hh
 	for _h in $1; do
@@ -316,9 +312,9 @@ refresh_ips() {
 	done
 	for _f in "$IPDIR"/weburl_*; do
 		[ -e "$_f" ] || continue
-		# L7：只跳旁路文件本身。`*.new` 是基线本就有的孤儿（写到一半/条目已删的临时文件），
-		# 一并跳掉会把基线原有的 GC 关死 ⇒ 永久留在 overlay/flash 里。
-		case "$_f" in *.map|*.map.new) continue ;; esac
+		# L-4（round66）：只跳**真正的旁路产物** `*.map`。`*.new` / `*.map.new` 都是写到
+		# 一半的临时文件（崩溃残留），必须落到下面的孤儿回收分支，否则永久留在 overlay/flash。
+		case "$_f" in *.map) continue ;; esac
 		_idx=${_f##*weburl_}
 		pc_ids_on weburl | grep -qx "$_idx" || rm -f "$_f" "$IPDIR/weburl_$_idx.map"
 	done

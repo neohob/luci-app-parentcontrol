@@ -26,12 +26,14 @@ end
 --   diagtgt <entry_key> <target> <today_minutes>
 --   diagday <YYYYMMDD> <entry_key> <mac> <minutes>
 --   diagdaytgt <YYYYMMDD> <entry_key> <target> <minutes>
+--   appmap  <key> <行序号> <target>
+--           —— 以上两行是第 1 轮的形状。**自第 2 轮起 Lua 侧不再解析它们**：名称分钟已改由
+--              diagntoday/diagdayname 提供（D1-v2），「未归类」折算已下沉到采样侧（`.map` 补 0 行
+--              + 越界折算）。shell 仍照旧导出（格式由 W244/W249 钉住），这里只留契约说明、
+--              不留解析死代码（round66 L-7 二选一选了「删」）。
 --   appname <key> <行序号> <名称>
 --           —— 一个条目里「封锁名称行」的显示名（行序号从 1 起，与 apps 行序/`pc_apps_rows`
 --              一致；名称空的行已由 shell 回退成该行域名首项）。缺行（老 shell）=「无名称维度」。
---   appmap  <key> <行序号> <target>
---           —— 目标归属：行序号 0 = 未归类（目标不属于任何名称行，如换了 IP 的残留）；
---              同一目标只出现一次（多行命中时先出现的行胜）。缺行 = 无映射（D7 完全回退）。
 --   diagntoday  <key> <行序号> <minutes>
 --           —— D9/D1-v2（第 2 轮）：**今天**该名称行的分钟数。由采样侧「按名称按 tick
 --              记一次」写成（同一 tick 内同一名称只 +1，不再把名下多个目标的分钟相加）。
@@ -44,8 +46,8 @@ function M.parse(raw)
 		hist = {}, hist_key = {}, resets = {},
 		-- 第 8 轮（R13/D19）：诊断明细三行
 		diag = {}, diag_tgt = {}, diag_day = {},
-		-- P-C/D2：目标 → 封锁名称行（旁路映射，老 shell 缺行 ⇒ 空表 ⇒ 行为完全回退 D7）
-		app_names = {}, app_map = {}, diag_day_tgt = {},
+		-- P-C/D2：名称子行的文案（缺行 = 无名称维度，D7 完全回退）
+		app_names = {},
 		-- D9/D1-v2（第 2 轮）：名称维度的分钟（今天 / 历史日），采样侧写的 n 行
 		diag_n_today = {}, diag_day_name = {},
 		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
@@ -107,26 +109,11 @@ function M.parse(raw)
 					d.diag_day[dt] = d.diag_day[dt] or {}
 					d.diag_day[dt][(f[3] or "") .. "|" .. (f[4] or "")] = num(f[5])
 				end
-			elseif k == "diagdaytgt" then
-				local dt = f[2]
-				local ky = f[3]
-				if dt and ky then
-					d.diag_day_tgt[dt] = d.diag_day_tgt[dt] or {}
-					local per = d.diag_day_tgt[dt][ky]
-					if not per then per = {}; d.diag_day_tgt[dt][ky] = per end
-					per[f[4] or ""] = num(f[5])
-				end
 			elseif k == "appname" then
 				local ky = f[2]
 				if ky then
 					d.app_names[ky] = d.app_names[ky] or {}
 					d.app_names[ky][num(f[3])] = f[4] or ""
-				end
-			elseif k == "appmap" then
-				local ky = f[2]
-				if ky and f[4] and f[4] ~= "" then
-					d.app_map[ky] = d.app_map[ky] or {}
-					d.app_map[ky][f[4]] = num(f[3])
 				end
 			elseif k == "diagntoday" then
 				local ky = f[2]
