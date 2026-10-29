@@ -454,4 +454,421 @@ function M.parse(text, opts)
 	return r
 end
 
+-- ======================================================================
+-- round75（R75-C）：未归类目标的「AI 推测」
+--
+-- 隐私红线（用户拍板，没有商量空间）：请求体里**只允许**出现三样东西 ——
+--   ① 每个未归类目标的公网网段（IPv4，且不是私网/保留段）
+--   ② 该网段的 ASN 组织名（来自 round74 的 ASN 缓存，如 AKAMAI-ASN1, NL）
+--   ③ 该条目已配的「封锁名称」清单（只有名称文字，不含域名）
+-- 绝不发送：MAC、主机名、内网 IP、LAN 网段、设备名、条目备注、其它条目的名称、
+-- 用户 uci 全量配置。连「内网网段的形态」都不许出现（发出去就等于泄露编址）。
+--
+-- 推测结果**绝不写进统计归属**：不进 n/t/nut 行、不进 .map、不进 uci。
+-- 只作为展开区里的一个临时展示字段（「低置信 · 推测」）。
+-- ======================================================================
+
+-- 名字清单里的「IP 字面量」判定：名称不该是地址；私网地址更是绝不能外发。
+-- 只认「整串就是个地址」的形态（含 CIDR / IPv6），不误伤「我的世界」这类中文名。
+local function looks_like_ip(v)
+	if type(v) ~= "string" or v == "" then return false end
+	if v:match("^%d+%.%d+%.%d+%.%d+") then return true end
+	if v:find(":", 1, true) and v:match("^[%x:%.]+$") then return true end
+	return false
+end
+
+-- 严格 IPv4 拆分：4 段、每段 1–3 位十进制、**无前导零**（"010.1.2.3" 视为可疑形态）、
+-- 每段 ≤ 255。任何不满足都返回 nil ⇒ 调用方按「不可外发」处理（防绕过）。
+local function ipv4_octets(addr)
+	local parts = {}
+	for p in addr:gmatch("[^%.]+") do parts[#parts + 1] = p end
+	if #parts ~= 4 then return nil end
+	local o = {}
+	for i = 1, 4 do
+		local p = parts[i]
+		if #p == 0 or #p > 3 then return nil end
+		if not p:match("^%d+$") then return nil end
+		if #p > 1 and p:sub(1, 1) == "0" then return nil end
+		local n = tonumber(p)
+		if not n or n > 255 then return nil end
+		o[i] = n
+	end
+	return o
+end
+
+-- 是否「不能发给第三方」：私网 / 保留 / 组播 / 形态可疑 / 非 IP 一律 true。
+-- 覆盖与 root/etc/init.d/parentcontrol 的 pc_asn_queryable() 同一张表（round74b 的
+-- R74-M1 就是漏了这张表，把 18 个内网地址发给了 Team Cymru）：
+--   0/8、10/8、127/8、172.16/12、192.168/16、169.254/16、100.64/10、
+--   192.0.0/24、192.0.2/24、198.18/15、198.51.100/24、203.0.113/24、≥224
+-- 以及 IPv6 的 ::1、fe80::/10、fc00::/7（只放行全局单播 2000::/3）。
+function M.is_private_addr(s)
+	if type(s) ~= "string" then return true end
+	local v = trim(s)
+	if v == "" then return true end
+	v = v:gsub("/%d+$", "")
+	v = v:gsub("^%[", ""):gsub("%]$", "")
+	if v:find(":", 1, true) then
+		local h = v:lower()
+		if h == "::" or h == "::1" then return true end
+		if h:sub(1, 2) == "::" then return true end          -- ::ffff:1.2.3.4 等映射形态
+		if h:sub(1, 2) == "fe" or h:sub(1, 2) == "fc" or h:sub(1, 2) == "fd" then return true end
+		if h:sub(1, 2) == "ff" then return true end          -- 组播
+		local f = h:sub(1, 1)
+		if f == "2" or f == "3" then return false end        -- 2000::/3 全局单播
+		return true
+	end
+	local o = ipv4_octets(v)
+	if not o then return true end
+	local a, b, c = o[1], o[2], o[3]
+	if a == 0 or a == 10 or a == 127 then return true end
+	if a == 172 and b >= 16 and b <= 31 then return true end
+	if a == 192 and b == 168 then return true end
+	if a == 169 and b == 254 then return true end
+	if a == 100 and b >= 64 and b <= 127 then return true end
+	if a == 192 and b == 0 then return true end             -- 192.0.0.0/24 与 192.0.2.0/24
+	if a == 198 and (b == 18 or b == 19) then return true end
+	if a == 198 and b == 51 and c == 100 then return true end
+	if a == 203 and b == 0 and c == 113 then return true end
+	if a >= 224 then return true end
+	return false
+end
+
+-- 「可外发的网段」：公网 IPv4 单地址或 IPv4 CIDR（IPv6/域名一律不发：没有 ASN 前缀，
+-- 发出去也没有意义，只会扩大暴露面）。
+function M.is_public_prefix(s)
+	if type(s) ~= "string" then return false end
+	local v = trim(s)
+	if v == "" then return false end
+	if not (v:match("^%d+%.%d+%.%d+%.%d+$") or v:match("^%d+%.%d+%.%d+%.%d+/%d+$")) then return false end
+	-- 掩码必须 0..32：`8.8.8.8/33` 之类形状合法、语义非法，不该进请求体。
+	local mask = v:match("/(%d+)$")
+	if mask then
+		mask = tonumber(mask)
+		if not mask or mask > 32 then return false end
+	end
+	return not M.is_private_addr(v)
+end
+
+-- 固定系统提示词：唯一职责 = 「网段 + 组织名 + 已配名称」→ 猜这是哪类服务。
+-- 明确要求不确定就返回空数组（不许编），并强制 JSON 数组形态便于严格校验。
+local INFER_SYS_PROMPT = "你是网络流量归因助手。用户会给出若干「公网网段 + 该网段的 ASN 组织名」"
+	.. "以及该条目已配置的封锁名称清单。请推测每个网段最可能属于哪个被封锁的服务/应用。"
+	.. "只输出一个 JSON 数组，每个元素形如 {\"prefix\":\"网段\",\"name\":\"名称\",\"confidence\":\"low 或 mid\"}，"
+	.. "不要输出任何解释、不要输出 markdown 代码块。prefix 必须是用户给出的网段之一。"
+	.. "name 用中文或英文的通用服务名，不超过 20 字，不得包含竖线字符。"
+	.. "**不确定就返回空数组 []，绝对不要编造**。"
+M.INFER_SYS_PROMPT = INFER_SYS_PROMPT
+
+-- 从模型回答里抽出 JSON 数组：容忍 ```json 包裹与前后废话（与 extract 同风格）。
+local function extract_json_array(content)
+	if type(content) ~= "string" then return nil end
+	local s = trim(content)
+	s = s:gsub("^```[%w]*%s*", ""):gsub("%s*```$", "")
+	local i, j = s:find("%[")
+	if not i then return nil end
+	-- 从最后一个 "]" 往前找，容忍数组后面还有废话
+	local k = s:match(".*()%]")
+	if not k or k < i then return nil end
+	return s:sub(i, k)
+end
+
+-- 严格校验模型输出。返回 items（只含发送集合里的 prefix），或 nil, 原因。
+local function sanitize_infer(parsed, sentmap)
+	if type(parsed) ~= "table" then return nil, T("AI 响应不是 JSON 数组") end
+	local out, seen = {}, {}
+	for _, it in ipairs(parsed) do
+		if type(it) == "table" then
+			local p = trim(it.prefix or "")
+			local n = trim(it.name or "")
+			local conf = trim(it.confidence or "")
+			-- prefix 必须在**刚才发出去的那批**里：不在的一律丢弃（防模型幻觉塞东西）。
+			if p ~= "" and sentmap[p] and not seen[p] then
+				if n ~= "" and #n <= 64 and not n:find("|", 1, true) and not n:find("%c") then
+					if conf ~= "mid" then conf = "low" end
+					seen[p] = true
+					out[#out + 1] = { prefix = p, name = n, confidence = conf }
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- R75-C 主流程。
+-- opts = {
+--   items = { { target = "<网段>", org = "<ASN 组织名>" }, ... },   -- 来自 round74 的 ASN 数据
+--   names = { "<已配名称>", ... },                                  -- 该条目已配的封锁名称
+--   endpoint / model / apikey,                                      -- 可覆盖 M.config()
+--   http  = function(method, url, body, apikey) ... end,             -- 测试注入用
+-- }
+-- 返回 { ok, items = { {prefix,name,confidence} }, sent = { 网段... }, body = <请求体原文>, error }
+-- body 只回给调用方（测试用来逐字节断言隐私面），不写页面、不落盘。
+function M.infer(opts)
+	opts = opts or {}
+
+	local conf = M.config()
+	local endpoint = trim(opts.endpoint or conf.endpoint or "")
+	local model = trim(opts.model or conf.model or "")
+	local apikey = opts.apikey
+	if apikey == nil then apikey = conf.apikey or "" end
+
+	-- ① 可发送项：公网 IPv4 网段 + 有 ASN 组织名。没有组织名（查询失败 / IPv6 / 域名）
+	--    一律跳过 —— 发一个光秃秃的网段既没信息量，又白白多泄露一个编址。
+	local sent, sentmap, lines = {}, {}, {}
+	for _, it in ipairs(opts.items or {}) do
+		if type(it) == "table" then
+			local tgt = trim(it.target or "")
+			local org = trim(it.org or "")
+			if tgt ~= "" and org ~= "" and M.is_public_prefix(tgt) and not sentmap[tgt] then
+				sentmap[tgt] = true
+				sent[#sent + 1] = tgt
+				lines[#lines + 1] = tgt .. "  " .. org
+			end
+		end
+	end
+	if #sent == 0 then
+		-- 没有可发的东西 ⇒ **一个字节都不发**（连空请求也不发）。
+		return { ok = true, items = {}, sent = {}, body = "" }
+	end
+
+	-- ③ 名称清单：只发名称文字。IP 字面量（含私网地址）一律剔除 —— 名称不该是地址。
+	local names = {}
+	for _, n in ipairs(opts.names or {}) do
+		local v = trim(n)
+		if v ~= "" and #v <= 64 and not v:find("[|%c]") and not looks_like_ip(v) then
+			names[#names + 1] = v
+		end
+	end
+
+	if endpoint == "" or model == "" then
+		return { ok = false, error = T("请先在「设置」页配置 AI endpoint 与 model"), sent = sent }
+	end
+	if not M.valid_endpoint(endpoint) then
+		return { ok = false, error = T("AI endpoint 无效（需以 http:// 或 https:// 开头）"), sent = sent }
+	end
+
+	local user = table.concat(lines, "\n")
+	if #names > 0 then
+		user = user .. "\n已配名称：" .. table.concat(names, "、")
+	end
+
+	local payload = json_encode({
+		model       = model,
+		temperature = 0,
+		messages    = {
+			{ role = "system", content = INFER_SYS_PROMPT },
+			{ role = "user",   content = user },
+		},
+	})
+	if not payload then
+		return { ok = false, error = T("无法构造 AI 请求体"), sent = sent }
+	end
+
+	local http = opts.http or http_run
+	local body, err = http("POST", endpoint:gsub("/+$", "") .. "/chat/completions", payload, apikey)
+	if not body then
+		return { ok = false, error = err, sent = sent, body = payload }
+	end
+
+	local parsed = json_decode(body)
+	if type(parsed) ~= "table" then
+		return { ok = false, error = T("AI 服务响应不是 JSON"), sent = sent, body = payload }
+	end
+
+	local content
+	local choices = parsed.choices
+	if type(choices) == "table" and type(choices[1]) == "table" then
+		local msg = choices[1].message
+		if type(msg) == "table" then content = msg.content end
+		if type(content) ~= "string" then content = choices[1].text end
+	end
+	if type(content) ~= "string" then
+		return { ok = false, error = T("AI 响应缺少内容（choices[0].message.content）"), sent = sent, body = payload }
+	end
+
+	local arr = extract_json_array(content)
+	if not arr then
+		return { ok = false, error = T("AI 响应里没有 JSON 数组"), sent = sent, body = payload }
+	end
+	local dec = json_decode(arr)
+	local items, why = sanitize_infer(dec, sentmap)
+	if not items then
+		return { ok = false, error = why, sent = sent, body = payload }
+	end
+	return { ok = true, items = items, sent = sent, body = payload }
+end
+
+-- ======================================================================
+-- round75（R75-D）：一键把推测结果归入条目
+--
+-- 语义（用户原话）：名称已存在 ⇒ 追加到该名称行的域名列表末尾；不存在 ⇒ 末尾新增一行。
+-- 写回必须**最小编辑**：其它行逐字节保持原样（禁止「读出来 → pc_apps_rows 归一化 →
+-- 整体重写」，那会把用户写的逗号、空名称行、缩进全洗掉）。
+-- ======================================================================
+
+local APPS_MAX = 4096
+
+-- 与 common.sh 的 pc_apps_rows 同口径地算「某行的名称」：
+-- `|` 前部分（控制字符转空格、折叠空格、去首尾空格）；为空则取域名列表首项；再空返回 nil。
+local function row_name(line)
+	local name, rest = line:match("^([^|]*)|(.*)$")
+	if name == nil then
+		name, rest = line, ""
+	end
+	name = name:gsub("%c", " "):gsub(" +", " "):gsub("^ ", ""):gsub(" $", "")
+	if name ~= "" then return name end
+	local first
+	for tok in rest:gmatch("[^,%s]+") do first = tok break end
+	if first and first ~= "" then return first end
+	return nil
+end
+
+-- 该行域名 token 里是否已有 target（大小写不敏感）。
+local function row_has_token(rest, target)
+	local want = target:lower()
+	for tok in rest:gmatch("[^,%s]+") do
+		if tok:lower() == want then return true end
+	end
+	return false
+end
+
+-- target 校验：IPv4/IPv6 CIDR 或合法域名。
+function M.valid_target(s)
+	if type(s) ~= "string" then return false end
+	local v = trim(s)
+	if v == "" or #v > 128 then return false end
+	if v:find("[%s%c|]") then return false end
+	if v:match("^%d+%.%d+%.%d+%.%d+$") then return ipv4_octets(v) ~= nil end
+	if v:match("^%d+%.%d+%.%d+%.%d+/%d+$") then
+		local addr, bits = v:match("^(%d+%.%d+%.%d+%.%d+)/(%d+)$")
+		if not addr then return false end
+		local n = tonumber(bits)
+		return ipv4_octets(addr) ~= nil and n ~= nil and n >= 0 and n <= 32
+	end
+	if v:find(":", 1, true) then
+		-- IPv6（可带 /nn）：只做形态校验，不做完整规范化。
+		local addr, bits = v:match("^([%x:%.]+)/(%d+)$")
+		if addr then
+			local n = tonumber(bits)
+			return n ~= nil and n >= 0 and n <= 128
+		end
+		return v:match("^[%x:%.]+$") ~= nil
+	end
+	return M.is_domain(v)
+end
+
+-- 名称校验：非空、≤64、不含 `|`、不含任何控制字符（%c）。
+function M.valid_name(s)
+	if type(s) ~= "string" then return false end
+	local v = trim(s)
+	if v == "" or #v > 64 then return false end
+	if v:find("|", 1, true) or v:find("%c") then return false end
+	return true
+end
+
+-- 纯函数：给定 apps 原文，把 target 归到 name 名下。不碰 uci、不碰文件。
+-- 返回 { ok, action = "appended"|"created"|"exists", text = <新文本>, error }
+function M.apply_name(apps, target, name)
+	if not M.valid_name(name) then
+		return { ok = false, error = T("名称不合法（不能为空、不超过 64 字、不含竖线与换行）") }
+	end
+	if not M.valid_target(target) then
+		return { ok = false, error = T("目标不合法（需是 IP、CIDR 或域名）") }
+	end
+	local tgt = trim(target)
+	local want = trim(name):lower()
+	local text = tostring(apps or "")
+
+	-- 按行切，**保留每行原文**（含空行位置）。
+	local lines = {}
+	for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+	if #lines > 0 and lines[#lines] == "" then lines[#lines] = nil end
+
+	local hit = 0
+	for i = 1, #lines do
+		local nm = row_name(lines[i])
+		if nm and nm:lower() == want then
+			hit = i
+			break
+		end
+	end
+
+	local newtext
+	if hit > 0 then
+		local line = lines[hit]
+		local name_part, rest = line:match("^([^|]*)|(.*)$")
+		if name_part == nil then
+			-- 纯名称行（无 `|`）：补上分隔符与目标。
+			lines[hit] = line .. "|" .. tgt
+			newtext = table.concat(lines, "\n")
+		elseif row_has_token(rest, tgt) then
+			-- 该行域名列表里已有这个目标 ⇒ 不写 uci，如实返回 exists。
+			return { ok = true, action = "exists", text = text }
+		else
+			-- 追加到该行域名列表**末尾**（用空格分隔；pc_apps_rows 逗号/空格等价）。
+			lines[hit] = line .. " " .. tgt
+			newtext = table.concat(lines, "\n")
+		end
+	else
+		-- 名称不存在 ⇒ 末尾新增一行 `名称|目标`。
+		lines[#lines + 1] = trim(name) .. "|" .. tgt
+		newtext = table.concat(lines, "\n")
+	end
+
+	if #newtext > APPS_MAX then
+		return { ok = false, error = T("条目内容超过 4096 字上限，请精简后再归入") }
+	end
+	return { ok = true, action = (hit > 0 and "appended" or "created"), text = newtext }
+end
+
+-- 写 uci + 后台触发重建。
+-- opts = { key = "weburl_<i>", target, name, uci = <cursor>, reload = function() end }
+-- 返回 { ok, action, rebuild = "started"|"skipped", error }
+function M.apply_entry(opts)
+	opts = opts or {}
+	local key = trim(opts.key or "")
+	-- key 白名单（防注入）：只接受 weburl_<数字>。
+	if not key:match("^weburl_%d+$") then
+		return { ok = false, error = T("条目编号不合法") }
+	end
+	local idx = tonumber(key:match("^weburl_(%d+)$"))
+
+	local uci = opts.uci
+	if not uci then
+		local ok, c = pcall(require, "luci.model.uci")
+		if not ok then return { ok = false, error = T("无法访问配置") } end
+		uci = c.cursor()
+	end
+
+	-- 按 pc_uget 同口径定位真实节名：weburl_<idx> 里的 idx 是「该类型第几个节」（0 起）。
+	local sec, i = nil, 0
+	uci:foreach("parentcontrol", "weburl", function(s)
+		if i == idx then sec = s[".name"] end
+		i = i + 1
+	end)
+	if not sec then
+		return { ok = false, error = T("找不到该条目（可能已被删除，请刷新页面）") }
+	end
+
+	local apps = uci:get("parentcontrol", sec, "apps") or ""
+	local res = M.apply_name(apps, opts.target, opts.name)
+	if not res.ok then return { ok = false, error = res.error } end
+	if res.action == "exists" then
+		-- 已经是这个归属 ⇒ 不写 uci、不触发重建（避免无意义的 15–30 秒重建）。
+		return { ok = true, action = "exists", rebuild = "skipped" }
+	end
+
+	uci:set("parentcontrol", sec, "apps", res.text)
+	local cok = uci:commit("parentcontrol")
+	if cok == false then
+		return { ok = false, error = T("保存配置失败（uci commit 未成功）") }
+	end
+
+	-- reload = stop; start，真机 15–26 秒 ⇒ 必须后台起、立刻返回，否则 LuCI 请求会挂死。
+	local reload = opts.reload
+	if reload then reload() end
+	return { ok = true, action = res.action, rebuild = "started" }
+end
+
 return M

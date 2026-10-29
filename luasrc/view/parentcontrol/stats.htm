@@ -368,23 +368,36 @@
 	<div class="muted" style="margin-bottom:6px">
 		<%=T("上面矩阵里「（未归类）」那一行包含的目标，逐个列在这里（今日分钟降序）。同一目标的流量可能来自多台设备，这里不再拆。")%>
 		<br/><%=T("这一节只在「设备只命中一个条目、且该条目填了至少两个封锁名称、且该条目确有未归类目标」时出现，下面每张表对应矩阵里那台设备展开后的「（未归类）」子行。")%>
+		<br/><%=T("「推测」只在你点按钮时才把该目标的公网网段、该网段的 ASN 组织名、以及本条目已配的封锁名称清单发给 AI；不会发 MAC、主机名、内网 IP 或设备名。推测结果标为「低置信 · 推测」，仅供参考，不参与统计口径，也不写入归属。")%>
 		<% if not d.asn_requested then %>
 		<a class="btn cbi-button cbi-button-neutral cbi-button-small" href="?asn=1"><%=T("查 ASN（归属网络）")%></a>
 		<% end %>
 	</div>
 	<% for _, r in ipairs(d.dev_key_day_rows) do %><% if r.subs then %>
-	<table style="margin-bottom:10px">
-		<tr><th colspan="6" style="text-align:left"><%=pcdata(r.subs.device)%> · <%=pcdata(r.subs.keyname)%></th></tr>
+	<div class="muted" style="margin-bottom:4px">
+		<button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferAll(this)"
+			data-pc-key="<%=pcdata(r.subs.key)%>"><%=T("批量推测本条目未归类目标")%></button>
+		<span class="muted" data-pc-msg="1"></span>
+	</div>
+	<table style="margin-bottom:10px" data-pc-infer-table="<%=pcdata(r.subs.key)%>">
+		<tr><th colspan="8" style="text-align:left"><%=pcdata(r.subs.device)%> · <%=pcdata(r.subs.keyname)%></th></tr>
 		<tr><th><%=pcdata(r.subs.head.target)%></th><th class="num"><%=pcdata(r.subs.head.today)%></th>
 			<th class="num"><%=pcdata(r.subs.head.total)%></th><th><%=pcdata(r.subs.head.asn)%></th>
-			<th><%=pcdata(r.subs.head.org)%></th><th><%=pcdata(r.subs.head.note)%></th></tr>
+			<th><%=pcdata(r.subs.head.org)%></th><th><%=pcdata(r.subs.head.note)%></th>
+			<th><%=T("推测是什么")%></th><th><%=T("归入条目")%></th></tr>
 		<% for _, s in ipairs(r.subs.rows) do %>
-		<tr><td><%=pcdata(s.target)%></td>
+		<tr data-pc-row="<%=pcdata(s.target)%>"><td><%=pcdata(s.target)%></td>
 			<td class="num"><%=pcdata(tostring(s.today or "-"))%></td>
 			<td class="num"><%=pcdata(tostring(s.total or "-"))%></td>
 			<td><%=pcdata(s.asn or T("未查询"))%></td>
 			<td><%=pcdata(s.org or "-")%></td>
-			<td class="muted"><%=pcdata(s.solo and T("仅未覆盖设备命中（不计入名称分钟）") or "-")%></td></tr>
+			<td class="muted"><%=pcdata(s.solo and T("仅未覆盖设备命中（不计入名称分钟）") or "-")%></td>
+			<td><button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferOne(this)"
+				data-pc-key="<%=pcdata(r.subs.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("推测是什么")%></button>
+				<span class="muted" data-pc-infer="1"></span></td>
+			<td><button type="button" class="btn cbi-button cbi-button-small" onclick="pcApplyOne(this)"
+				data-pc-key="<%=pcdata(r.subs.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("归入条目")%></button>
+				<span class="muted" data-pc-apply="1"></span></td></tr>
 		<% end %>
 	</table>
 	<% if r.subs_more > 0 then %>
@@ -439,3 +452,99 @@
 </div>
 </div>
 <script src="<%=resource%>/parentcontrol/pc-ui.js?v=<%=require("luci.model.cbi.parentcontrol.pkgver").get()%>"></script>
+
+<!-- round75：未归类目标的「推测 / 归入」。只在用户点按钮时才发请求（页面加载不发）。
+     POST 一律带 CSRF token；推测结果只写进 data-pc-infer 的展示位，不参与统计口径。 -->
+<script type="text/javascript">
+//<![CDATA[
+	var pcInferUrl = '<%=url("admin/control/parentcontrol/unclassified_infer")%>';
+	var pcApplyUrl = '<%=url("admin/control/parentcontrol/unclassified_apply")%>';
+	var pcTok = '<%=token%>';
+
+	function pcInferMsg(el, text, ok) {
+		if (!el) return;
+		el.style.color = ok ? 'green' : 'red';
+		el.textContent = text;
+	}
+
+	function pcInferTable(key) {
+		var ts = document.querySelectorAll('[data-pc-infer-table]');
+		for (var i = 0; i < ts.length; i++) {
+			if (ts[i].getAttribute('data-pc-infer-table') === key) return ts[i];
+		}
+		return null;
+	}
+
+	function pcInferRun(key) {
+		var tbl = pcInferTable(key);
+		if (!tbl) return;
+		var msg = tbl.parentNode.querySelector('[data-pc-msg]');
+		pcInferMsg(msg, '<%=translate("正在推测…")%>', true);
+		pcPost(pcInferUrl, { key: key, token: pcTok }, function (x, res) {
+			if (!res || !res.ok) {
+				pcInferMsg(msg, (res && res.error) || '<%=translate("推测失败")%>', false);
+				return;
+			}
+			var n = 0;
+			var items = res.items || [];
+			for (var i = 0; i < items.length; i++) {
+				var it = items[i];
+				var rows = tbl.querySelectorAll('[data-pc-row]');
+				for (var j = 0; j < rows.length; j++) {
+					if (rows[j].getAttribute('data-pc-row') !== it.prefix) continue;
+					var span = rows[j].querySelector('[data-pc-infer]');
+					var conf = (it.confidence === 'mid') ? '<%=translate("较可信")%>' : '<%=translate("低置信")%>';
+					if (span) span.textContent = conf + ' · <%=translate("推测")%>：' + it.name;
+					var btn = rows[j].querySelector('[data-pc-apply]');
+					var ab = btn ? btn.parentNode.querySelector('[data-pc-target]') : null;
+					var b2 = rows[j].querySelectorAll('button[data-pc-target]');
+					for (var k = 0; k < b2.length; k++) {
+						if (b2[k].getAttribute('onclick') === 'pcApplyOne(this)') {
+							b2[k].setAttribute('data-pc-name', it.name);
+						}
+					}
+					n++;
+				}
+			}
+			pcInferMsg(msg, n > 0 ? ('<%=translate("推测到")%> ' + n + ' <%=translate("项（仅供参考，不参与统计）")%>')
+				: '<%=translate("没有推测出可信结果（不确定时不编）")%>', n > 0);
+		}, function () {
+			pcInferMsg(msg, '<%=translate("请求失败，请检查 AI 设置")%>', false);
+		});
+	}
+
+	function pcInferOne(btn) {
+		pcInferRun(btn.getAttribute('data-pc-key'));
+	}
+
+	function pcInferAll(btn) {
+		pcInferRun(btn.getAttribute('data-pc-key'));
+	}
+
+	function pcApplyOne(btn) {
+		var key = btn.getAttribute('data-pc-key');
+		var tgt = btn.getAttribute('data-pc-target');
+		var name = btn.getAttribute('data-pc-name');
+		var row = btn.parentNode.parentNode;
+		var out = row ? row.querySelector('[data-pc-apply]') : null;
+		if (!name) {
+			pcInferMsg(out, '<%=translate("请先点「推测是什么」")%>', false);
+			return;
+		}
+		pcInferMsg(out, '<%=translate("正在归入…")%>', true);
+		pcPost(pcApplyUrl, { key: key, target: tgt, name: name, token: pcTok }, function (x, res) {
+			if (!res || !res.ok) {
+				pcInferMsg(out, (res && res.error) || '<%=translate("归入失败")%>', false);
+				return;
+			}
+			if (res.action === 'exists') {
+				pcInferMsg(out, '<%=translate("该目标已在这个名称下")%>', true);
+				return;
+			}
+			pcInferMsg(out, '<%=translate("已归入，正在重建规则（约 15–30 秒后回到统计页可见）")%>', true);
+		}, function () {
+			pcInferMsg(out, '<%=translate("请求失败，请稍后重试")%>', false);
+		});
+	}
+//]]>
+</script>
