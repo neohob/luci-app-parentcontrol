@@ -502,6 +502,11 @@ end
 --   0/8、10/8、127/8、172.16/12、192.168/16、169.254/16、100.64/10、
 --   192.0.0/24、192.0.2/24、198.18/15、198.51.100/24、203.0.113/24、≥224
 -- 以及 IPv6 的 ::1、fe80::/10、fc00::/7（只放行全局单播 2000::/3）。
+--
+-- 注意（I-4，round75b）：本函数对 IPv6 只做「私网/链路本地/组播」粗判，所以
+-- `is_private_addr("2001:db8::1")` 返回 **false**（2001:db8::/32 落在 2000::/3 里）。
+-- 这不构成泄漏，因为「能不能发给第三方」的实际闸门是 is_public_prefix()，它对 IPv6
+-- 一律返回 false（只放行 IPv4 形态）。复用本函数时请连着看 is_public_prefix。
 function M.is_private_addr(s)
 	if type(s) ~= "string" then return true end
 	local v = trim(s)
@@ -595,6 +600,21 @@ local function sanitize_infer(parsed, sentmap)
 	return out
 end
 
+-- I-1（round75b）：组织名是唯一「不经任何过滤就进请求体」的字段。它来自 `stats_tsv asn`
+--（shell 侧已经把制表符、回车、换行都删掉了），但本层不该依赖上游净化：控制字符能把一条记录拆成
+-- 两行（结构注入），IPv4 字面量会把一个地址顺带发出去。所以这里：控制字符→空格、抹掉
+-- 任何 IPv4 形态的 token、折叠空白、截断到 64 字。
+local function clean_org(s)
+	local v = tostring(s or "")
+	v = v:gsub("[%c]", " ")
+	v = v:gsub("%d+%.%d+%.%d+%.%d+", " ")
+	v = v:gsub(" +", " "):gsub("^ ", ""):gsub(" $", "")
+	if #v > 64 then
+		v = v:sub(1, 64):gsub(" +$", "")
+	end
+	return v
+end
+
 -- R75-C 主流程。
 -- opts = {
 --   items = { { target = "<网段>", org = "<ASN 组织名>" }, ... },   -- 来自 round74 的 ASN 数据
@@ -619,7 +639,7 @@ function M.infer(opts)
 	for _, it in ipairs(opts.items or {}) do
 		if type(it) == "table" then
 			local tgt = trim(it.target or "")
-			local org = trim(it.org or "")
+			local org = clean_org(it.org)
 			if tgt ~= "" and org ~= "" and M.is_public_prefix(tgt) and not sentmap[tgt] then
 				sentmap[tgt] = true
 				sent[#sent + 1] = tgt
@@ -780,9 +800,18 @@ function M.apply_name(apps, target, name)
 	local want = trim(name):lower()
 	local text = tostring(apps or "")
 
+	-- 末尾换行要原样保留（round75b 必修 2）：以前 `("甲|a.com\n乙|b.com\n")` 写回会变成
+	-- `"甲|a.com c.com\n乙|b.com"`（吃掉末尾 `\n`）。pc_apps_rows 不受影响，但违反
+	-- 「最小编辑、不整体重写」原则 ⇒ 数出末尾换行数，写回时补上。
+	local ntail, body = 0, text
+	while #body > 0 and body:sub(-1) == "\n" do
+		body = body:sub(1, -2)
+		ntail = ntail + 1
+	end
+
 	-- 按行切，**保留每行原文**（含空行位置）。
 	local lines = {}
-	for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+	for line in (body .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
 	if #lines > 0 and lines[#lines] == "" then lines[#lines] = nil end
 
 	local hit = 0
@@ -816,6 +845,7 @@ function M.apply_name(apps, target, name)
 		newtext = table.concat(lines, "\n")
 	end
 
+	if ntail > 0 then newtext = newtext .. string.rep("\n", ntail) end
 	if #newtext > APPS_MAX then
 		return { ok = false, error = T("条目内容超过 4096 字上限，请精简后再归入") }
 	end
