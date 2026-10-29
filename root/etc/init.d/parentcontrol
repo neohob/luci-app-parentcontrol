@@ -1328,7 +1328,7 @@ diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _M
 
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _bumped _map_u _ex _exb _buf _d_unc
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _bumped _map_u _ex _exb _buf _d_unc _d_all
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
@@ -1337,7 +1337,11 @@ sample_diag_counters() { # $1=阈值（字节）
 	{ $ipt -t mangle -nvx -L 2>/dev/null; $ipt6 -t mangle -nvx -L 2>/dev/null; } > "$_dump"
 	# A83-1：单遍化的唯一一次 awk（默认 FS，容忍行首空格计数列）。c|<链>|<目标>|<和> 按 (链,目标)
 	# 累加；t|<目标>|<和> 按目标跨全部链累加（不得加 ^PC 过滤，否则非 PC* 链跳向 PCDC_* 时与旧算法分叉）。
-	# u|<PCDT 链>|<和>（round73）：PCDT_<key>_<n> 链内**所有 -m mac 规则**的字节和 = 未覆盖设备的流量。
+	# u|<PCDT 链>|<和>（round73）：PCDT_<key>_<n> 链内**只匹配 -m mac 规则**的字节和 = 未覆盖设备的流量。
+	# 必须按 mac 匹配过滤（R73-L1）：不过滤就把链内未来的任何非 mac 规则（-j RETURN、兜底、
+	# 调试规则）也当成「未覆盖流量」减掉 ⇒ 名称分钟静默偏小。两种列印形态都认，避免换 dump
+	# 命令时静默失效：`-nvx -L` 把 mac 匹配印成末列 `MAC aa:bb:…`（真机实测），`-S` 印
+	# `--mac-source aa:bb:…`。W259.6 另钉「PCDT_ 链规则数 == 未覆盖客户端数」这条不变式。
 	# 恒等式（名称分钟口径的唯一依据，与规则无关、不改规则文本）：
 	#     PCAD_<key> 中指向 PCDT_<key>_<n> 的跳转计数
 	#   == 本条目设备名单（clients）内设备的流量 + 未覆盖设备的流量（即本表 u|）
@@ -1345,7 +1349,7 @@ sample_diag_counters() { # $1=阈值（字节）
 	# v4/v6 同名 PCDT 链在此自然累加 —— 要的正是两族之和（与 c|/t| 同口径）。
 	awk '
 		/^Chain / { ch = $2; next }
-		$1 ~ /^[0-9]+$/ { s[ch "|" $3] += $2; t[$3] += $2; if (ch ~ /^PCDT_/) u[ch] += $2 }
+		$1 ~ /^[0-9]+$/ { s[ch "|" $3] += $2; t[$3] += $2; if (ch ~ /^PCDT_/ && ($0 ~ /--mac-source/ || $0 ~ / MAC /)) u[ch] += $2 }
 		END { for (k in s) print "c|" k "|" s[k]; for (k in t) print "t|" k "|" t[k]; for (k in u) print "u|" k "|" u[k] }' "$_dump" > "$_map"
 	# A83-2：三表一次 read 循环读进变量并 `|` 串成 `…k|v|`（不得用 $(cat)，会多一个 fork）。
 	_map_c=; _map_t=; _map_u=
@@ -1385,12 +1389,17 @@ sample_diag_counters() { # $1=阈值（字节）
 			# A83-3：基线纯 shell（取代 $(diag_delta …)）；缺失/非法按 0；回零按 _v 计；无论是否命中都写回。
 			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
 			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi; printf '%s\n' "$_v" > "$_bf"
+			# R73-M3：留一份**扣减前**的原始增量（整条目命中该目标）。`t` 行（诊断面板「命中过的
+			# 目标」）必须继续按它记，否则 t 行语义会变成「仅覆盖设备命中」——未覆盖设备独占流量时
+			# 该列印 `-` 而同行「今日分钟」有值，与面板脚注自相矛盾。名称分钟（n 行）才用扣减后的 _d。
+			_d_all=$_d
 			# round73（口径变更）：名称分钟**只算本条目设备名单内的设备**。
-			# 上面 _d 是「全部设备」的增量，这里减掉未覆盖设备的增量（u| 表：PCDT_ 链内
-			# 全部 -m mac 规则的字节和）。未覆盖设备的命中只留在「N 台未覆盖设备命中」
+			# 上面 _d_all 是「全部设备」的增量，这里减掉未覆盖设备的增量（u| 表：PCDT_ 链内
+			# -m mac 规则的字节和）。未覆盖设备的命中只留在「N 台未覆盖设备命中」
 			# 提醒（d 行）里，不再串进名称分钟。
-			# 条目设备名单为空 ⇒ diag_clients 返空 ⇒ PCDT_ 链 0 条规则 ⇒ 查不到 u| ⇒ _ex=0
-			# ⇒ 不扣（该条目本来就对全网生效，口径：名单为空 = 统计全部设备）。
+			# 条目设备名单为空、或名单已覆盖全部在线设备 ⇒ diag_clients 返空 ⇒ 该条目不装
+			# 诊断链（PCAD_/PCDT_ 一条都没有）⇒ 本循环不会跑到；即名称分钟只在该条目存在
+			# 「未覆盖设备」时才产生，空名单条目名称分钟恒 0（页面显示「-」）。
 			diag_map_get "$_map_u" "PCDT_${_key}_$_n"; _ex=$_MV
 			_buf="$STATE_DIR/dbase.${_key}.u$_n"
 			if [ -f "$_buf" ]; then
@@ -1404,8 +1413,10 @@ sample_diag_counters() { # $1=阈值（字节）
 			fi
 			printf '%s\n' "$_ex" > "$_buf"
 			_d=$((_d - _d_unc)); [ "$_d" -lt 0 ] && _d=0
+			# 顺序固定（R73-M3）：t 行先按**扣减前**的 _d_all 判（整条目命中该目标就记），
+			# n 行后按扣减后的 _d 判。W259.7 钉住「未覆盖设备独占该目标 ⇒ t 行有、名称分钟 0」。
+			[ "$_d_all" -gt 0 ] && [ "$_d_all" -ge "$_thr" ] && diag_bump_t "$_key" "$_tg"
 			[ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] || continue
-			diag_bump_t "$_key" "$_tg"
 			# D1-v2：名称维（同一 tick 同名只记 1 分钟）。目标不在映射里 ⇒ nr=0（未归类）。
 			_nr=0; _rest=${_req#*"|$_tg$TAB"}; [ "$_rest" = "$_req" ] || _nr=${_rest%%"|"*}
 			case "$_nr" in ''|*[!0-9]*) _nr=0 ;; esac
