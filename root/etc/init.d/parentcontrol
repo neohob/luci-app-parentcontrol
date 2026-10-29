@@ -299,13 +299,14 @@ EOF
 }
 
 refresh_ips() {
-	local _i _f _idx _mf _n _nl _RC
+	local _i _f _idx _mf _hf _hin _n _nl _RC
 	mkdir -p "$IPDIR"
 	command -v resolveip >/dev/null 2>&1 || return 0
 	PC_IPMASK=$(pc_uget "@basic[0].ip_mask"); [ -z "$PC_IPMASK" ] && PC_IPMASK=24
 	for _i in $(pc_ids_on weburl); do
 		_f="$IPDIR/weburl_$_i"
 		_mf="$_f.map"
+		_hf="$_f.hist"
 		# M1：一次解析，两份产物共用（目标文件 + .map）。解析次数 = 4×去重域名数，
 		# 与基线 refresh_ips 的并集解析**相同**（不得是 4D(K+1)）。
 		_RC=$(entry_resolve_cache weburl "$_i")
@@ -320,12 +321,30 @@ refresh_ips() {
 		# 会发布一个缺 \t0 行的半截 .map（目标集合 ⊊ $_f，Lua 侧丢分钟）。失败则保留旧
 		# .map、清掉 .new，并把失败写进日志（不退化成静默）。
 		_mf="$_f.map"
+		_hin="$_hf"
+		[ -f "$_hin" ] || _hin=/dev/null
+		# R74-B：归属历史台账 `weburl_<i>.hist`（目标 → 名称行号，格式同 .map）。
+		# 为什么要它：$_f 只增不减，域名换 IP 后老目标仍留在 $_f 里、但已不在当前解析结果里
+		# ⇒ 下面补 \t0 那一步会把它判成「未归类」，它历史上的分钟全部改判。hist 把「这个目标
+		# 曾经属于哪一行」同期下来，于是：当前解析优先 → 历史补 → 才落 0。
+		# hist 只记**真实归属**（nr ≥ 1），不写 0 行 —— 0 行的语义是「没有归属」，那不是历史。
+		# 注意 .map 的目标集合仍必须恒等于 $_f（下面第三条 awk 补 0 行），否则 Lua 侧会丢分钟。
 		if entry_target_map "$_i" "$_RC" > "$_mf.new" 2>/dev/null \
-			&& awk -F'\t' 'NR == FNR { have[$1] = 1; next }
-				$1 != "" && !have[$1]++ { printf "%s\t0\n", $1 }' "$_mf.new" "$_f" >> "$_mf.new" 2>/dev/null; then
-			mv "$_mf.new" "$_mf"
+			&& awk -F'\t' 'FILENAME == ARGV[1] { if (NF >= 2 && $1 != "" && $2 + 0 > 0) m[$1] = $2; next }
+				NF >= 2 && $1 != "" && $2 + 0 > 0 { m[$1] = $2 }
+				END { for (t in m) printf "%s\t%s\n", t, m[t] }' "$_hin" "$_mf.new" 2>/dev/null \
+				| sort -t "$TAB" -k2,2n -k1,1 > "$_hf.new" 2>/dev/null \
+			&& awk -F'\t' 'FILENAME == ARGV[1] { h[$1] = $2; next }
+				NF >= 2 && $1 != "" { m[$1] = $2 }
+				END { for (t in h) if (!(t in m)) m[t] = h[t]
+					for (t in m) if (t != "") printf "%s\t%s\n", t, m[t] }' "$_hin" "$_mf.new" 2>/dev/null \
+				| sort -t "$TAB" -k2,2n -k1,1 > "$_mf.new2" 2>/dev/null \
+			&& awk -F'\t' 'FILENAME == ARGV[1] { have[$1] = 1; next }
+				$1 != "" && !have[$1]++ { printf "%s\t0\n", $1 }' "$_mf.new2" "$_f" >> "$_mf.new2" 2>/dev/null; then
+			# 先发布 hist 再发布 map：hist 是 .map 的输入，颠倒会出现「map 用了新 hist、hist 却没落地」。
+			mv "$_hf.new" "$_hf" && mv "$_mf.new2" "$_mf" && rm -f "$_mf.new"
 		else
-			rm -f "$_mf.new"
+			rm -f "$_mf.new" "$_mf.new2" "$_hf.new"
 			elog "refresh_ips: $_mf 生成失败，保留上一版映射"
 		fi
 	done
@@ -333,14 +352,14 @@ refresh_ips() {
 		[ -e "$_f" ] || continue
 		# L-4（round66）：只跳**真正的旁路产物** `*.map`。`*.new` / `*.map.new` 都是写到
 		# 一半的临时文件（崩溃残留），必须落到下面的孤儿回收分支，否则永久留在 overlay/flash。
-		case "$_f" in *.map) continue ;; esac
+		case "$_f" in *.map|*.hist) continue ;; esac
 		_idx=${_f##*weburl_}
-		pc_ids_on weburl | grep -qx "$_idx" || rm -f "$_f" "$IPDIR/weburl_$_idx.map"
+		pc_ids_on weburl | grep -qx "$_idx" || rm -f "$_f" "$IPDIR/weburl_$_idx.map" "$IPDIR/weburl_$_idx.hist"
 	done
 	# 日志里的条数只数目标文件（*.map/*.new 是旁路，数进去会让这个数字凭空变大）
 	_n=0
 	for _f in "$IPDIR"/weburl_*; do
-		case "$_f" in *.map|*.map.new) continue ;; esac
+		case "$_f" in *.map|*.map.new|*.hist|*.hist.new) continue ;; esac
 		[ -f "$_f" ] || continue
 		# 用 awk 数行：grep -c 在 0 行时既打印 0、又退出 1 —— 加 `|| echo 0` 会得到
 		# "0\n0"，进 $(( )) 直接算术报错（真机 dash 上报 arithmetic expression）。
@@ -1744,6 +1763,100 @@ hosts_tsv() {
 	return 0
 }
 
+# ============================================================================
+# R74-A：机械 ASN（Team Cymru 公共 TXT 库）—— 只在用户点开「（未归类）」明细时按需查
+# ============================================================================
+# 为什么走 TXT 而不走 PTR：PTR 不可靠（23.11.207.1 直接 NXDOMAIN，但 Cymru 有记录），
+# 而且 PTR 只能给出反解名字，给不出「归属哪个 AS / 哪个组织」。
+# 设备上没有 whois/dig/host，只有 busybox nslookup（真机实测 -type=TXT 可用）：
+#   nslookup -type=TXT 207.11.23.1.origin.asn.cymru.com → text = "20940 | 23.11.207.0/24 | US | arin | …"
+#   nslookup -type=TXT AS20940.asn.cymru.com          → text = "20940 | NL | ripencc | 2001-07-10 | AKAMAI-ASN1, NL"
+# 输出只给「AS 号 + 组织名」。归属信息只说明该目标落在哪个网络，**不代表它是什么服务**。
+# 缓存：$STATE_DIR/asn.cache，一行 <target>\t<expiry_epoch>\t<asn>\t<org>，有效期 7 天。
+# 查过但没结果也要缓存（空 asn/org），否则每次点开都重跑一遍 DNS。
+# 绝不在 tick 路径上：默认 stats_tsv 输出里一个 asn 行都没有（见 stats_tsv_inner 的分发）。
+PC_ASN_TTL=${PC_ASN_TTL:-604800}
+PC_ASN_MAX=${PC_ASN_MAX:-12}
+
+pc_asn_cache_line() { # $1=target → 打印 "<hit>\t<asn>\t<org>"（hit=1 仅当缓存未过期）
+	local _cache _now
+	_cache="$STATE_DIR/asn.cache"
+	[ -f "$_cache" ] || { printf '0\t\t'; return 0; }
+	_now=$(date +%s)
+	awk -F'\t' -v t="$1" -v now="$_now" '
+		$1 == t && NF >= 4 && $2 + 0 > now { h = 1; a = $3; o = $4 }
+		END { printf "%s\t%s\t%s", (h ? 1 : 0), a, o }' "$_cache" 2>/dev/null
+}
+
+pc_asn_query() { # $1=IPv4（无掩码） → 打印 "<asn>\t<org>"（任何失败都给空串，绝不猜）
+	local _rev _raw _asn _org
+	command -v nslookup >/dev/null 2>&1 || { printf '\t'; return 0; }
+	_rev=$(printf '%s\n' "$1" | awk -F. 'NF >= 4 { printf "%s.%s.%s.%s", $4, $3, $2, $1 }')
+	[ -n "$_rev" ] || { printf '\t'; return 0; }
+	# busybox nslookup 的 TXT 输出形如 `<qname>\ttext = "…"`；只要引号里的那串。
+	_raw=$(nslookup -type=TXT "$_rev.origin.asn.cymru.com" 2>/dev/null | sed -n 's/.*text = "\(.*\)".*/\1/p' | head -1)
+	_asn=$(printf '%s\n' "$_raw" | awk -F'|' '{ v = $1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }')
+	case "$_asn" in ''|*[!0-9]*) printf '\t'; return 0 ;; esac
+	_raw=$(nslookup -type=TXT "AS${_asn}.asn.cymru.com" 2>/dev/null | sed -n 's/.*text = "\(.*\)".*/\1/p' | head -1)
+	# 组织名在第 5 段（AKAMAI-ASN1, NL）。可能含逗号/&/' ⇒ 去掉 Tab/CR/LF 再落盘/输出。
+	_org=$(printf '%s\n' "$_raw" | awk -F'|' 'NF >= 5 { v = $5; gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }' | tr -d '\t\r\n')
+	printf '%s\t%s' "$_asn" "$_org"
+}
+
+# 目标能不能查：只认「IPv4 或 IPv4/nn」。IPv6 与域名串不查（IPv6 显示「未查询」，绝不编）。
+pc_asn_queryable() { # $1=target → 打印要查询的 IPv4（不可查则空）
+	printf '%s\n' "$1" | awk '{
+		t = $0; sub(/\/[0-9]+$/, "", t)
+		if (t ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print t
+	}'
+}
+
+pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org>`
+	local _t _rest _hit _asn _org _q _cnt _cache _now _exp
+	_cache="$STATE_DIR/asn.cache"
+	mkdir -p "$STATE_DIR"
+	_now=$(date +%s)
+	_cnt=0
+	for _t in "$@"; do
+		[ -n "$_t" ] || continue
+		# 目标串里出现分隔符就不处理：它会把 TSV 列数与缓存键搞乱（同 .map 的注入面）。
+		case "$_t" in *"|"*|*"$TAB"*) continue ;; esac
+		_rest=$(pc_asn_cache_line "$_t")
+		_hit=${_rest%%"$TAB"*}
+		_rest=${_rest#*"$TAB"}
+		_asn=${_rest%%"$TAB"*}
+		_org=${_rest#*"$TAB"}
+		if [ "$_hit" = "1" ]; then
+			printf 'asn\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org"
+			continue
+		fi
+		_q=$(pc_asn_queryable "$_t")
+		if [ -z "$_q" ]; then
+			# IPv6 / 域名串：不查询、不缓存，直接空票（页面渲染「未查询」）。
+			printf 'asn\t%s\t\t\n' "$_t"
+			continue
+		fi
+		if [ "$_cnt" -ge "$PC_ASN_MAX" ]; then
+			# 配额用完：本次不查也不缓存，留给下一次点开（否则会写一条假「无结果」）。
+			printf 'asn\t%s\t\t\n' "$_t"
+			continue
+		fi
+		_cnt=$((_cnt + 1))
+		_rest=$(pc_asn_query "$_q")
+		_asn=${_rest%%"$TAB"*}
+		_org=${_rest#*"$TAB"}
+		_exp=$((_now + PC_ASN_TTL))
+		printf '%s\t%s\t%s\t%s\n' "$_t" "$_exp" "$_asn" "$_org" >> "$_cache" 2>/dev/null
+		printf 'asn\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org"
+	done
+	# 紧凑化缓存（同一 target 后写覆盖先写；否则文件会随目标变动无限长）。
+	if [ -f "$_cache" ]; then
+		awk -F'\t' 'NF >= 4 { m[$1] = $0 } END { for (k in m) print m[k] }' "$_cache" > "$_cache.new" 2>/dev/null \
+			&& mv "$_cache.new" "$_cache" || rm -f "$_cache.new"
+	fi
+	return 0
+}
+
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）。
 # 列定义同时写在 luasrc/model/cbi/parentcontrol/tsv.lua（唯一解析器），改列必须两边一起改。
 #   stats_tsv brief  只输出 meta + entry（列表页够用，跳过历史/池/重置/计数器）
@@ -1758,6 +1871,13 @@ stats_tsv() { pc_uci_snap_begin; stats_tsv_inner "$@"; pc_uci_snap_drop; }
 stats_tsv_inner() {
 	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _di _dname _donl _k _snap _amf _akey _aapps
 	_brief="${1:-}"
+	# R74-A：`stats_tsv asn <target>…` 是**独立子命令**，只输出 asn 行，早退 —— 默认
+	# stats_tsv 的输出里必须一行 asn 都没有（首屏不变慢，测试也不依赖环境有没有 nslookup）。
+	if [ "$_brief" = "asn" ]; then
+		shift
+		pc_asn_report "$@"
+		return 0
+	fi
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac

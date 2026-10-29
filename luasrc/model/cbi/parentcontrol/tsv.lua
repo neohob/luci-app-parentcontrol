@@ -25,12 +25,16 @@ end
 --   diag    <entry_key> <name> <mac> <ip> <hostname> <online> <today_minutes> <first> <last>
 --   diagtgt <entry_key> <target> <today_minutes>
 --   diagday <YYYYMMDD> <entry_key> <mac> <minutes>
---   diagdaytgt <YYYYMMDD> <entry_key> <target> <minutes>
 --   appmap  <key> <行序号> <target>
---           —— 以上两行是第 1 轮的形状。**自第 2 轮起 Lua 侧不再解析它们**：名称分钟已改由
---              diagntoday/diagdayname 提供（D1-v2），「未归类」折算已下沉到采样侧（`.map` 补 0 行
---              + 越界折算）。shell 仍照旧导出（格式由 W244/W249 钉住），这里只留契约说明、
---              不留解析死代码（round66 L-7 二选一选了「删」）。
+--           —— 目标 → 名称行号（0 = 未归类）。第 1 轮引入、round66 L-7 删掉过（当时 Lua 侧
+--              不需要它），**round74（R74-C）重新解析**：「（未归类）」行要展开到具体目标，
+--              所需的目标集合只存在于这一行里（`.map` 只由 shell 读，Lua 拿不到）。
+--   diagdaytgt <YYYYMMDD> <key> <target> <minutes>
+--           —— 同上，按天×目标的分钟（R74-C 一起恢复解析）。
+--   asn     <target> <asn> <org>
+--           —— R74-A：Team Cymru 机械 ASN。**只在 `stats_tsv asn <target>…`（用户点开明细）
+--              时输出**，默认 stats_tsv 的首屏输出里一行都没有（D1：不在 tick/首屏路径查询）。
+--              org 可为空串（没查到 / IPv6 未查询）；asn 空串即「无归属信息」。
 --   appname <key> <行序号> <名称>
 --           —— 一个条目里「封锁名称行」的显示名（行序号从 1 起，与 apps 行序/`pc_apps_rows`
 --              一致；名称空的行已由 shell 回退成该行域名首项）。缺行（老 shell）=「无名称维度」。
@@ -50,6 +54,10 @@ function M.parse(raw)
 		app_names = {},
 		-- D9/D1-v2（第 2 轮）：名称维度的分钟（今天 / 历史日），采样侧写的 n 行
 		diag_n_today = {}, diag_day_name = {},
+		-- R74-C：目标 → 名称行号（0 = 未归类）与按天×目标的分钟（「（未归类）」明细用）
+		app_map = {}, diag_day_tgt = {},
+		-- R74-A：<target> → { asn = "20940", org = "AKAMAI-ASN1, NL" }（只在点开明细时才有）
+		asn = {},
 		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
 		-- 保持空表 —— 下游回退「条目 #N」，永不裸 key，向后兼容。
 		names = {},
@@ -122,14 +130,31 @@ function M.parse(raw)
 					d.diag_n_today[ky][num(f[3])] = num(f[4])
 				end
 			elseif k == "diagdayname" then
-				local dt = f[2]
 				local ky = f[3]
+				local dt = f[2]
 				if dt and ky then
 					d.diag_day_name[dt] = d.diag_day_name[dt] or {}
 					local per = d.diag_day_name[dt][ky]
 					if not per then per = {}; d.diag_day_name[dt][ky] = per end
 					per[num(f[4])] = num(f[5])
 				end
+			elseif k == "appmap" then
+				-- R74-C：<key> <行序号> <target> ⇒ d.app_map[key][target] = nr
+				local ky = f[2]
+				if ky and f[4] then
+					d.app_map[ky] = d.app_map[ky] or {}
+					d.app_map[ky][f[4]] = num(f[3])
+				end
+			elseif k == "diagdaytgt" then
+				-- R74-C：<YYYYMMDD> <key> <target> <分钟> ⇒ d.diag_day_tgt[dt][key.."|"..target]
+				local dt = f[2]
+				if dt and f[3] and f[4] then
+					d.diag_day_tgt[dt] = d.diag_day_tgt[dt] or {}
+					d.diag_day_tgt[dt][f[3] .. "|" .. f[4]] = num(f[5])
+				end
+			elseif k == "asn" then
+				-- R74-A：<target> <asn> <org>（org 可为空串；asn 空串 = 无归属信息）
+				if f[2] then d.asn[f[2]] = { asn = f[3] or "", org = f[4] or "" } end
 			end
 		end
 	end
@@ -141,6 +166,23 @@ function M.read(brief)
 	local cmd = "/etc/init.d/parentcontrol stats_tsv"
 		.. (brief and " brief" or "") .. " 2>/dev/null"
 	return M.parse(sys.exec(cmd) or "")
+end
+
+-- R74-A：只查这几个目标的 ASN（用户点开「（未归类）」明细时才调用）。
+-- 返回 <target> → { asn, org }；查询失败/IPv6/未查到都是空串，**绝不在 Lua 侧臆造**。
+function M.read_asn(targets)
+	local list = targets or {}
+	if #list == 0 then return {} end
+	local q = {}
+	for _, t in ipairs(list) do
+		-- 目标串来自本地映射文件，仍按不可信处理：单引号吃掉外层引号、去掉换行。
+		local s = tostring(t):gsub("[\r\n]", ""):gsub("'", "")
+		if s ~= "" then q[#q + 1] = "'" .. s .. "'" end
+	end
+	if #q == 0 then return {} end
+	local d = M.parse(sys.exec("/etc/init.d/parentcontrol stats_tsv asn "
+		.. table.concat(q, " ") .. " 2>/dev/null") or "")
+	return d.asn or {}
 end
 
 return M

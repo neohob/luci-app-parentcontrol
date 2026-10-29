@@ -509,7 +509,62 @@ function M.collect(raw)
 					nr = nr, name = nm[nr] or ("名称 #" .. nr),
 					total = (nrec > 0) and total or nil, by = by }
 			end
-			if has0 then
+			-- R74-C（round74）：先算「（未归类）」的目标明细 —— 数据全部来自已有的
+			-- `appmap`（目标 → 行号）与 `diagtgt`/`diagdaytgt`（分钟），**不新增任何采样行**。
+			local subs, subs_more = nil, 0
+			do
+				local amap = (d.app_map or {})[key] or {}
+				local tmin = {}
+				for _, r in ipairs(d.diag_tgt or {}) do
+					if r.key == key then tmin[r.target] = r.minutes end
+				end
+				local n0 = 0
+				if today then n0 = (perday[today] or {})[0] or 0 end
+				local acc = {}
+				for tgt, anr in pairs(amap) do
+					if (tonumber(anr) or 0) == 0 then
+						local sby, stot, sn = {}, 0, 0
+						for _, day in ipairs(d.days) do
+							local v = ((d.diag_day_tgt or {})[day.date] or {})[key .. "|" .. tgt]
+							if v then sby[day.date] = v; stot = stot + v; sn = sn + 1 end
+						end
+						local a = (d.asn or {})[tgt]
+						local tmv = tmin[tgt]
+						acc[#acc + 1] = { target = tgt, today = tmv, by = sby,
+							total = (sn > 0) and stot or nil,
+							asn = (a and a.asn ~= "") and a.asn or nil,
+							org = (a and a.org ~= "") and a.org or nil,
+							-- design §4.2：未覆盖设备独占的目标有 t 行、但名字分钟只算名单内设备 ⇒
+							-- 不产生 n(0) 分钟。不标一句，用户看到「明细有 12 分钟、上面只有 3 分钟」
+							-- 会以为是 bug。（round74 实测：这一情形下 n 行根本没有 nr=0，
+							-- 故「（未归类）」行也全靠 #acc > 0 才出现 —— 见下。）
+							solo = ((tmv or 0) > 0 and n0 == 0) and true or nil }
+					end
+				end
+				-- 全序：今日分钟降序（无记录排最后），同分按目标名升序 —— 与其它表同口径。
+				table.sort(acc, function(a, b)
+					local am, bm = a.today or -1, b.today or -1
+					if am ~= bm then return am > bm end
+					return a.target < b.target
+				end)
+				if #acc > 20 then
+					subs_more = #acc - 20
+					for _ = #acc, 21, -1 do acc[_] = nil end
+				end
+				if #acc > 0 then
+					local m1 = kmeta[key]
+					subs = { head = { target = "目标",
+						today = "今天", total = "合计",
+						asn = "AS", org = "归属组织", note = "备注" },
+						keyname = (m1 and m1.name) or "（未知条目）",
+						key = key, device = dr.device, rows = acc }
+				end
+			end
+			-- 「（未归类）」行出现的条件：有 nr=0 的名称分钟记录（has0），
+			-- **或** 有 nr=0 目标的每目标分钟（subs）—— 后者是 round74 新增：未覆盖设备
+			-- 独占的目标永远不会有 n(0) 分钟（round73 减法把它们扣成 0），只看 has0 就会
+			-- 让这些目标在页面上彻底消失，「仅未覆盖设备命中」的标注也成了死代码。
+			if has0 or subs then
 				local by, total, nrec = {}, 0, 0
 				for _, day in ipairs(d.days) do
 					local v = (perday[day.date] or {})[0]
@@ -517,7 +572,8 @@ function M.collect(raw)
 				end
 				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
 					nr = 0, name = "（未归类）",
-					total = (nrec > 0) and total or nil, by = by }
+					total = (nrec > 0) and total or nil, by = by,
+					subs = subs, subs_more = subs_more }
 			end
 		end
 	end
@@ -670,6 +726,47 @@ function M.collect(raw)
 	for _, r in ipairs(d.key_rows or {}) do r.uncovered = uncbykey[r.key] or 0 end
 
 	return d
+end
+
+-- R74-A（round74）：机械 ASN 回填。**只在用户主动点开「（未归类）」明细时调用**
+-- （模板里看 `luci.http.formvalue("asn")`），走 `stats_tsv asn <target>…` 子命令：
+--   * 默认首屏 stats_tsv **不会**产生 asn 行，所以默认路径零 DNS、零延迟；
+--   * 7 天缓存落在 shell 侧 `$STATE_DIR/asn.cache`，Lua 不管缓存；
+--   * 归属信息来自 Team Cymru 公共 ASN 库，只说明「该目标落在哪个网络」，
+--     **不代表它是什么服务**（文案见 stats.htm）；
+--   * IPv6/域名串 shell 侧不查 ⇒ 本函数拿不到值 ⇒ 模板印「未查询」，绝不编。
+-- 返回填过的 target 个数（供模板/自检参考）。
+function M.load_asn(d)
+	if type(d) ~= "table" then return 0 end
+	local want, seen = {}, {}
+	for _, r in ipairs(d.dev_key_day_rows or {}) do
+		local subs = r.subs
+		if subs and subs.rows then
+			for _, s in ipairs(subs.rows) do
+				if s.target and not seen[s.target] then
+					seen[s.target] = true
+					want[#want + 1] = s.target
+				end
+			end
+		end
+	end
+	if #want == 0 then return 0 end
+	local asn = tsv.read_asn(want) or {}
+	local n = 0
+	for _, r in ipairs(d.dev_key_day_rows or {}) do
+		local subs = r.subs
+		if subs and subs.rows then
+			for _, s in ipairs(subs.rows) do
+				local a = asn[s.target]
+				if a then
+					s.asn = (a.asn ~= "") and a.asn or nil
+					s.org = (a.org ~= "") and a.org or nil
+					n = n + 1
+				end
+			end
+		end
+	end
+	return n
 end
 
 return M

@@ -1,6 +1,31 @@
 <%
 	local stats = require "luci.model.cbi.parentcontrol.statsdata"
 	local d = stats.collect()
+	-- R74-A：机械 ASN 只在用户主动点「查 ASN」时算（默认零 DNS、零等待）。
+	-- 怎么读开关：**直接读 `http.message.env.QUERY_STRING`**，既不调 `http.formvalue` 也不调
+	-- `http.getenv`。真机实测（ImmortalWrt 23.05 + ucode 版 LuCI）两个调用都不可用：
+	--   ① `http.formvalue("asn")` 抛在 C 侧（`this.parsed_input`），模板里接不住 ⇒ 整页 500；
+	--   ② `http.getenv`（dot 与 colon 两种形态都试）报
+	--      `Reference error: left-hand side expression is null` —— 它是 ucode 侧 userdata 闭包，
+	--      在模板里没有可用的 self。
+	-- 而模板里的 `http` 就是**请求对象**本身（`http.message.env` / `http.message.params` 都是
+	-- 普通 Lua 表），所以直接读字段最稳：没有跨语言调用、不会抛、沙箱里也能跑。
+	local _qs
+	local _env = http and http.message and http.message.env
+	-- 注意：`http` / `http.message` / `.env` 在真机是 **ucode 对象**（`type()` 报 userdata，
+	-- 但字段访问与 Lua 表一样），所以不能写 `type(_env) == "table"` —— 那样永远不会成立。
+	-- 只做 nil 判定 + tostring，两种实现都能过。
+	if _env ~= nil and _env.QUERY_STRING ~= nil then _qs = tostring(_env.QUERY_STRING) end
+	-- 注意：Lua 的 string.match **没有 alternation**（`(^|&)` 会当字面量，永不命中）——
+	-- 这里不用正则，改成把 `&` 统一成逗号再两头补逗号做子串判定。
+	local want_asn = false
+	if _qs then
+		local _norm = "," .. (string.gsub(_qs, "&", ",")) .. ","
+		want_asn = (string.find(_norm, ",asn=1,", 1, true) ~= nil)
+	end
+	if want_asn then stats.load_asn(d) end
+	-- 做法（二）：模板不直接读 `want_asn`（见下）—— 把开关放回 `d`，模板里一律走 `d.*`。
+	d.asn_requested = want_asn
 	local m = d.meta or {}
 	local T = translate
 	local function pct(v) return math.max(0, math.min(100, v or 0)) end
@@ -20,10 +45,15 @@
 	.pcbar > div { height: 100%; background: #4a7f4a; }
 	.pcbar.warn > div { background: #b8860b; }
 	.pcbar.full > div { background: #b04a4a; }
-	.pc-badge { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; }
+	.pc-badge { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; color: #f0f0f0; }
 	.pc-badge.ok { background: #2f5f2f; }
 	.pc-badge.bad { background: #6f2f2f; }
 	.pc-badge.off { background: #444; }
+	/* 徽标有两种形态：span 与 a。链接形态会继承主题的链接色（蓝 #4a7fd4 / 已访问紫 #a06fd4），
+	   压在暗红底(#6f2f2f)上对比度只有 1.9~2.7（WCAG 正文的要求是 4.5 以上），用户反馈「红底蓝/紫字看不清」。
+	   :visited 必须显式写 —— 只写 a.pc-badge 在部分浏览器里会被已访问色覆盖，那正是「紫字」的来源。 */
+	a.pc-badge:link, a.pc-badge:visited { color: #f0f0f0; text-decoration: none; }
+	a.pc-badge:hover, a.pc-badge:focus { color: #fff; text-decoration: underline; }
 	.pc-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; margin: 8px 0 2px; }
 	.pc-chart > div { flex: 1; background: #4a7f4a; min-height: 2px; position: relative; }
 	.pc-chart > div.nodata { background: #333; }
@@ -227,6 +257,25 @@
 				     条目子行（kind == "key"）的合计来自台账，恒有值，保持原样。 -->
 				<td><%=r.total or "-"%></td>
 			</tr>
+			<% --[[ R74-C：nr == 0 的「（未归类）」行带上每个具体目标的明细（子行的子行）。
+			   用同一个 data-pc-owner 跟着设备一起展开，不新增 JS（htdocs 不在本轮白名单）。
+			   字符串一律 pcdata()，数字是整数 —— 与 W207④ 裸输出白名单同口径。 ]] %>
+			<% if r.subs then %>
+			<% for _, s in ipairs(r.subs.rows) do %>
+			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" style="display:none">
+				<td><span class="muted">· <%=pcdata(s.target)%></span><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% elseif d.asn_requested then %> <span class="muted"><%=pcdata(T("未查询"))%></span><% end %><% if s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %></td>
+				<% for _, day in ipairs(d.days) do local v = s.by[day.date] %>
+				<td><%=v and v or "-"%></td>
+				<% end %>
+				<td><%=s.total or "-"%></td>
+			</tr>
+			<% end %>
+			<% if r.subs_more and r.subs_more > 0 then %>
+			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" style="display:none">
+				<td colspan="<%=#d.days + 2%>" class="muted"><%=T("另有 %d 个未归类目标未列出。"):format(r.subs_more)%></td>
+			</tr>
+			<% end %>
+			<% end %>
 			<% end %>
 			<% end %>
 		</table>
@@ -240,7 +289,8 @@
 		<br/><%=T("名称分钟是近似值：实现是「本条目打到该目标的总流量」减去「最近一次构建时列出的未覆盖设备的流量」。因此最近一次构建之后才出现的未覆盖设备，最多有一个采样周期的流量会落进名称分钟（下一分钟自愈）。")%>
 		<br/><%=T("名称分钟与条目分钟不同源：条目与设备条目子行按该设备自己的额度计数（字节阈值）计，名称分钟按上面那份设备集合打到该目标的总流量计。因此：① 名称分钟不是单台设备的分钟，不要与设备行、条目子行的分钟相加或相减；② 某一分钟里若流量分散在多个目标上、没有任何单个目标到阈值，这一分钟只会计入条目、不落到任何名称上，所以名称行合计不保证不少于条目分钟。")%>
 		<br/><%=T("名称格显示「-」有三种情形：① `.map` 存在但某天没有名称维度的记录（老数据、或那天没采样）；② 该条目当天没有装上诊断链（没有未覆盖设备）；③ 有链、当天也采到了名称分钟，但这段分钟全落在「（未归类）」行上（命中目标不在该条目的「封锁名称」里），所以具名的名称行是「-」而「（未归类）」有值。相反的，如果本机没有 `resolveip`（或还没跑过 IP 刷新），`.map` 不会生成 —— 这时名称行整块不会显示，而不是显示「-」。")%>
-		<br/><%=T("「（未归类）」这一行是把这个条目「命中了、但在「封锁名称」里找不到对应名称」的目标分钟合在一起，用来发现「是不是该给这个目标补一条封锁名称」。")%>
+		<br/><%=T("「（未归类）」这一行是把这个条目「命中了、但在「封锁名称」里找不到对应名称」的目标分钟合在一起，用来发现「是不是该给这个目标补一条封锁名称」。点开这一行能看到里面每个目标今天／合计各多少分钟，这一行的分钟与子项之间没有可依赖的大小关系：子项「今天」取的是该目标当天的命中分钟，而这一行只累计「名称分钟」那一份，只有未覆盖设备命中的目标不计入（子项分钟只来自「名称分钟」这条采样。）")%>
+		<br/><%=T("子表里的「AS」与「归属组织」只在点「查 ASN」后才有：归属信息来自 Team Cymru 公共 ASN 库（DNS TXT 查询），它只说明这个目标落在哪个网络（哪个运营方/云厂商），不代表该目标是什么服务、也不能作为封锁依据。查询结果缓存 7 天；IPv6 目标与域名串不查，显示「未查询」（不会凭推测填一个数字）。")%>
 		<br/><%=T("未覆盖设备按在线优先最多跟踪 8 台：超出的未覆盖设备不会出现在上面那份提醒里，也因此扣不掉，仍会计入名称分钟。另外，本次口径变更对历史数据不重算——升级前已记下的名称分钟保留原样。")%>
 		<br/><%=T("另外，升级/重启后的第一个采样周期按旧口径计（未覆盖部分尚未建立基线，因此该周期不扣减），每个名称最多多出 1 分钟；之后自愈。")%>
 		<br/><%=T("名称归属按「封锁名称」的行号记：只改名称文字不会影响历史；但增删或移动中间行后，历史分钟会按行号对齐到占该行的新名称，最长影响 30 天窗。")%>
@@ -306,6 +356,41 @@
 	</div>
 	<div class="muted" style="margin-top:6px">
 		<%=T("已停用/已删除条目的历史诊断计数仍保留，其封锁规则已清理。")%>
+	</div>
+	<% end %>
+
+	<!-- R74-C（round74）：「（未归类）」的每目标明细。数据全部来自已有 TSV 行（appmap /
+	     diagtgt / diagdaytgt），**没有新增采样**；ASN 默认不查（?asn=1 才查）。零命中连标题都不渲染。 -->
+	<% local _has_subs = 0 %><% for _, r in ipairs(d.dev_key_day_rows) do %><% if r.subs then _has_subs = _has_subs + 1 end %><% end %>
+	<% if _has_subs > 0 then %>
+	<h3><%=T("「（未归类）」里的目标明细")%></h3>
+	<div class="muted" style="margin-bottom:6px">
+		<%=T("上面矩阵里「（未归类）」那一行包含的目标，逐个列在这里（今日分钟降序）。同一目标的流量可能来自多台设备，这里不再拆。")%>
+		<% if not d.asn_requested then %>
+		<a class="btn cbi-button cbi-button-neutral cbi-button-small" href="?asn=1"><%=T("查 ASN（归属网络）")%></a>
+		<% end %>
+	</div>
+	<% for _, r in ipairs(d.dev_key_day_rows) do %><% if r.subs then %>
+	<table style="margin-bottom:10px">
+		<tr><th colspan="6" style="text-align:left"><%=pcdata(r.subs.device)%> · <%=pcdata(r.subs.keyname)%></th></tr>
+		<tr><th><%=pcdata(r.subs.head.target)%></th><th class="num"><%=pcdata(r.subs.head.today)%></th>
+			<th class="num"><%=pcdata(r.subs.head.total)%></th><th><%=pcdata(r.subs.head.asn)%></th>
+			<th><%=pcdata(r.subs.head.org)%></th><th><%=pcdata(r.subs.head.note)%></th></tr>
+		<% for _, s in ipairs(r.subs.rows) do %>
+		<tr><td><%=pcdata(s.target)%></td>
+			<td class="num"><%=pcdata(tostring(s.today or "-"))%></td>
+			<td class="num"><%=pcdata(tostring(s.total or "-"))%></td>
+			<td><%=pcdata(s.asn or T("未查询"))%></td>
+			<td><%=pcdata(s.org or "-")%></td>
+			<td class="muted"><%=pcdata(s.solo and T("仅未覆盖设备命中（不计入名称分钟）") or "-")%></td></tr>
+		<% end %>
+	</table>
+	<% if r.subs_more > 0 then %>
+	<div class="muted" style="margin:-6px 0 10px"><%=T("另有 ")%><%=r.subs_more%><%=T(" 个目标未列出（按今日分钟降序取前 20）。")%></div>
+	<% end %>
+	<% end %><% end %>
+	<div class="muted" style="margin-bottom:6px">
+		<%=T("目标后随的「仅未覆盖设备命中（不计入名称分钟）」表示：这一目标的分钟全部来自未在条目设备名单里的设备，因此只记在这一行、不计入任何具体名称行（名称为「-」）。")%>
 	</div>
 	<% end %>
 
