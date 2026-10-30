@@ -277,7 +277,7 @@
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferOne(this)"
 						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("推测是什么")%></button><span class="muted" data-pc-infer="1"></span>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcApplyOne(this)"
-						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>" data-pc-name="<%=pcdata(s.service or "")%>"><%=T("归入条目")%></button><span class="muted" data-pc-apply="1"></span>
+						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>" data-pc-name="<%=pcdata((s.service and s.service ~= "未知" and s.service ~= "未查询") and s.service or "")%>"><%=T("归入条目")%></button><span class="muted" data-pc-apply="1"></span>
 				</td>
 				<% for _, day in ipairs(d.days) do local v = s.by[day.date] %>
 				<td><%=v and v or "-"%></td>
@@ -365,7 +365,7 @@
 							tl[#tl + 1] = tg.target .. "(" .. tg.minutes .. ")"
 						end
 					%>
-					<%=pcdata(table.concat(tl, "、"))%>
+					<%=pcdata(table.concat(tl, "、"))%><% if r.targets_more and r.targets_more > 0 then %> <span class="muted"><%=T("另有")%> <%=r.targets_more%> <%=T("个目标未列出（按今日分钟降序只列前 10 个）")%></span><% end %>
 				<% else %>-<% end %>
 			</td>
 		</tr>
@@ -548,10 +548,17 @@
 	}
 
 	// 包一层设备级展开：先让 pc-ui.js 按设备开合所有 data-pc-owner 行，再收敛明细行。
+	// R76-M1：pc-ui.js 的 pcMatrixToggle 用「任一 data-pc-owner 行是 display:none ⇒ 认为
+	// 已收起 ⇒ 本次展开」推断状态；而明细行（pc-matrix-sub）也带 data-pc-owner 且默认
+	// display:none ⇒ 判定永远得到「已收起」⇒ 设备行只能展开、永远收不起来（标题
+	// 「点击展开/收起明细」就成了假话）。所以调 base 之前先把明细行全置为可见，
+	// 让 base 的状态扫描只看条目行/名称行；base 之后再由 pcSubResync 把明细收敛回去。
 	(function () {
 		var base = window.pcMatrixToggle;
 		if (typeof base !== 'function') return;
 		window.pcMatrixToggle = function (tr) {
+			var subs = document.querySelectorAll('tr[data-pc-subowner]');
+			for (var n = 0; n < subs.length; n++) { subs[n].style.display = ''; }
 			base(tr);
 			pcSubResync();
 		};

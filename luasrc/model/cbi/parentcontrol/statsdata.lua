@@ -144,6 +144,19 @@ function M.service_name(ptr, org)
 	return "未知"
 end
 
+-- R76-M2（round76b）：asn 行「到底查到了没有」的判定必须容忍 nil。
+-- 旧版 tsv.lua（<= v1.8.12）没有 ptr 字段，`asn <t> <空> <空>` 行也可能只切出 3 段
+-- ⇒ `a.ptr` 是 nil，而 `nil ~= ""` 为真 ⇒ 空票被当成「查到了」⇒ 服务名落到
+-- M.service_name("","") 的兜底「未知」（真机实测：`?asn=1` 时「未知」被预填进
+-- data-pc-name，用户点「归入条目」就把「未知」写进 uci apps）。所以这里统一取默认空串。
+local function asn_hit(a)
+	if not a then return false, nil, nil end
+	local asn, org, ptr = a.asn or "", a.org or "", a.ptr or ""
+	if asn == "" and org == "" and ptr == "" then return false, nil, nil end
+	return true, ptr, org
+end
+
+
 -- 采集 + 分析
 -- A38 惯例：raw 是**可选的测试缝**（直喂人造 TSV 跑归约）。生产调用一律不传参。
 function M.collect(raw)
@@ -543,18 +556,22 @@ function M.collect(raw)
 						end
 						local a = (d.asn or {})[tgt]
 						local tmv = tmin[tgt]
-						-- R76-A：服务名只能是「实测数据的派生」—— 查过（asn 行存在）⇒
-						-- PTR 的可注册域 / ASN 组织名第一段 / 未知；没查过 ⇒ service 留空，
-						-- 模板按 d.asn_requested 显示「未查询」。
+						-- R76-A / R76-M2：服务名只能是「实测数据的派生」。
+						-- shell 对**不可查**的目标（IPv6 / 域名 / 私网保留）也发空票行
+						-- `asn <t> <空> <空> <空>`，所以 `a ~= nil` 不等于「查到了东西」——
+						-- 必须三段都空才算没查到：否则 service 会落到 M.service_name("","")
+						-- 的兜底「未知」，既与页面「IPv6 显示「未查询」」的说明自相矛盾，
+						-- 又会被 data-pc-name 预填成封锁名称（把「未知」写进 uci apps）。
+						local hit, hptr, horg = asn_hit(a)
 						local svc
-						if a then svc = M.service_name(a.ptr, a.org) end
+						if hit then svc = M.service_name(hptr, horg) end
 						acc[#acc + 1] = { target = tgt, today = tmv, by = sby,
 							total = (sn > 0) and stot or nil,
-							asn = (a and a.asn ~= "") and a.asn or nil,
-							org = (a and a.org ~= "") and a.org or nil,
-							ptr = (a and a.ptr ~= "") and a.ptr or nil,
+							asn = (a and (a.asn or "") ~= "") and a.asn or nil,
+							org = (a and (a.org or "") ~= "") and a.org or nil,
+							ptr = (a and (a.ptr or "") ~= "") and a.ptr or nil,
 							service = svc,
-							queried = a and true or nil,
+							queried = hit and true or nil,
 							-- design §4.2：未覆盖设备独占的目标有 t 行、但名称分钟只算名单内
 							-- 设备 ⇒ 不产生 n(0) 分钟。不标一句，用户看到「明细有 12 分钟、
 							-- 上面只有 3 分钟」会以为是 bug。
@@ -695,11 +712,26 @@ function M.collect(raw)
 	--    行 = (条目, MAC)：按今日命中分钟降序；每行带 30 天按天合计（与 d.days 对齐、缺日补零）。
 	--    目标列表**仅在**该条目只有一台未覆盖客户端有命中时内联；多台时标注「目标未区分设备」。
 	-- 诊断区沿用上面的 dlabel/dstate（已并入权威名单 d.names，含 off/gone）。
-	local tgt_by_key = {}
+	-- R76-L1：诊断面板的「命中过的目标」也必须受折叠口径约束 —— 它对每个条目把当天所有
+	-- 目标全列出来（实测 30+ 条），绕过了矩阵里「只列前 10、其余收起」。这里按与矩阵
+	-- 完全相同的规则截断：今日分钟降序、同分按目标名升序，第 11 条起只留计数。
+	local DIAG_TOP = 10
+	local tgt_by_key, tgt_more = {}, {}
 	for _, tg in ipairs(d.diag_tgt or {}) do
 		tgt_by_key[tg.key] = tgt_by_key[tg.key] or {}
 		local l = tgt_by_key[tg.key]
 		l[#l + 1] = { target = tg.target, minutes = tg.minutes }
+	end
+	for k, l in pairs(tgt_by_key) do
+		table.sort(l, function(a, b)
+			local am, bm = a.minutes or 0, b.minutes or 0
+			if am ~= bm then return am > bm end
+			return a.target < b.target
+		end)
+		if #l > DIAG_TOP then
+			tgt_more[k] = #l - DIAG_TOP
+			for _ = #l, DIAG_TOP + 1, -1 do l[_] = nil end
+		end
 	end
 	local drows = {}
 	for _, r in ipairs(d.diag or {}) do
@@ -741,6 +773,7 @@ function M.collect(raw)
 	for _, r in ipairs(drows) do
 		if perkey[r.key] == 1 then
 			r.targets = tgt_by_key[r.key] or {}
+			r.targets_more = tgt_more[r.key]
 		else
 			r.multi = true
 		end
@@ -827,12 +860,20 @@ function M.load_asn(d)
 			for _, s in ipairs(subs.rows) do
 				local a = asn[s.target]
 				if a then
-					s.asn = (a.asn ~= "") and a.asn or nil
-					s.org = (a.org ~= "") and a.org or nil
+					local hit, hptr, horg = asn_hit(a)
+					s.asn = ((a.asn or "") ~= "") and a.asn or nil
+					s.org = ((a.org or "") ~= "") and a.org or nil
+					s.ptr = ((a.ptr or "") ~= "") and a.ptr or nil
 					-- 服务名必须在拿到 ptr/org 之后重算：`unc_row()` 建行时 d.asn 还是空的
 					-- （read_asn 只在 `?asn=1` 才跑），那时 service 必然是 nil；
 					-- 不在这里回填，页面就会永远印「未查询」——实测真机就是这样。
-					s.service = M.service_name(a.ptr, a.org)
+					-- R76-M2：但「空票」不算查到 —— shell 对 IPv6/域名/私网也发
+					-- `asn <t> <空> <空> <空>` 行，若在这里无条件算服务名，就会落到
+					-- M.service_name("","") 的兜底「未知」：页面说明写着「IPv6 显示
+					-- 「未查询」」自相矛盾，且 data-pc-name 会被预填成「未知」，
+					-- 用户点「归入条目」就把「未知」当封锁名称写进 uci apps。
+					s.queried = hit and true or nil
+					if hit then s.service = M.service_name(hptr, horg) end
 					n = n + 1
 				end
 			end
