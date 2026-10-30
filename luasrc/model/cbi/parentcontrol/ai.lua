@@ -801,9 +801,19 @@ end
 
 -- 纯函数：给定 apps 原文，把 target 归到 name 名下。不碰 uci、不碰文件。
 -- 返回 { ok, action = "appended"|"created"|"exists", text = <新文本>, error }
+-- R76B-L1（round76c）：**后端**也要拒「未知」/「未查询」这两个哨兵。
+-- 它们是页面上的占位文案（服务名查不到时显示），不是用户起的封锁名称；前端
+-- `data-pc-name` 已滤掉，但后端是唯一写入点，不能只靠前端 —— 复审实测
+-- `apply_entry(name="未知")` 仍会 ok/created 并 commit+reload 写进 uci apps。
+-- 注意：不许把哨兵改成不可见字符来「绕过」（会让日志/UI 不可读），就按字面拒。
+local SENTINEL_NAMES = { ["未知"] = true, ["未查询"] = true }
+
 function M.apply_name(apps, target, name)
 	if not M.valid_name(name) then
 		return { ok = false, error = T("名称不合法（不能为空、不超过 64 字、不含竖线与换行）") }
+	end
+	if SENTINEL_NAMES[trim(name)] then
+		return { ok = false, error = T("「未知」/「未查询」是页面占位文案，不能当作封锁名称") }
 	end
 	if not M.valid_target(target) then
 		return { ok = false, error = T("目标不合法（需是 IP、CIDR 或域名）") }

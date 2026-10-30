@@ -557,6 +557,12 @@ function M.collect(raw)
 						local a = (d.asn or {})[tgt]
 						local tmv = tmin[tgt]
 						-- R76-A / R76-M2：服务名只能是「实测数据的派生」。
+						-- R76B-I1（round76c）路径口径：**生产不可达** —— 默认 `stats_tsv`
+						-- 不带 asn 行，`d.asn` 恒为空表，所以这里的 `hit` 恒为 false；真正
+						-- 回填服务名的是下面 `M.load_asn()`（`?asn=1` 时才跑）。这里保留
+						-- 同一判据的理由：`M.collect(raw)` 测试缝可直接喂 asn 行，两条路径
+						-- 必须同口径，否则测试缝与生产行为分叉（round76b 就是靠这条缝发现
+						-- `nil ~= ""` 的）。**不是死代码，别删。**
 						-- shell 对**不可查**的目标（IPv6 / 域名 / 私网保留）也发空票行
 						-- `asn <t> <空> <空> <空>`，所以 `a ~= nil` 不等于「查到了东西」——
 						-- 必须三段都空才算没查到：否则 service 会落到 M.service_name("","")
@@ -864,6 +870,9 @@ function M.load_asn(d)
 					s.asn = ((a.asn or "") ~= "") and a.asn or nil
 					s.org = ((a.org or "") ~= "") and a.org or nil
 					s.ptr = ((a.ptr or "") ~= "") and a.ptr or nil
+					-- R76B-I1（round76c）：这是服务名的**唯一生产路径**（`?asn=1` 时
+					-- tsv.read_asn 才有数据）。上面 `unc_row()` 那处同判据在生产不可达，
+					-- 两处刻意保持同一口径（asn_hit）以防漂移 —— 改一处必须改两处。
 					-- 服务名必须在拿到 ptr/org 之后重算：`unc_row()` 建行时 d.asn 还是空的
 					-- （read_asn 只在 `?asn=1` 才跑），那时 service 必然是 nil；
 					-- 不在这里回填，页面就会永远印「未查询」——实测真机就是这样。
