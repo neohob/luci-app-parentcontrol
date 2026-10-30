@@ -1771,26 +1771,32 @@ hosts_tsv() {
 # ============================================================================
 # R74-A：机械 ASN（Team Cymru 公共 TXT 库）—— 只在用户点开「（未归类）」明细时按需查
 # ============================================================================
-# 为什么走 TXT 而不走 PTR：PTR 不可靠（23.11.207.1 直接 NXDOMAIN，但 Cymru 有记录），
-# 而且 PTR 只能给出反解名字，给不出「归属哪个 AS / 哪个组织」。
+# 为什么走 TXT 而不只走 PTR：PTR 不可靠（23.11.207.1 直接 NXDOMAIN，但 Cymru 有记录），
+# 而且 PTR 只能给出反解名字，给不出「归属哪个 AS / 哪个组织」。反过来 PTR 能给 ASN 给不出的
+# 东西（具体主机名 ⇒ 可注册域，比 AS 组织名更像「服务」），所以 round76 起两条**都查**：
+#   PTR 命中 ⇒ 服务名用 PTR 的可注册域；没 PTR ⇒ 退 ASN 组织名第一段；都没 ⇒ 未知。
 # 设备上没有 whois/dig/host，只有 busybox nslookup（真机实测 -type=TXT 可用）：
 #   nslookup -type=TXT 207.11.23.1.origin.asn.cymru.com → text = "20940 | 23.11.207.0/24 | US | arin | …"
 #   nslookup -type=TXT AS20940.asn.cymru.com          → text = "20940 | NL | ripencc | 2001-07-10 | AKAMAI-ASN1, NL"
-# 输出只给「AS 号 + 组织名」。归属信息只说明该目标落在哪个网络，**不代表它是什么服务**。
-# 缓存：$STATE_DIR/asn.cache，一行 <target>\t<expiry_epoch>\t<asn>\t<org>，有效期 7 天。
-# 查过但没结果也要缓存（空 asn/org），否则每次点开都重跑一遍 DNS。
+#   nslookup -type=PTR 0.173.45.23.in-addr.arpa       → name = a23-45-173-0.deploy.static.akamaitechnologies.com.
+# 归属/反解信息只说明该目标落在哪个网络，**不代表我们识别出了它是什么服务**（页面必须这么写）。
+# 缓存：$STATE_DIR/asn.cache，一行 <target>\t<expiry_epoch>\t<asn>\t<org>\t<ptr>，有效期 7 天。
+# 第 5 段（ptr）是 round76 新增的 —— **4 段旧行必须照旧能读**（ptr 当空串，不重写不丢弃）。
+# 查过但没结果也要缓存（空 asn/org/ptr），否则每次点开都重跑一遍 DNS。
 # 绝不在 tick 路径上：默认 stats_tsv 输出里一个 asn 行都没有（见 stats_tsv_inner 的分发）。
 PC_ASN_TTL=${PC_ASN_TTL:-604800}
 PC_ASN_MAX=${PC_ASN_MAX:-12}
 
-pc_asn_cache_line() { # $1=target → 打印 "<hit>\t<asn>\t<org>"（hit=1 仅当缓存未过期）
+pc_asn_cache_line() { # $1=target → 打印 "<hit>\t<asn>\t<org>\t<ptr>"（hit=1 仅当缓存未过期）
 	local _cache _now
 	_cache="$STATE_DIR/asn.cache"
-	[ -f "$_cache" ] || { printf '0\t\t'; return 0; }
+	[ -f "$_cache" ] || { printf '0\t\t\t'; return 0; }
 	_now=$(date +%s)
+	# R76-A（round76）：第 5 段是 PTR 反查主机名。**向后兼容 4 段旧行**（读不到 $5 就当
+	# 空 PTR —— 不许报错、不许因为缓存是老格式就丢弃它，否则升级后要重查一遍全网）。
 	awk -F'\t' -v t="$1" -v now="$_now" '
-		$1 == t && NF >= 4 && $2 + 0 > now { h = 1; a = $3; o = $4 }
-		END { printf "%s\t%s\t%s", (h ? 1 : 0), a, o }' "$_cache" 2>/dev/null
+		$1 == t && NF >= 4 && $2 + 0 > now { h = 1; a = $3; o = $4; p = $5 }
+		END { printf "%s\t%s\t%s\t%s", (h ? 1 : 0), a, o, p }' "$_cache" 2>/dev/null
 }
 
 pc_asn_query() { # $1=IPv4（无掩码） → 打印 "<asn>\t<org>"（任何失败都给空串，绝不猜）
@@ -1806,6 +1812,24 @@ pc_asn_query() { # $1=IPv4（无掩码） → 打印 "<asn>\t<org>"（任何失�
 	# 组织名在第 5 段（AKAMAI-ASN1, NL）。可能含逗号/&/' ⇒ 去掉 Tab/CR/LF 再落盘/输出。
 	_org=$(printf '%s\n' "$_raw" | awk -F'|' 'NF >= 5 { v = $5; gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }' | tr -d '\t\r\n')
 	printf '%s\t%s' "$_asn" "$_org"
+}
+
+# R76-A（round76）：PTR 反查。只对**已通过 pc_asn_queryable 的公网 IPv4** 调用（私网/保留/
+# IPv6/域名一律不查，调用点如下 pc_asn_report 只传 $_q）。失败/无结果一律空串，**绝不猜**：
+# 页面的服务名是「PTR 的**可注册域** ⇒ 没有就 ASN 组织名第一段 ⇒ 都没有显示未知」，
+# 任何一环都不允许凭空造品牌名。busybox nslookup 默认就是 PTR 查询，两种输出形态都认：
+#   nslookup -type=PTR 0.173.45.23.in-addr.arpa → `0.173.45.23.in-addr.arpa\tname = host.example.com.`
+#   默认形态                                     → `Name:    host.example.com`
+pc_ptr_query() { # $1=IPv4（无掩码） → 打印 PTR 主机名（失败给空串）
+	local _rev _raw _ptr
+	command -v nslookup >/dev/null 2>&1 || return 0
+	_rev=$(printf '%s\n' "$1" | awk -F. 'NF >= 4 { printf "%s.%s.%s.%s", $4, $3, $2, $1 }')
+	[ -n "$_rev" ] || return 0
+	_raw=$(nslookup -type=PTR "$_rev.in-addr.arpa" 2>/dev/null)
+	_ptr=$(printf '%s\n' "$_raw" | sed -n 's/.*name = \(.*\)$/\1/p' | head -1)
+	[ -n "$_ptr" ] || _ptr=$(printf '%s\n' "$_raw" | sed -n 's/^[[:space:]]*[Nn]ame:[[:space:]]*\([^[:space:]]*\)$/\1/p' | head -1)
+	_ptr=${_ptr%.}
+	printf '%s' "$_ptr"
 }
 
 # 目标能不能查：只认「IPv4 或 IPv4/nn」，且**必须是公网地址**。IPv6 与域名串不查
@@ -1836,8 +1860,8 @@ pc_asn_queryable() { # $1=target → 打印要查询的 IPv4（不可查则空�
 	}'
 }
 
-pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org>`
-	local _t _rest _hit _asn _org _q _cnt _cache _now _exp
+pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org> <ptr>`
+	local _t _rest _hit _asn _org _ptr _q _cnt _cache _now _exp
 	_cache="$STATE_DIR/asn.cache"
 	mkdir -p "$STATE_DIR"
 	_now=$(date +%s)
@@ -1850,29 +1874,35 @@ pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org>`
 		_hit=${_rest%%"$TAB"*}
 		_rest=${_rest#*"$TAB"}
 		_asn=${_rest%%"$TAB"*}
-		_org=${_rest#*"$TAB"}
+		_rest=${_rest#*"$TAB"}
+		_org=${_rest%%"$TAB"*}
+		_ptr=${_rest#*"$TAB"}
 		if [ "$_hit" = "1" ]; then
-			printf 'asn\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org"
+			printf 'asn\t%s\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org" "$_ptr"
 			continue
 		fi
 		_q=$(pc_asn_queryable "$_t")
 		if [ -z "$_q" ]; then
-			# IPv6 / 域名串：不查询、不缓存，直接空票（页面渲染「未查询」）。
-			printf 'asn\t%s\t\t\n' "$_t"
+			# IPv6 / 域名串 / 私网 / 保留：不查询、不缓存，直接空票（页面渲染「未查询」）。
+			# PTR 同理 —— 它也只在这个分支之外被调用，绝不为不可查目标发 DNS。
+			printf 'asn\t%s\t\t\t\n' "$_t"
 			continue
 		fi
 		if [ "$_cnt" -ge "$PC_ASN_MAX" ]; then
 			# 配额用完：本次不查也不缓存，留给下一次点开（否则会写一条假「无结果」）。
-			printf 'asn\t%s\t\t\n' "$_t"
+			printf 'asn\t%s\t\t\t\n' "$_t"
 			continue
 		fi
 		_cnt=$((_cnt + 1))
 		_rest=$(pc_asn_query "$_q")
 		_asn=${_rest%%"$TAB"*}
 		_org=${_rest#*"$TAB"}
+		# R76-A：同一个已过滤的 IPv4，最多再加 1 次 PTR 查询（每目标 ≤ 3 次 DNS：
+		# origin.asn + AS<asn>.asn + PTR）。ASN 查不到也照样试 PTR —— 反解名可能还在。
+		_ptr=$(pc_ptr_query "$_q")
 		_exp=$((_now + PC_ASN_TTL))
-		printf '%s\t%s\t%s\t%s\n' "$_t" "$_exp" "$_asn" "$_org" >> "$_cache" 2>/dev/null
-		printf 'asn\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org"
+		printf '%s\t%s\t%s\t%s\t%s\n' "$_t" "$_exp" "$_asn" "$_org" "$_ptr" >> "$_cache" 2>/dev/null
+		printf 'asn\t%s\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org" "$_ptr"
 	done
 	# 紧凑化缓存（同一 target 后写覆盖先写；否则文件会随目标变动无限长）。
 	if [ -f "$_cache" ]; then

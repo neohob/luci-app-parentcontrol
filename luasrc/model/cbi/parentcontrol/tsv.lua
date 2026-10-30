@@ -31,10 +31,12 @@ end
 --              所需的目标集合只存在于这一行里（`.map` 只由 shell 读，Lua 拿不到）。
 --   diagdaytgt <YYYYMMDD> <key> <target> <minutes>
 --           —— 同上，按天×目标的分钟（R74-C 一起恢复解析）。
---   asn     <target> <asn> <org>
+--   asn     <target> <asn> <org> <ptr>
 --           —— R74-A：Team Cymru 机械 ASN。**只在 `stats_tsv asn <target>…`（用户点开明细）
 --              时输出**，默认 stats_tsv 的首屏输出里一行都没有（D1：不在 tick/首屏路径查询）。
 --              org 可为空串（没查到 / IPv6 未查询）；asn 空串即「无归属信息」。
+--              round76（R76-A）加第 5 段 `<ptr>`：PTR 反查主机名（只对公网 IPv4 查，IPv6/域名/
+--              私网一律空串 = 「未查询」）。缺第 5 段（老 shell 的输出）= 空串，照旧能解析。
 --   appname <key> <行序号> <名称>
 --           —— 一个条目里「封锁名称行」的显示名（行序号从 1 起，与 apps 行序/`pc_apps_rows`
 --              一致；名称空的行已由 shell 回退成该行域名首项）。缺行（老 shell）=「无名称维度」。
@@ -56,7 +58,8 @@ function M.parse(raw)
 		diag_n_today = {}, diag_day_name = {},
 		-- R74-C：目标 → 名称行号（0 = 未归类）与按天×目标的分钟（「（未归类）」明细用）
 		app_map = {}, diag_day_tgt = {},
-		-- R74-A：<target> → { asn = "20940", org = "AKAMAI-ASN1, NL" }（只在点开明细时才有）
+		-- R74-A：<target> → { asn = "20940", org = "AKAMAI-ASN1, NL", ptr = "a23-45-…" }
+		-- （只在点开明细时才有；ptr 是 round76 新增，缺省空串）
 		asn = {},
 		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
 		-- 保持空表 —— 下游回退「条目 #N」，永不裸 key，向后兼容。
@@ -154,7 +157,10 @@ function M.parse(raw)
 				end
 			elseif k == "asn" then
 				-- R74-A：<target> <asn> <org>（org 可为空串；asn 空串 = 无归属信息）
-				if f[2] then d.asn[f[2]] = { asn = f[3] or "", org = f[4] or "" } end
+				-- round76：第 5 段是 PTR 反查主机名，老 shell 不给 ⇒ 空串（向后兼容）
+				if f[2] then
+					d.asn[f[2]] = { asn = f[3] or "", org = f[4] or "", ptr = f[5] or "" }
+				end
 			end
 		end
 	end
@@ -169,7 +175,7 @@ function M.read(brief)
 end
 
 -- R74-A：只查这几个目标的 ASN（用户点开「（未归类）」明细时才调用）。
--- 返回 <target> → { asn, org }；查询失败/IPv6/未查到都是空串，**绝不在 Lua 侧臆造**。
+-- 返回 <target> → { asn, org, ptr }；查询失败/IPv6/未查到都是空串，**绝不在 Lua 侧臆造**。
 function M.read_asn(targets)
 	local list = targets or {}
 	if #list == 0 then return {} end

@@ -105,6 +105,45 @@ function M.invariants(d)
 	return drift
 end
 
+-- R76-A（round76）：把「查到的实测数据」派生成一个**服务名**。
+-- 输入只能是 PTR 反查主机名与 ASN 组织名 —— **不许**把 IP/目标串当服务名，也不许臆造品牌名。
+--   有 PTR ⇒ 取可注册域（去掉机器名前缀，末两段；末两段是 co.uk/com.cn 这类二级后缀时取三段）
+--              a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com
+--              server-13-32-1-1.cloudfront.net                    ⇒ cloudfront.net
+--   无 PTR、有 org ⇒ 组织名第一段（逗号前）：AKAMAI-ASN1, NL ⇒ AKAMAI-ASN1
+--   都没有 ⇒ "未知"（页面据此显示未知，而不是编一个名字）
+-- 纯函数、无副作用、无 IO —— W271 直接喂夹具单测。
+local SLD2 = {
+	["co.uk"] = true, ["org.uk"] = true, ["ac.uk"] = true, ["gov.uk"] = true,
+	["com.cn"] = true, ["net.cn"] = true, ["org.cn"] = true, ["gov.cn"] = true,
+	["edu.cn"] = true, ["com.au"] = true, ["net.au"] = true, ["co.jp"] = true,
+	["co.kr"] = true, ["com.br"] = true, ["com.tw"] = true, ["com.hk"] = true,
+	["com.sg"] = true, ["co.nz"] = true, ["co.in"] = true, ["com.mx"] = true,
+	["com.tr"] = true, ["com.ru"] = true, ["co.za"] = true,
+}
+function M.service_name(ptr, org)
+	local p = tostring(ptr or ""):gsub("%s+$", ""):gsub("%.$", "")
+	p = p:lower()
+	if p ~= "" then
+		local lab = {}
+		for seg in p:gmatch("[^.]+") do lab[#lab + 1] = seg end
+		local n = #lab
+		if n >= 3 then
+			local two = lab[n - 1] .. "." .. lab[n]
+			if SLD2[two] then return lab[n - 2] .. "." .. two end
+			return two
+		end
+		return p   -- 1 或 2 段：本身已是可注册域（或单标签主机名），原样用
+	end
+	local o = tostring(org or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if o ~= "" then
+		local first = o:match("^([^,]+)") or o
+		first = first:gsub("^%s+", ""):gsub("%s+$", "")
+		if first ~= "" then return first end
+	end
+	return "未知"
+end
+
 -- 采集 + 分析
 -- A38 惯例：raw 是**可选的测试缝**（直喂人造 TSV 跑归约）。生产调用一律不传参。
 function M.collect(raw)
@@ -470,47 +509,21 @@ function M.collect(raw)
 			-- D5：单条目但该条目 ≥2 个名称行 ⇒ 子行改成名称（两种子行互斥）
 			nmode = (name_n(keys[1].key) >= 2)
 		end
-		kdrows[#kdrows + 1] = { kind = "dev", device = dr.device,
-			total = dr.total, nkey = #keys, by = dr.by, only = only,
-			nname = nmode and name_n(keys[1].key) or 0,
-			expandable = ((#keys >= 2) or nmode) }
-		if #keys >= 2 then                      -- A3：单条目设备不产子行
-			for _, k in ipairs(keys) do
-				local m = kmeta[k.key]
-				kdrows[#kdrows + 1] = { kind = "key", device = dr.device,
-					key = k.key,
-					-- A20/I1：回退链的最后一档**不许**是裸 key（`weburl_3` 之类内部
-					-- 名字会漏到页面上）。kmeta 缺项时给可读占位，绝不回显 key。
-					name = m and m.name or "（未知条目）",
-					stale = (m and m.stale) or false,
-					total = k.total, by = k.by }
-			end
-		elseif nmode then
-			-- D5：单条目 ≥2 个名称行 ⇒ 子行改成「名称」（与条目子行互斥，不叠加）。
-			-- 行序 = apps 行序；未归类（nr 0，如目标已不在任何名称行）排最后。
-			-- L5：**没有记录的日期留空（模板印 `-`）**，不填 0 —— 与条目子行同口径，
-			-- 否则 30 列全 0 会把「哪天真的有量」淹掉。
-			local key = keys[1].key
-			local nm = nrnames[key] or {}
+		-- R76-D（round76）：「（未归类）」行 + 每目标明细（subs）**抽成共用逻辑**。
+		-- 之前它只在 `elseif nmode then`（单条目设备 + ≥2 个名称行）里算 ⇒ 多条目设备、
+		-- 单名称条目根本没有这一行（用户看到的「没有归入按钮」就是这个原因）。
+		-- 现在的规则：**只要该 (设备, 条目) 有未归类数据**（窗口内有 nr=0 的名称分钟，
+		-- 或该条目有 appmap 里 nr=0 的目标），就生成一行 kind="name"/nr=0 并挂 subs。
+		-- 具名名称行仍然**只在 nmode 为真时**出现（多条目设备只补「（未归类）」这一行，
+		-- 不把每个名称都铺开 —— 那会让表爆炸）。
+		local function unc_row(key)
 			local perday = kdayname[key] or {}
 			local has0 = false
 			for _, day in ipairs(d.days) do
 				if (perday[day.date] or {})[0] then has0 = true end
 			end
-			-- F-2（round70）：整个窗口**一条记录都没有**的名称行，`total` 置 nil 而不是 0 ——
-			-- 模板据此印 `-`（与日格同口径）。写 0 会把「没有名称维度的记录」读成「用了 0 分钟」。
-			for nr = 1, name_n(key) do
-				local by, total, nrec = {}, 0, 0
-				for _, day in ipairs(d.days) do
-					local v = (perday[day.date] or {})[nr]
-					if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
-				end
-				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
-					nr = nr, name = nm[nr] or ("名称 #" .. nr),
-					total = (nrec > 0) and total or nil, by = by }
-			end
-			-- R74-C（round74）：先算「（未归类）」的目标明细 —— 数据全部来自已有的
-			-- `appmap`（目标 → 行号）与 `diagtgt`/`diagdaytgt`（分钟），**不新增任何采样行**。
+			-- 明细数据全部来自已有 TSV 行（appmap + diagtgt/diagdaytgt），**不新增任何采样**；
+			-- 服务名来自 asn 行的 PTR/org（只在用户点「查 ASN / 服务」时才查，默认不查）。
 			local subs, subs_more = nil, 0
 			do
 				local amap = (d.app_map or {})[key] or {}
@@ -530,14 +543,21 @@ function M.collect(raw)
 						end
 						local a = (d.asn or {})[tgt]
 						local tmv = tmin[tgt]
+						-- R76-A：服务名只能是「实测数据的派生」—— 查过（asn 行存在）⇒
+						-- PTR 的可注册域 / ASN 组织名第一段 / 未知；没查过 ⇒ service 留空，
+						-- 模板按 d.asn_requested 显示「未查询」。
+						local svc
+						if a then svc = M.service_name(a.ptr, a.org) end
 						acc[#acc + 1] = { target = tgt, today = tmv, by = sby,
 							total = (sn > 0) and stot or nil,
 							asn = (a and a.asn ~= "") and a.asn or nil,
 							org = (a and a.org ~= "") and a.org or nil,
-							-- design §4.2：未覆盖设备独占的目标有 t 行、但名字分钟只算名单内设备 ⇒
-							-- 不产生 n(0) 分钟。不标一句，用户看到「明细有 12 分钟、上面只有 3 分钟」
-							-- 会以为是 bug。（round74 实测：这一情形下 n 行根本没有 nr=0，
-							-- 故「（未归类）」行也全靠 #acc > 0 才出现 —— 见下。）
+							ptr = (a and a.ptr ~= "") and a.ptr or nil,
+							service = svc,
+							queried = a and true or nil,
+							-- design §4.2：未覆盖设备独占的目标有 t 行、但名称分钟只算名单内
+							-- 设备 ⇒ 不产生 n(0) 分钟。不标一句，用户看到「明细有 12 分钟、
+							-- 上面只有 3 分钟」会以为是 bug。
 							solo = ((tmv or 0) > 0 and n0 == 0) and true or nil }
 					end
 				end
@@ -547,34 +567,82 @@ function M.collect(raw)
 					if am ~= bm then return am > bm end
 					return a.target < b.target
 				end)
-				if #acc > 20 then
-					subs_more = #acc - 20
-					for _ = #acc, 21, -1 do acc[_] = nil end
+				-- R76-B：只渲染前 10 条（今日分钟降序），第 11 条起折叠成一行计数。
+				local TOP = 10
+				if #acc > TOP then
+					subs_more = #acc - TOP
+					for _ = #acc, TOP + 1, -1 do acc[_] = nil end
 				end
 				if #acc > 0 then
 					local m1 = kmeta[key]
-					subs = { head = { target = "目标",
+					subs = { head = { target = "目标", service = "服务",
 						today = "今天", total = "合计",
 						asn = "AS", org = "归属组织", note = "备注" },
 						keyname = (m1 and m1.name) or "（未知条目）",
 						key = key, device = dr.device, rows = acc }
 				end
 			end
-			-- 「（未归类）」行出现的条件：有 nr=0 的名称分钟记录（has0），
-			-- **或** 有 nr=0 目标的每目标分钟（subs）—— 后者是 round74 新增：未覆盖设备
-			-- 独占的目标永远不会有 n(0) 分钟（round73 减法把它们扣成 0），只看 has0 就会
-			-- 让这些目标在页面上彻底消失，「仅未覆盖设备命中」的标注也成了死代码。
-			if has0 or subs then
-				local by, total, nrec = {}, 0, 0
-				for _, day in ipairs(d.days) do
-					local v = (perday[day.date] or {})[0]
-					if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
-				end
-				kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
-					nr = 0, name = "（未归类）",
-					total = (nrec > 0) and total or nil, by = by,
-					subs = subs, subs_more = subs_more }
+			-- 出现条件：有 nr=0 的名称分钟记录（has0），**或** 有 nr=0 目标的每目标分钟
+			-- （subs）。后者必须留着：未覆盖设备独占的目标永远不会有 n(0) 分钟，
+			-- 只看 has0 会让这些目标在页面上彻底消失。
+			if not (has0 or subs) then return nil end
+			local by, total, nrec = {}, 0, 0
+			for _, day in ipairs(d.days) do
+				local v = (perday[day.date] or {})[0]
+				if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
 			end
+			return { kind = "name", device = dr.device, key = key, nr = 0,
+				name = "（未归类）", total = (nrec > 0) and total or nil, by = by,
+				subs = subs, subs_more = subs_more }
+		end
+		-- 单条目设备的未归类行要在这里先算出来：它决定设备行是否可展开
+		-- （不可展开 ⇒ 那一行永远 display:none，等于看不到）。
+		local u1 = nil
+		if #keys == 1 then u1 = unc_row(keys[1].key) end
+		kdrows[#kdrows + 1] = { kind = "dev", device = dr.device,
+			total = dr.total, nkey = #keys, by = dr.by, only = only,
+			nname = nmode and name_n(keys[1].key) or 0,
+			expandable = ((#keys >= 2) or nmode or (u1 ~= nil)) }
+		if #keys >= 2 then                      -- A3：单条目设备不产子行
+			for _, k in ipairs(keys) do
+				local m = kmeta[k.key]
+				kdrows[#kdrows + 1] = { kind = "key", device = dr.device,
+					key = k.key,
+					-- A20/I1：回退链的最后一档**不许**是裸 key（`weburl_3` 之类内部
+					-- 名字会漏到页面上）。kmeta 缺项时给可读占位，绝不回显 key。
+					name = m and m.name or "（未知条目）",
+					stale = (m and m.stale) or false,
+					total = k.total, by = k.by }
+				-- R76-D：多条目设备也补一行「（未归类）」（**每个**条目最多一行），
+				-- 否则这类设备的目标明细与归入按钮永远没有落点。
+				local u = unc_row(k.key)
+				if u then kdrows[#kdrows + 1] = u end
+			end
+		else
+			local key = keys[1].key
+			if nmode then
+				-- D5：单条目 ≥2 个名称行 ⇒ 子行改成「名称」（与条目子行互斥，不叠加）。
+				-- 行序 = apps 行序；未归类（nr 0）排最后。
+				-- L5：**没有记录的日期留空（模板印 `-`）**，不填 0 —— 与条目子行同口径，
+				-- 否则 30 列全 0 会把「哪天真的有量」淹掉。
+				local nm = nrnames[key] or {}
+				local perday = kdayname[key] or {}
+				-- F-2（round70）：整个窗口**一条记录都没有**的名称行，`total` 置 nil 而不是 0 ——
+				-- 模板据此印 `-`（与日格同口径）。写 0 会把「没有名称维度的记录」读成「用了 0 分钟」。
+				for nr = 1, name_n(key) do
+					local by, total, nrec = {}, 0, 0
+					for _, day in ipairs(d.days) do
+						local v = (perday[day.date] or {})[nr]
+						if v then by[day.date] = v; total = total + v; nrec = nrec + 1 end
+					end
+					kdrows[#kdrows + 1] = { kind = "name", device = dr.device, key = key,
+						nr = nr, name = nm[nr] or ("名称 #" .. nr),
+						total = (nrec > 0) and total or nil, by = by }
+				end
+			end
+			-- 具名名称行只在 nmode 为真时出现；未归类行只要有未归类数据就出现
+			-- （单名称条目以前完全没有这一行 ⇒ 也就没有明细与归入按钮）。
+			if u1 then kdrows[#kdrows + 1] = u1 end
 		end
 	end
 	d.dev_key_day_rows = kdrows
@@ -761,6 +829,10 @@ function M.load_asn(d)
 				if a then
 					s.asn = (a.asn ~= "") and a.asn or nil
 					s.org = (a.org ~= "") and a.org or nil
+					-- 服务名必须在拿到 ptr/org 之后重算：`unc_row()` 建行时 d.asn 还是空的
+					-- （read_asn 只在 `?asn=1` 才跑），那时 service 必然是 nil；
+					-- 不在这里回填，页面就会永远印「未查询」——实测真机就是这样。
+					s.service = M.service_name(a.ptr, a.org)
 					n = n + 1
 				end
 			end
