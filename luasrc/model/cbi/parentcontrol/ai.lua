@@ -813,7 +813,7 @@ function M.apply_name(apps, target, name)
 		return { ok = false, error = T("名称不合法（不能为空、不超过 64 字、不含竖线与换行）") }
 	end
 	if SENTINEL_NAMES[trim(name)] then
-		return { ok = false, error = T("「未知」/「未查询」是页面占位文案，不能当作封锁名称") }
+		return { ok = false, error = T("名称不能是「未知」/「未查询」（这是页面占位文案），请改成你想要的封锁名称，例如「游戏」") }
 	end
 	if not M.valid_target(target) then
 		return { ok = false, error = T("目标不合法（需是 IP、CIDR 或域名）") }
