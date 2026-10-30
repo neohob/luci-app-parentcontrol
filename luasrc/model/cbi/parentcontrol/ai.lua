@@ -753,6 +753,18 @@ local function row_has_token(rest, target)
 	return false
 end
 
+-- 在行尾追加一个 token，但**行尾的 `\r` 必须留在行尾**（round75c R75B-L1）。
+-- 直接 `line .. " " .. tgt` 在 CRLF 文件里会把目标接到 `\r` 之后 ⇒ 该行变成
+-- `"甲|a.com\r c.com"`；而 `ui.lua` 的 `apps_rows()` 用 `[^\r\n]+` 切行 ⇒ 切成两行
+-- ⇒ 条目列表凭空多出一条幽灵封锁名称、统计页多出名称子层。
+-- `ui.lua` 只读不改：这里插到 `\r` 之前就够，不需要动解析侧。
+local function add_before_eol(line, sep, tgt)
+	if line:sub(-1) == "\r" then
+		return line:sub(1, -2) .. sep .. tgt .. "\r"
+	end
+	return line .. sep .. tgt
+end
+
 -- target 校验：IPv4/IPv6 CIDR 或合法域名。
 function M.valid_target(s)
 	if type(s) ~= "string" then return false end
@@ -828,15 +840,15 @@ function M.apply_name(apps, target, name)
 		local line = lines[hit]
 		local name_part, rest = line:match("^([^|]*)|(.*)$")
 		if name_part == nil then
-			-- 纯名称行（无 `|`）：补上分隔符与目标。
-			lines[hit] = line .. "|" .. tgt
+			-- 纯名称行（无 `|`）：补上分隔符与目标（CRLF 行的 `\r` 留在行尾）。
+			lines[hit] = add_before_eol(line, "|", tgt)
 			newtext = table.concat(lines, "\n")
 		elseif row_has_token(rest, tgt) then
 			-- 该行域名列表里已有这个目标 ⇒ 不写 uci，如实返回 exists。
 			return { ok = true, action = "exists", text = text }
 		else
 			-- 追加到该行域名列表**末尾**（用空格分隔；pc_apps_rows 逗号/空格等价）。
-			lines[hit] = line .. " " .. tgt
+			lines[hit] = add_before_eol(line, " ", tgt)
 			newtext = table.concat(lines, "\n")
 		end
 	else
