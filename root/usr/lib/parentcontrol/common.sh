@@ -1135,10 +1135,14 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 # 只有 curl 支持增量输出：uclient-fetch / wget 一律 return 3（不支持），调用方据此降级到 pc_http。
 # 用法：pc_http_stream <url> <infile|-> <outfile> <idle> <max>
 #   exit 0 = 流正常结束（outfile 里是完整 SSE 文本）
-#   exit 3 = 本机 HTTP 客户端不支持流式（调用方降级）
-#   exit 1 = 其它失败（可读原因已写入 <outfile>.err，同时写入 outfile 供调用方读取）
+#   其它 = 失败，**透传 curl 的退出码**（28 = 停滞/过慢，7 = 连不上，22 = HTTP 错误……）。
+#          可读原因同时写入 outfile（调用方直接读它当文案）与 <outfile>.err。
+#   exit 3 由上层 `ai_stream_start` 表示「客户端不支持流式」，本函数不主动产生 3。
+# 为什么透传而不是统一 return 1（round77d 裁决）：worker 靠退出码区分
+#   `28 ⇒ stalled（没有任何输出，已中断）` 与 `其它 ⇒ failed（原样透出原因）`。
+#   统一 return 1 会把这个信息销毁 ⇒ stalled 永远走不到 ⇒ 页面显示 curl 原文而不是设计文案。
 pc_http_stream() {
-	local _u _i _o _idle _max _k _err _r
+	local _u _i _o _idle _max _k _err _r _rc
 	_u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"
 	# 参数卫生：idle/max 必须是纯数字，否则回落保守默认（绝不把非法串拼进命令行）。
 	case "$_idle" in ''|*[!0-9]*) _idle=60 ;; esac
@@ -1158,8 +1162,13 @@ pc_http_stream() {
 	if [ -n "$_i" ] && [ "$_i" != "-" ]; then set -- "$@" --data-binary "@$_i"; fi
 	# 直接写文件（-o）：`curl -N` 在管道里仍可能被缓冲（见 handoff §7 第 8 条）。
 	curl "$@" -o "$_o" "$_u" 2>"$_err"
-	if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+	# 退出码必须**当场**存下来：下面的 head/rm 会把 $? 覆盖掉。
+	_rc=$?
+	if [ "$_rc" -eq 0 ]; then rm -f "$_err"; return 0; fi
+	# 关键安全点：$_rc 非数字/为空时绝不能走到 `return "$_rc"` —— dash 对 `return ""` 是致命错误
+	# （整个调用方脚本会被打死），而其它 shell 上可能被当成 0 把失败读成成功。兜底成 1。
+	[ "$_rc" -ne 0 ] 2>/dev/null || _rc=1
 	_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
 	_pc_ai_fail "$_o" "${_r:-HTTP 错误或网络不可达}"
-	return 1
+	return "$_rc"
 }

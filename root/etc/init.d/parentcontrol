@@ -1737,7 +1737,9 @@ _ai_worker_text() {
 # 退出码语义沿用 pc_http_stream：0 正常结束 / 3 客户端不支持 / 其它失败。
 # 注意：`curl -N` 在管道里仍可能被缓冲，pc_http_stream 内部直接 -o 写文件（handoff §7.8）。
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
-local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s
+# worker 体必须包进函数：busybox ash 对「函数外的 local」是致命错误（rc=2，脚本当场退出；真机实测）。
+_aiwk() {
+	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s
 _u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"; _st="$6"; _kf="$7"
 [ -n "$_kf" ] && PC_AI_KEY_FILE="$_kf"
 _start=$(date +%s)
@@ -1759,6 +1761,8 @@ printf '%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$(( $(date +%s) - _start ))" "${_first:-
 	> "$_st.tmp" 2>/dev/null && mv "$_st.tmp" "$_st" 2>/dev/null
 rm -f "$_i"
 exit 0
+	}
+_aiwk "$@"
 AIWK
 }
 
