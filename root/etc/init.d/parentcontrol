@@ -43,7 +43,7 @@ CRON_TAG_IP="#pc_ip_refresh"
 
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 
-EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http hosts_tsv ensure"
+EXTRA_COMMANDS="tick refresh_ip refresh_holiday stats_tsv reset_quota ai_http ai_stream_start ai_stream_state hosts_tsv ensure"
 EXTRA_HELP="
 	tick             Re-evaluate quota state and account usage (cron, every minute)
 	refresh_ip       Re-resolve domains and rebuild IP rules (cron)
@@ -52,6 +52,8 @@ EXTRA_HELP="
 	stats_tsv        Print full stats for the dashboard as TSV
 	reset_quota      Reset an entry's (or pool's) quota for today; logged to /etc/parentcontrol/resets.log
 	ai_http          GET/POST a URL via curl/uclient-fetch/wget (used by the AI domain helper)
+	ai_stream_start  Start a background SSE request: <key> <url> <infile> <ssefile> <idle> <max>
+	ai_stream_state  Print 'state TAB rc TAB elapsed TAB bytes TAB chunks' for <key>
 	hosts_tsv        Print LAN hosts as 'host <mac> <ip> <name> <online>' (binding health / diagnostics)
 	ensure           Lightweight repair: rebuild quota blocks + offload state only (hotplug iface events)"
 
@@ -1709,6 +1711,130 @@ reset_quota() {
 # exit 0 = HTTP 2xx（响应体已写入 outfile）；非 0 = 失败（可读原因已写入 outfile）。
 ai_http() {
 	pc_http "$1" "$2" "$4" "$3"
+}
+
+# ---------- AI 推测的后台流式任务（R77-E / round77b） ----------
+# 为什么要有这一层：一次推测在真机实测要 37~54 秒，CGI 里同步等这么久会被浏览器/网关掐断；
+# 而且「用总时长判结束」本身就是错的（模型慢 ≠ 失败）。所以改成：
+#   POST 只起后台任务并立即返回，结果靠 GET 轮询。
+#   ai_stream_start <key> <url> <infile> <ssefile> <idle> <max>
+#   ai_stream_state <key>   → 打印 "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"
+# 状态文件：$STATE_DIR/ai.job.<key>.{state,pid,worker}；SSE 正文写在调用方给的 ssefile 里。
+# 这两个子命令**绝不**挂进 tick / refresh_ip / start（稳态零写，W287.1）。
+ai_key_ok() { # 只接受 weburl_<纯数字>；其它一律拒（防 ../ 穿越与路径注入）
+	local _suf
+	_suf=${1#weburl_}
+	[ "$_suf" != "$1" ] || return 1
+	case "$_suf" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+_ai_worker_text() {
+	cat <<'AIWK'
+#!/bin/sh
+# ai.job worker：跑一次流式请求，结束后写状态文件。argv:
+#   <url> <infile> <ssefile> <idle> <max> <statefile> <keyfile>
+# 退出码语义沿用 pc_http_stream：0 正常结束 / 3 客户端不支持 / 其它失败。
+# 注意：`curl -N` 在管道里仍可能被缓冲，pc_http_stream 内部直接 -o 写文件（handoff §7.8）。
+. "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
+local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s
+_u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"; _st="$6"; _kf="$7"
+[ -n "$_kf" ] && PC_AI_KEY_FILE="$_kf"
+_start=$(date +%s)
+_first=""
+pc_http_stream "$_u" "$_i" "$_o" "$_idle" "$_max" &
+_cpid=$!
+while kill -0 "$_cpid" 2>/dev/null; do
+	[ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+	sleep 1
+done
+wait "$_cpid"; _rc=$?
+[ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+case "$_rc" in
+	0) _s=done ;;
+	28) _s=stalled ;;
+	*) _s=failed ;;
+esac
+printf '%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$(( $(date +%s) - _start ))" "${_first:--1}" \
+	> "$_st.tmp" 2>/dev/null && mv "$_st.tmp" "$_st" 2>/dev/null
+rm -f "$_i"
+exit 0
+AIWK
+}
+
+ai_stream_start() { # <key> <url> <infile> <ssefile> <idle> <max>
+	local _k _u _i _o _idle _max _pid _st _wk _p
+	_k="$1"; _u="$2"; _i="$3"; _o="$4"; _idle="$5"; _max="$6"
+	ai_key_ok "$_k" || { echo "badkey"; return 2; }
+	command -v curl >/dev/null 2>&1 || return 3     # 无 curl ⇒ 不支持流式，调用方降级到 pc_http
+	mkdir -p "$STATE_DIR"
+	_st="$STATE_DIR/ai.job.$_k.state"
+	_pid="$STATE_DIR/ai.job.$_k.pid"
+	_wk="$STATE_DIR/ai.job.$_k.worker"
+	# 同一 key 已有活任务 ⇒ busy（不重复烧额度）
+	if [ -f "$_pid" ]; then
+		_p=$(cat "$_pid" 2>/dev/null)
+		case "$_p" in
+			''|*[!0-9]*) ;;
+			*) kill -0 "$_p" 2>/dev/null && { echo "busy"; return 0; } ;;
+		esac
+		rm -f "$_pid"
+	fi
+	rm -f "$_st" "$_o" "$STATE_DIR/ai.job.$_k.start"
+	date +%s > "$STATE_DIR/ai.job.$_k.start" 2>/dev/null
+	_ai_worker_text > "$_wk" 2>/dev/null || return 1
+	start-stop-daemon -S -b -m -p "$_pid" -x /bin/sh -- "$_wk" \
+		"$_u" "$_i" "$_o" "$_idle" "$_max" "$_st" "${PC_AI_KEY_FILE:-}" >/dev/null 2>&1 || return 1
+	echo "started"
+	return 0
+}
+
+# 从 .start 时间戳算到现在的秒数（只读；文件不存在或内容非法给 0）。
+ai_stream_elapsed() { # <key>
+	local _f _b _n
+	_f="$STATE_DIR/ai.job.$1.start"
+	[ -f "$_f" ] || { echo 0; return 0; }
+	_b=$(cat "$_f" 2>/dev/null)
+	case "$_b" in ''|*[!0-9]*) echo 0; return 0 ;; esac
+	_n=$(( $(date +%s) - _b ))
+	[ "$_n" -ge 0 ] 2>/dev/null || _n=0
+	echo "$_n"
+}
+
+ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"（只读，不建任何文件）
+	local _k _st _pid _sse _s _rc _el _by _ch _fi _p
+	_k="$1"
+	ai_key_ok "$_k" || { echo "badkey"; return 2; }
+	_st="$STATE_DIR/ai.job.$_k.state"
+	_pid="$STATE_DIR/ai.job.$_k.pid"
+	_sse="$STATE_DIR/ai.job.$_k.sse"
+	_s=""; _rc=""; _el=""
+	if [ -f "$_st" ]; then
+		_s=$(awk -F'\t' 'NR == 1 { print $1 }' "$_st" 2>/dev/null)
+		_rc=$(awk -F'\t' 'NR == 1 { print $2 }' "$_st" 2>/dev/null)
+		_el=$(awk -F'\t' 'NR == 1 { print $3 }' "$_st" 2>/dev/null)
+		_fi=$(awk -F'\t' 'NR == 1 { print $4 }' "$_st" 2>/dev/null)
+	fi
+	if [ -z "$_s" ]; then
+		# 还没写状态：进程活着就是 running，否则是被外力杀掉（页面关掉不影响 worker）
+		_p=$(cat "$_pid" 2>/dev/null)
+		case "$_p" in
+			''|*[!0-9]*) _s=failed ;;
+			*) kill -0 "$_p" 2>/dev/null && _s=running || _s=failed ;;
+		esac
+		# R77-F：running 期间没有 state 文件 ⇒ 用创建时间算「已等了多少秒」。
+		# 否则页面上的「等待模型响应… N 秒」永远是 0 秒，用户看不出是在等还是卡死。
+		_el=$(ai_stream_elapsed "$_k")
+	fi
+	if [ -f "$_sse" ]; then
+		_by=$(wc -c < "$_sse" 2>/dev/null | tr -d ' ')
+	else
+		_by=0
+	fi
+	case "$_by" in ''|*[!0-9]*) _by=0 ;; esac
+	_ch=$(grep -c '^data:' "$_sse" 2>/dev/null)
+	case "$_ch" in ''|*[!0-9]*) _ch=0 ;; esac
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}"
 }
 
 # 绑定健康 / 诊断用的「在网设备清单」（第 8 轮 R10/D18/ADR-021）。

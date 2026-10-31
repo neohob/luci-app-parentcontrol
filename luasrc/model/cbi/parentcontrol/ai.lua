@@ -304,6 +304,9 @@ local function http_run(method, url, body, apikey, timeout)
 		infile = tmpfile("in")
 		local inf = io.open(infile, "w")
 		if not inf then
+			-- 提前返回也要把自己建过的临时文件收掉：key 文件是 API Key 明文。
+			os.remove(out)
+			if keyfile then os.remove(keyfile) end
 			return nil, T("无法创建临时文件")
 		end
 		inf:write(body)
@@ -339,7 +342,7 @@ end
 -- ---------- uci 配置 ----------
 
 function M.config()
-	local conf = { endpoint = "", model = "", apikey = "", timeout = "" }
+	local conf = { endpoint = "", model = "", apikey = "", timeout = "", stall = "" }
 	pcall(function()
 		local uci = require("luci.model.uci").cursor()
 		-- A29/D21：段身份统一为命名节 `ai`，逐字段先读命名节，
@@ -355,6 +358,7 @@ function M.config()
 		conf.model    = pick("model")
 		conf.apikey   = pick("apikey")
 		conf.timeout  = pick("timeout")
+		conf.stall    = pick("stall")
 	end)
 	return conf
 end
@@ -698,15 +702,35 @@ end
 -- }
 -- 返回 { ok, items = { {prefix,name,confidence} }, sent = { 网段... }, body = <请求体原文>, error }
 -- body 只回给调用方（测试用来逐字节断言隐私面），不写页面、不落盘。
-function M.infer(opts)
-	opts = opts or {}
+-- ======================================================================
+-- round77b（R77-E）：真流式 —— 后台任务 + 轮询
+--
+-- 为什么要换判定模型（用户原话「流式结束才算结束吧，你不能单单以超时方式来判断结束」）：
+-- 旧路径是 `curl --max-time T` 一次读完，**总时长**到点即判失败。真机实测一次推测
+-- 37 秒 / 54 秒，于是 15 秒必挂、60 秒也可能挂 —— 把「模型慢」误判成「失败」。
+-- 新路径：POST 只起后台任务（立即返回），curl 的 `--speed-time` 判**停滞**（连续 N 秒
+-- 平均速率 <1B/s 才中断），流自然结束即成功；结果靠 GET 轮询。
+-- ======================================================================
 
-	local conf = M.config()
-	local endpoint = trim(opts.endpoint or conf.endpoint or "")
-	local model = trim(opts.model or conf.model or "")
-	local apikey = opts.apikey
-	if apikey == nil then apikey = conf.apikey or "" end
+-- TAB 字面量（本文件不许出现反斜杠-t 转义，见 check_tsv_unique）。
+local TAB = string.char(9)
 
+local function state_dir()
+	return os.getenv("STATE_DIR") or "/tmp/parentcontrol"
+end
+
+local function run_cmd(cmd)
+	local p = io.popen(cmd .. " 2>/dev/null")
+	if not p then return "" end
+	local out = p:read("*a") or ""
+	p:close()
+	return out
+end
+
+-- 把「哪些网段/名称要发」与请求体一起构造出来 —— M.infer（同步/降级）与
+-- M.infer_start（流式）共用同一份，避免两条路径的隐私口径分叉。
+-- 返回 { payload, sent, sentmap, names } 或 { empty = true } 或 { err, sent }。
+local function build_request(opts, endpoint, model, stream)
 	-- ① 可发送项：公网 IPv4 网段 + 有 ASN 组织名。没有组织名（查询失败 / IPv6 / 域名）
 	--    一律跳过 —— 发一个光秃秃的网段既没信息量，又白白多泄露一个编址。
 	local sent, sentmap, lines = {}, {}, {}
@@ -721,10 +745,7 @@ function M.infer(opts)
 			end
 		end
 	end
-	if #sent == 0 then
-		-- 没有可发的东西 ⇒ **一个字节都不发**（连空请求也不发）。
-		return { ok = true, items = {}, sent = {}, body = "" }
-	end
+	if #sent == 0 then return { empty = true, sent = {} } end
 
 	-- ③ 名称清单：只发名称文字。IP 字面量（含私网地址）一律剔除 —— 名称不该是地址。
 	local names = {}
@@ -736,10 +757,10 @@ function M.infer(opts)
 	end
 
 	if endpoint == "" or model == "" then
-		return { ok = false, error = T("请先在「设置」页配置 AI endpoint 与 model"), sent = sent }
+		return { err = T("请先在「设置」页配置 AI endpoint 与 model"), sent = sent }
 	end
 	if not M.valid_endpoint(endpoint) then
-		return { ok = false, error = T("AI endpoint 无效（需以 http:// 或 https:// 开头）"), sent = sent }
+		return { err = T("AI endpoint 无效（需以 http:// 或 https:// 开头）"), sent = sent }
 	end
 
 	local user = table.concat(lines, "\n")
@@ -747,17 +768,121 @@ function M.infer(opts)
 		user = user .. "\n已配名称：" .. table.concat(names, "、")
 	end
 
-	local payload = json_encode({
+	local tbl = {
 		model       = model,
 		temperature = 0,
 		messages    = {
 			{ role = "system", content = INFER_SYS_PROMPT },
 			{ role = "user",   content = user },
 		},
-	})
+	}
+	if stream then tbl.stream = true end
+	local payload = json_encode(tbl)
 	if not payload then
-		return { ok = false, error = T("无法构造 AI 请求体"), sent = sent }
+		return { err = T("无法构造 AI 请求体"), sent = sent }
 	end
+	return { payload = payload, sent = sent, sentmap = sentmap, names = names }
+end
+
+-- 读 SSE 文件：把 delta.content 拼成正文，delta.reasoning 只计数**绝不拼进正文**
+-- （推理块是模型的思考过程，拼进去会把 JSON 数组淹掉）。S51 就是这条的牙。
+-- 解析 SSE 文本（纯函数，可单测）。返回 content, nchunk, done。
+-- **delta.reasoning 绝不拼进 content**：思维链不是推测结果，混进去会把「思考过程」
+-- 当成应用名显示（S51 的靶心）。
+function M.parse_sse(raw)
+	raw = tostring(raw or "")
+	local parts, n = {}, 0
+	local done = false
+	for line in (raw .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		if l:match("^data:") then
+			n = n + 1
+			local d = trim(l:sub(6))
+			if d == "[DONE]" then
+				done = true
+			else
+				local o = json_decode(d)
+				local ch = type(o) == "table" and type(o.choices) == "table" and o.choices[1] or nil
+				if type(ch) == "table" then
+					local delta = ch.delta
+					if type(delta) == "table" and type(delta.content) == "string" then
+						parts[#parts + 1] = delta.content
+					end
+					local msg = ch.message
+					if type(msg) == "table" and type(msg.content) == "string" then
+						parts[#parts + 1] = msg.content
+					end
+				end
+			end
+		end
+	end
+	return table.concat(parts), n, done
+end
+
+-- ai.log：一行一条、TAB 分隔、滚动 100 行。
+-- 绝不写请求体/响应体原文/API Key/MAC/内网 IP（W285.3 会扫）。
+local function ai_log(fields)
+	local path = state_dir() .. "/ai.log"
+	local f = io.open(path, "a")
+	if not f then return end
+	f:write(table.concat(fields, TAB) .. "\n")
+	f:close()
+	local tmp = tmpfile("log")
+	if os.execute("tail -n 100 " .. shq(path) .. " > " .. shq(tmp) .. " 2>/dev/null") then
+		os.execute("mv -f " .. shq(tmp) .. " " .. shq(path) .. " 2>/dev/null")
+	else
+		os.remove(tmp)
+	end
+end
+
+local function job_path(key, ext)
+	return state_dir() .. "/ai.job." .. key .. "." .. ext
+end
+
+-- 启动任务前顺手 GC：$STATE_DIR/ai.* 与 /tmp/pc-ai-* 里超过 1 天的（含可能残留的 key 文件）。
+-- 清理陈旧残留。窗口 60 分钟：一个任务最长 900 秒（max 上限）、加上建任务前的准备，
+-- 一小时足够覆盖任何仍活着的任务；超过一小时的 ai.* / pc-ai-* 一定是上一次（甚至上一版）
+-- 留下的垃圾 —— 其中 pc-ai-key-* 是 API Key 明文，pc-ai-out-* 是响应正文，
+-- 都不该在 /tmp 里过夜（用户点名过这批残留）。导出成 M.gc_state 便于单测。
+function M.gc_state()
+	local sd = state_dir()
+	os.execute("find " .. shq(sd) .. " -maxdepth 1 -name 'ai.*' -mmin +60 -exec rm -f {} + 2>/dev/null")
+	-- `-L`：macOS 的 /tmp 是指向 /private/tmp 的符号链接，BSD find 默认不跟随**起点**
+	-- 符号链接（会一条都匹配不到、清理静默失效）。busybox find 同样支持 -L。
+	os.execute("find -L /tmp -maxdepth 1 -name 'pc-ai-*' -mmin +60 -exec rm -f {} + 2>/dev/null")
+end
+
+-- 收尾：成功与失败**两条路径**都要删干净（W285.1/W285.2）。key 文件优先删。
+local function job_cleanup(key, extra)
+	for _, ext in ipairs({ "key", "sse", "state", "pid", "worker", "meta", "logged", "start" }) do
+		local p = job_path(key, ext)
+		if ext == "key" and extra and extra.key then p = extra.key end
+		os.remove(p)
+	end
+	if extra then
+		if extra.infile then os.remove(extra.infile) end
+		if extra.keyfile then os.remove(extra.keyfile) end
+	end
+end
+
+function M.infer(opts)
+	opts = opts or {}
+
+	local conf = M.config()
+	local endpoint = trim(opts.endpoint or conf.endpoint or "")
+	local model = trim(opts.model or conf.model or "")
+	local apikey = opts.apikey
+	if apikey == nil then apikey = conf.apikey or "" end
+
+	local r = build_request(opts, endpoint, model, false)
+	if r.empty then
+		-- 没有可发的东西 ⇒ **一个字节都不发**（连空请求也不发）。
+		return { ok = true, items = {}, sent = {}, body = "" }
+	end
+	if r.err then
+		return { ok = false, error = r.err, sent = r.sent }
+	end
+	local payload, sent, sentmap = r.payload, r.sent, r.sentmap
 
 	local http = opts.http or http_run
 	-- R77-A：同样把 uci 超时传下去（测试注入的 http 只有 4 个参数，多传一个无影响）。
@@ -792,6 +917,207 @@ function M.infer(opts)
 		return { ok = false, error = why, sent = sent, body = payload }
 	end
 	return { ok = true, items = items, sent = sent, body = payload }
+end
+
+-- 写一个小文件（0600）。失败返回 false。
+local function writefile(path, text)
+	local f = io.open(path, "w")
+	if not f then return false end
+	f:write(text)
+	f:close()
+	tighten(path)
+	return true
+end
+
+-- 元数据：把「这次发了哪些网段」和两个临时文件路径记下来 ——
+-- 轮询是**另一个进程**，没有 sentmap 就无从校验模型回的 prefix 是否属于本批。
+-- 顺带让收尾能删掉那两个 /tmp 文件（成功/失败都要删，W285.1/W285.2）。
+local function meta_write(key, sent, infile, keyfile)
+	local out = { "n=" .. tostring(#sent) }
+	out[#out + 1] = "in=" .. tostring(infile or "")
+	out[#out + 1] = "key=" .. tostring(keyfile or "")
+	for _, t in ipairs(sent) do out[#out + 1] = "t=" .. t end
+	return writefile(job_path(key, "meta"), table.concat(out, "\n") .. "\n")
+end
+
+local function meta_read(key)
+	local raw = readfile(job_path(key, "meta"))
+	local m = { sent = {}, sentmap = {} }
+	if not raw then return m end
+	for line in (raw .. "\n"):gmatch("([^\n]*)\n") do
+		local k, v = line:match("^([a-z]+)=(.*)$")
+		if k == "t" and v ~= "" then
+			m.sent[#m.sent + 1] = v
+			m.sentmap[v] = true
+		elseif k == "in" then
+			m.infile = (v ~= "" and v) or nil
+		elseif k == "key" then
+			m.keyfile = (v ~= "" and v) or nil
+		elseif k == "n" then
+			m.n = tonumber(v) or 0
+		end
+	end
+	return m
+end
+
+-- 启动一次流式推测。立即返回，不等结果（CGI 里同步等 60 秒会被网关掐断）。
+-- opts.key 必须是 weburl_<数字>（条目 key），用于命名任务与状态文件。
+function M.infer_start(opts)
+	opts = opts or {}
+	local conf = M.config()
+	local key = tostring(opts.key or "")
+	if not key:match("^weburl_%d+$") then
+		return { ok = false, error = T("条目 key 非法") }
+	end
+	local endpoint = trim(opts.endpoint or conf.endpoint or "")
+	local model = trim(opts.model or conf.model or "")
+	local apikey = opts.apikey
+	if apikey == nil then apikey = conf.apikey or "" end
+
+	local r = build_request(opts, endpoint, model, true)
+	if r.empty then
+		return { ok = true, items = {}, sent = {}, state = "done", body = "" }
+	end
+	if r.err then return { ok = false, error = r.err, sent = r.sent } end
+
+	M.gc_state()
+
+	local infile = tmpfile("in")
+	local keyfile = nil
+	if not writefile(infile, r.payload) then
+		return { ok = false, error = T("无法写入请求体临时文件"), sent = r.sent }
+	end
+	if apikey and apikey ~= "" then
+		keyfile = tmpfile("key")
+		if not writefile(keyfile, apikey) then
+			os.remove(infile)
+			return { ok = false, error = T("无法写入 API Key 临时文件"), sent = r.sent }
+		end
+	end
+
+	local ssefile = job_path(key, "sse")
+	local idle = tonumber(conf.stall) or 60
+	if idle < 10 or idle > 300 then idle = 60 end
+	local max = tonumber(conf.timeout) or 900
+	if max < 30 or max > 1800 then max = 900 end
+
+	local cmd = "PC_AI_KEY_FILE=" .. shq(keyfile or "")
+		.. " /etc/init.d/parentcontrol ai_stream_start " .. shq(key)
+		.. " " .. shq(endpoint:gsub("/+$", "") .. "/chat/completions")
+		.. " " .. shq(infile) .. " " .. shq(ssefile)
+		.. " " .. shq(tostring(idle)) .. " " .. shq(tostring(max))
+		.. "; echo rc=$?"
+	local out = run_cmd(cmd)
+	local rc = tonumber(out:match("rc=(%d+)") or "") or 1
+
+	if rc == 3 then
+		-- 本机没有 curl ⇒ 不支持流式，降级成同步（老路径）。degraded 要回给前端做文案。
+		os.remove(infile)
+		if keyfile then os.remove(keyfile) end
+		local res = M.infer(opts)
+		res.degraded = true
+		return res
+	end
+	if rc ~= 0 then
+		os.remove(infile)
+		if keyfile then os.remove(keyfile) end
+		return { ok = false, error = T("无法启动后台推测任务"), sent = r.sent }
+	end
+	if out:match("busy") then
+		os.remove(infile)
+		if keyfile then os.remove(keyfile) end
+		return { ok = true, job = key, state = "running", busy = true, sent = r.sent }
+	end
+
+	meta_write(key, r.sent, infile, keyfile)
+	return { ok = true, job = key, state = "running", sent = r.sent }
+end
+
+-- 终态错误文案（纯函数，可单测）。
+-- 关键：stalled 必须说「没有任何输出」，**不能**说成「总时长超时」——
+-- 流式之后判据是「流结束」，停滞判定只防对端挂着不动（S55 的靶心）。
+function M.state_error(st, detail, stall)
+	if st == "stalled" then
+		return string.format(T("模型超过 %d 秒没有任何输出，已中断（不是总时长超时）"),
+			tonumber(stall) or 60)
+	end
+	local d = trim(detail or "")
+	return d ~= "" and d or T("AI 请求失败")
+end
+
+-- 查询一次任务状态。终态时顺便解析 SSE、写日志、清临时文件。
+-- opts.state_line：测试缝（A38 惯例）。给了就直接用这一行状态，不跑 init.d ——
+-- 终态分支（解析/文案/日志/清理）可以脱离设备与 curl 单测。
+function M.infer_state(key, opts)
+	opts = opts or {}
+	key = tostring(key or "")
+	if not key:match("^weburl_%d+$") then
+		return { ok = false, error = T("条目 key 非法") }
+	end
+	local out = opts.state_line or run_cmd("/etc/init.d/parentcontrol ai_stream_state " .. shq(key))
+	if out:match("^badkey") then
+		return { ok = false, error = T("条目 key 非法") }
+	end
+	-- 六段以 TAB 分隔（ai_stream_state 的输出）。这里用 %c 而不是 TAB 字面转义：
+	-- test/run.sh 的 check_tsv_unique 只允许 tsv.lua 出现反斜杠-t 形态的解析，
+	-- 其它 Lua 文件一律不许，所以 TAB 只能经 string.char 引入。
+	local st, rc, el, by, ck, fi = out:match("^(%a+)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c?([^%c]*)")
+	if not st then return { state = "failed", error = T("无法读取任务状态") } end
+	local elapsed = tonumber(el) or 0
+	local chunks = tonumber(ck) or 0
+	local bytes = tonumber(by) or 0
+
+	if st == "running" then
+		return { state = "running", elapsed = elapsed, chunks = chunks, bytes = bytes }
+	end
+
+	-- 终态：先把内容读出来再删文件。
+	local meta = meta_read(key)
+	local raw_sse = readfile(job_path(key, "sse")) or ""
+	local content, nchunk, _ = M.parse_sse(raw_sse)
+	local res, log_items, log_named, reason = nil, 0, 0, ""
+	if st == "done" then
+		local arr = extract_json_array(content)
+		local items, why
+		if not arr then
+			why = T("AI 响应不是合法 JSON 数组")
+		else
+			local dec = json_decode(arr)
+			items, why = sanitize_infer(dec, meta.sentmap)
+		end
+		if items then
+			for _, it in ipairs(items) do
+				log_items = log_items + 1
+				if it.name ~= "" then log_named = log_named + 1 end
+			end
+			res = { state = "done", items = items, chunks = chunks, elapsed = elapsed }
+		else
+			res = { state = "failed", error = why or T("AI 响应无法解析") }
+			-- 解析失败允许记前 500 字**单行**摘要（换行转空格），并标 truncated=1。
+			local brief = (content or ""):gsub("%c+", " ")
+			if #brief > 500 then brief = brief:sub(1, 500) end
+			reason = "truncated=1 " .. brief
+			log_items, log_named = -1, -1
+		end
+	else
+		-- stalled（curl 28）要翻成「没有输出」，不要让人以为是「总时长超时」。
+		-- 失败时 pc_http_stream 把**原始错误文本**写进 sse 文件（不是 SSE 帧），
+		-- 所以这里取原文而不是 parse_sse 的正文，否则错误原因永远是空、只剩兜底文案。
+		local detail = trim(raw_sse)
+		res = { state = "failed", error = M.state_error(st, detail, tonumber(M.config().stall) or 60) }
+		reason = st .. " " .. detail
+	end
+
+	local stamp = os.date("%Y-%m-%d %H:%M:%S")
+	local first = (fi ~= nil and fi ~= "" and fi ~= "-") and fi or "-"
+	ai_log({
+		stamp, key, "targets=" .. tostring(meta.n or #meta.sent), tostring(res.state),
+		tostring(elapsed) .. "s", first .. "s", tostring(chunks),
+		tostring(log_items), tostring(log_named), tostring(rc),
+		(reason:gsub("%c+", " ")):sub(1, 300),
+	})
+	job_cleanup(key, { infile = meta.infile, keyfile = meta.keyfile })
+	return res
 end
 
 -- ======================================================================

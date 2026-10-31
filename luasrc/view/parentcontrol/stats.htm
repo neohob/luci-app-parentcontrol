@@ -454,6 +454,7 @@
 //<![CDATA[
 	var pcInferUrl = '<%=url("admin/control/parentcontrol/unclassified_infer")%>';
 	var pcApplyUrl = '<%=url("admin/control/parentcontrol/unclassified_apply")%>';
+	var pcStatusUrl = '<%=url("admin/control/parentcontrol/unclassified_infer_status")%>';
 	var pcTok = '<%=token%>';
 
 	function pcInferMsg(el, text, ok) {
@@ -483,39 +484,124 @@
 		}
 	}
 
+	// R77-F（round77b）：推测改成**后台流式任务** + 轮询。
+	// 为什么不再同步等：真机实测模型 37 秒 / 54 秒才出结果，同步请求要么被 uhttpd 掐断、
+	// 要么被「总时长超时」判死，表现为假失败。流式之后「流结束」才是结束信号，
+	// 所以这里只发一次「起任务」，然后每秒查一次状态；状态里带 elapsed/chunks 让用户
+	// 看到它真的在动（而不是一个静止的「正在推测…」）。
+	var pcPollTimer = {};
+
+	function pcInferShow(key, res) {
+		var rows = pcInferRows(key);
+		var items = (res && res.items) || [];
+		var n = 0;
+		for (var i = 0; i < items.length; i++) {
+			var it = items[i];
+			for (var j = 0; j < rows.length; j++) {
+				if (rows[j].getAttribute('data-pc-row') !== it.prefix) continue;
+				var span = rows[j].querySelector('[data-pc-infer]');
+				var conf = (it.confidence === 'mid') ? '<%=translate("较可信")%>' : '<%=translate("低置信")%>';
+				if (span) {
+					/* R77-B2（round77b）：模型这次允许「只给 note、不给 name」（典型是 CDN /
+					   云厂商网段，编不出应用名）。旧代码只渲染 it.name ⇒ 页面上出现
+					   「低置信 · 推测：」加一片空白。这里三态渲染：有 name 印 name；
+					   没 name 但有 note 印 note（并标明「无法判断具体应用」）；
+					   两者都没有就不写（保持空 span，归入按钮也不会被填值）。 */
+					if (it.name) {
+						span.textContent = conf + ' · <%=translate("推测")%>：' + it.name;
+					} else if (it.note) {
+						span.textContent = conf + ' · ' + it.note;
+					} else {
+						span.textContent = '';
+					}
+				}
+				var b2 = rows[j].querySelectorAll('button[data-pc-target]');
+				for (var k = 0; k < b2.length; k++) {
+					if (b2[k].getAttribute('onclick') === 'pcApplyOne(this)') {
+						/* 只在有真实名称时预填：note 是说明文字，不是封锁名称。 */
+						if (it.name) {
+							b2[k].setAttribute('data-pc-name', it.name);
+						} else {
+							/* 只清掉名称，**不禁用**按钮：pcApplyOne 在没有名称时会提示
+							   「请先点「推测是什么」」，禁用就把这条提示也堵死了（用户只能干瞪眼）。
+							   安全性由 pcApplyOne 的名称守卫保证 —— 空名称不会写进 uci。 */
+							b2[k].removeAttribute('data-pc-name');
+						}
+					}
+				}
+				n++;
+			}
+		}
+		return n;
+	}
+
+	function pcPollStop(key) {
+		if (pcPollTimer[key]) {
+			clearTimeout(pcPollTimer[key]);
+			pcPollTimer[key] = null;
+		}
+	}
+
+	function pcPoll(key, msg) {
+		pcGet(pcStatusUrl + '?key=' + encodeURIComponent(key), function (x, res) {
+			if (!res) {
+				pcBusySet(key, false);
+				pcInferMsg(msg, '<%=translate("读取推测状态失败")%>', false);
+				return;
+			}
+			if (res.state === 'running') {
+				var el = (res.elapsed || 0);
+				var ck = (res.chunks || 0);
+				pcInferMsg(msg, ck > 0
+					? ('<%=translate("模型正在输出…")%> ' + el + ' <%=translate("秒，已收到")%> ' + ck + ' <%=translate("块")%>')
+					: ('<%=translate("等待模型响应…")%> ' + el + ' <%=translate("秒（模型慢时会久一点，流式结束后才出结果）")%>'), true);
+				pcPollTimer[key] = setTimeout(function () { pcPoll(key, msg); }, 1000);
+				return;
+			}
+			pcBusySet(key, false);
+			if (res.state === 'done') {
+				var n = pcInferShow(key, res);
+				pcInferMsg(msg, n > 0
+					? ('<%=translate("推测到")%> ' + n + ' <%=translate("项（仅供参考，不参与统计）")%>')
+					: '<%=translate("没有推测出可信结果（不确定时不编）")%>', n > 0);
+			} else {
+				pcInferMsg(msg, res.error || '<%=translate("推测失败")%>', false);
+			}
+		});
+	}
+
 	function pcInferRun(key) {
 		var msg = document.querySelector('[data-pc-msg="' + key + '"]');
 		var rows = pcInferRows(key);
 		if (!rows.length) return;
+		pcPollStop(key);
 		pcBusySet(key, true);
 		pcInferMsg(msg, '<%=translate("正在推测…")%>', true);
 		pcPost(pcInferUrl, { key: key, token: pcTok }, function (x, res) {
-			pcBusySet(key, false);
 			if (!res || !res.ok) {
+				pcBusySet(key, false);
 				pcInferMsg(msg, (res && res.error) || '<%=translate("推测失败")%>', false);
 				return;
 			}
-			var n = 0;
-			var items = res.items || [];
-			for (var i = 0; i < items.length; i++) {
-				var it = items[i];
-				for (var j = 0; j < rows.length; j++) {
-					if (rows[j].getAttribute('data-pc-row') !== it.prefix) continue;
-					var span = rows[j].querySelector('[data-pc-infer]');
-					var conf = (it.confidence === 'mid') ? '<%=translate("较可信")%>' : '<%=translate("低置信")%>';
-					if (span) span.textContent = conf + ' · <%=translate("推测")%>：' + it.name;
-					var btn = rows[j].querySelector('[data-pc-apply]');
-					var b2 = rows[j].querySelectorAll('button[data-pc-target]');
-					for (var k = 0; k < b2.length; k++) {
-						if (b2[k].getAttribute('onclick') === 'pcApplyOne(this)') {
-							b2[k].setAttribute('data-pc-name', it.name);
-						}
-					}
-					n++;
-				}
+			/* 没有可发的东西（未归类目标全是私网/无组织名）⇒ 后端直接给 done，不发任何请求。 */
+			if (res.state === 'done') {
+				pcBusySet(key, false);
+				var n0 = pcInferShow(key, res);
+				pcInferMsg(msg, n0 > 0
+					? ('<%=translate("推测到")%> ' + n0 + ' <%=translate("项（仅供参考，不参与统计）")%>')
+					: '<%=translate("没有推测出可信结果（不确定时不编）")%>', n0 > 0);
+				return;
 			}
-			pcInferMsg(msg, n > 0 ? ('<%=translate("推测到")%> ' + n + ' <%=translate("项（仅供参考，不参与统计）")%>')
-				: '<%=translate("没有推测出可信结果（不确定时不编）")%>', n > 0);
+			/* 本机没有 curl ⇒ 后端降级成同步，结果已经在这一条响应里。 */
+			if (res.degraded) {
+				pcBusySet(key, false);
+				var n1 = pcInferShow(key, res);
+				pcInferMsg(msg, n1 > 0
+					? ('<%=translate("推测到")%> ' + n1 + ' <%=translate("项（仅供参考，不参与统计）")%>')
+					: '<%=translate("没有推测出可信结果（不确定时不编）")%>', n1 > 0);
+				return;
+			}
+			pcPoll(key, msg);
 		}, function () {
 			pcBusySet(key, false);
 			pcInferMsg(msg, '<%=translate("请求失败，请检查 AI 设置")%>', false);

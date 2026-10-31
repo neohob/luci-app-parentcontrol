@@ -32,6 +32,21 @@
 		}, onErr);
 	}
 
+	/* R77-F（round77b）：GET 版，只用于**轮询**只读状态端点（流式推测的进度/结果）。
+	   不带 token、不带 body —— 服务端那条路由也不做 test_post_security（它不改任何状态）。
+	   与 pcPost 同样把响应解成对象再交给 onOk，视图只认 {state, items, error}。 */
+	function pcGet(url, onOk, onErr) {
+		XHR.get(url, function (x) {
+			var res = null;
+			if (x && typeof x.responseText === 'string') {
+				try { res = JSON.parse(x.responseText); } catch (e) { res = null; }
+			} else if (x && typeof x === 'object') {
+				res = x;
+			}
+			onOk(x, res);
+		}, onErr);
+	}
+
 	// 重置当日额度并刷新页面。确认文案 / 动作 URL / token 由视图传入（文案要过
 	// translate()，只能在模板侧给出）。
 	function pcResetQuota(key, url, confirmText, token) {
@@ -322,6 +337,7 @@
 	window.pcField = pcField;
 	window.pcSetMsg = pcSetMsg;
 	window.pcPost = pcPost;
+	window.pcGet = pcGet;
 	window.pcResetQuota = pcResetQuota;
 	window.pcMatrixToggle = pcMatrixToggle;
 	window.pcAppsRows = pcAppsRows;

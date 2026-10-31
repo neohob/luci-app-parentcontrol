@@ -23,6 +23,9 @@ function index()
 	-- round75：未归类目标的 AI 推测 / 一键归入条目（都只接受 POST + CSRF）
 	entry({"admin", "control", "parentcontrol","unclassified_infer"}, call("unclassified_infer")).leaf = true
 	entry({"admin", "control", "parentcontrol","unclassified_apply"}, call("unclassified_apply")).leaf = true
+	-- R77-F（round77b）：流式推测是后台任务，前端轮询这个**只读** GET 端点拿进度/结果。
+	-- 不用 POST：它不改任何状态（不写 uci、不重建、不外发请求），只是读文件。
+	entry({"admin", "control", "parentcontrol","unclassified_infer_status"}, call("unclassified_infer_status")).leaf = true
 end
 
 function status()
@@ -148,8 +151,28 @@ function unclassified_infer()
 		end)
 	end)
 
-	local res = ai.infer({ items = items, names = apps_names(apps) })
+	-- R77-F（round77b）：**不再同步等结果**。推测改成后台任务（start-stop-daemon + curl 流式），
+	-- 这里只负责「打包 + 起任务」，立刻返回 {ok, job, state="running"}；前端轮询
+	-- unclassified_infer_status 拿进度与结果。
+	-- 原因：真机实测模型 37 秒 / 54 秒才出结果，同步路径要么被 uhttpd 掐断、要么被判超时，
+	-- 表现为「假失败」；而流式之后「流结束」才是结束信号，不能用总时长判断。
 	-- body（请求体原文）只用于测试断言，不下发到浏览器。
+	local res = ai.infer_start({ key = key, items = items, names = apps_names(apps) })
+	res.body = nil
+	luci.http.write_json(res)
+end
+
+-- R77-F（round77b）：查询后台推测任务的状态。GET、只读、无副作用。
+-- 终态时顺带解析 SSE、写 /tmp/parentcontrol/ai.log、清理临时文件（都在 ai.infer_state 里）。
+function unclassified_infer_status()
+	luci.http.prepare_content("application/json")
+	local ai = require "luci.model.cbi.parentcontrol.ai"
+	local key = luci.http.formvalue("key") or ""
+	if not key:match("^weburl_%d+$") then
+		luci.http.write_json({ state = "failed", error = translate("条目编号不合法") })
+		return
+	end
+	local res = ai.infer_state(key)
 	res.body = nil
 	luci.http.write_json(res)
 end

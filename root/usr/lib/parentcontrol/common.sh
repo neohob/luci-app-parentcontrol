@@ -1124,3 +1124,42 @@ pc_http() { # <GET|POST> <url> <outfile> [infile|-] [header]...
 		_pc_ai_fail "$_o" "wget 请求失败：${_r:-HTTP 错误或网络不可达}"
 	fi
 }
+
+# R77-E（round77b）：流式 HTTP —— 只给 AI 推测用（SSE）。
+# 与 pc_http 的区别：**判定模型不同**。
+#   pc_http：`--max-time T` 到点就杀 ⇒ 把「总时长」当结束条件，模型慢一点就假失败
+#            （真机实测一次推测 37 秒 / 54 秒，旧默认 15 秒必然 curl (28)）。
+#   本函数：完成 = curl 正常退出（流自己结束）；只有**连续 idle 秒平均速率 < 1B/s**
+#            才判停滞（`--speed-limit 1 --speed-time <idle>`）；`--max-time <max>` 只是
+#            最后防线（防对端无限挂），不参与「是否失败」的语义判断。
+# 只有 curl 支持增量输出：uclient-fetch / wget 一律 return 3（不支持），调用方据此降级到 pc_http。
+# 用法：pc_http_stream <url> <infile|-> <outfile> <idle> <max>
+#   exit 0 = 流正常结束（outfile 里是完整 SSE 文本）
+#   exit 3 = 本机 HTTP 客户端不支持流式（调用方降级）
+#   exit 1 = 其它失败（可读原因已写入 <outfile>.err，同时写入 outfile 供调用方读取）
+pc_http_stream() {
+	local _u _i _o _idle _max _k _err _r
+	_u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"
+	# 参数卫生：idle/max 必须是纯数字，否则回落保守默认（绝不把非法串拼进命令行）。
+	case "$_idle" in ''|*[!0-9]*) _idle=60 ;; esac
+	case "$_max" in ''|*[!0-9]*) _max=900 ;; esac
+	_err="${_o}.err"
+	# 这里**不再**探测 curl：全仓「用哪个下载器」的探测阶梯只有 pc_http 一处
+	# （W60 断言 command -v curl 恰 1 次）。本函数只被 init.d 的 ai_stream_start 调用，
+	# 那里已经先 `command -v curl || return 3` 决定是否降级到同步路径；真缺 curl 时
+	# 下面的 curl 调用会以 127 失败，被 _pc_ai_fail 记成可读原因。
+	[ -z "$_i" ] || [ "$_i" = "-" ] || [ -f "$_i" ] || {
+		_pc_ai_fail "$_o" "请求体临时文件不存在：$_i"; return 1
+	}
+	_k=$(_pc_ai_key)
+	set -- -sS -N --speed-limit 1 --speed-time "$_idle" --max-time "$_max" \
+		-H "Content-Type: application/json"
+	if [ -n "$_k" ]; then set -- "$@" -H "Authorization: Bearer $_k"; fi
+	if [ -n "$_i" ] && [ "$_i" != "-" ]; then set -- "$@" --data-binary "@$_i"; fi
+	# 直接写文件（-o）：`curl -N` 在管道里仍可能被缓冲（见 handoff §7 第 8 条）。
+	curl "$@" -o "$_o" "$_u" 2>"$_err"
+	if [ $? -eq 0 ]; then rm -f "$_err"; return 0; fi
+	_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
+	_pc_ai_fail "$_o" "${_r:-HTTP 错误或网络不可达}"
+	return 1
+}
