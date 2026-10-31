@@ -267,17 +267,31 @@
 				<td><%=r.total or "-"%></td>
 			</tr>
 			<!-- R76-C（round76）：目标明细从页尾独立区块搬进矩阵 —— 每条目标行自带「推测」「归入条目」
-			     两个按钮（data-pc-key 指该行所在条目，所以多条目设备也写对条目）。R76-A：主列显示
-			     服务名（PTR 可注册域 ⇒ ASN 组织名 ⇒ 未知），IP/目标仍以次要信息保留。
+			     两个按钮（data-pc-key 指该行所在条目，所以多条目设备也写对条目）。
+			     R77-C（round77）：主列从「服务名」改成「归属网络」，**三态**渲染：
+			       有 PTR（s.service 非空）⇒ 主列 <b>可注册域</b>（这才是应用线索）；
+			       查过但无 PTR（s.queried 真）⇒ 主列只放 org 原文 + 「基础设施，无法判断具体应用」，
+			         且**不加粗** —— 加粗会让代号看起来像是我们识别出的服务名（本轮修的正是这个冒充）；
+			       没查（s.queried 空）⇒ 「未查询」（未点 ?asn=1 时是 "-"）。
+			     data-pc-name 只在有真实域名时才有值：绝不把 ASN 组织代号预填成封锁名称。
 			     字符串一律 pcdata()；裸输出的只有整数 s.total / r.subs_more（W207④ 白名单同口径）。 -->
 			<% if _sid then %>
+			<!-- R77-E（round76d 的入口）：没带 ?asn=1 时在明细区第一行给「查归属网络」入口。
+			     三属性缺一不可：data-pc-owner（否则设备级折叠不认它，成孤儿行）、
+			     data-pc-subowner（否则 pcSubResync 不收敛）、style="display:none"（默认收起）。
+			     刻意**不带** data-pc-sub / onclick="pcSubToggle" —— 那是未归类行自己的开关。 -->
+			<% if not d.asn_requested then %>
+			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" style="display:none">
+				<td colspan="<%=#d.days + 2%>"><%=T("想看归属网络而不是 IP？")%> <a href="?asn=1"><%=T("查 ASN / 归属网络")%></a><%=T("（每次最多查 24 个，再点一次继续查）")%></td>
+			</tr>
+			<% end %>
 			<% for _, s in ipairs(r.subs.rows) do %>
 			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" data-pc-key="<%=pcdata(r.key)%>" data-pc-row="<%=pcdata(s.target)%>" style="display:none">
-				<td><b><%=pcdata(s.service or (d.asn_requested and T("未查询") or "-"))%></b><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% end %><% if s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
+				<td><% if s.service then %><b><%=pcdata(s.service)%></b><% elseif s.queried then %><%=pcdata(s.org or "")%> <span class="muted"><%=pcdata(T("基础设施，无法判断具体应用"))%></span><% else %><%=pcdata(d.asn_requested and T("未查询") or "-")%><% end %><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% end %><% if s.service and s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferOne(this)"
 						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("推测是什么")%></button><span class="muted" data-pc-infer="1"></span>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcApplyOne(this)"
-						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>" data-pc-name="<%=pcdata((s.service and s.service ~= "未知" and s.service ~= "未查询") and s.service or "")%>"><%=T("归入条目")%></button><span class="muted" data-pc-apply="1"></span>
+						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>" data-pc-name="<%=pcdata(s.service or "")%>"><%=T("归入条目")%></button><span class="muted" data-pc-apply="1"></span>
 				</td>
 				<% for _, day in ipairs(d.days) do local v = s.by[day.date] %>
 				<td><%=v and v or "-"%></td>
@@ -290,6 +304,11 @@
 				<td colspan="<%=#d.days + 2%>" class="muted"><%=T("还有")%> <%=r.subs_more%> <%=T("条未显示（按今日分钟降序只列前 10 条）。")%></td>
 			</tr>
 			<% end %>
+			<!-- R77-E2（round77）：填域名比填网段准的引导 —— 域名会解析到它当前所有的 CDN 地址，
+			     网段只覆盖这一个。摘要行同属一级开关（同一 data-pc-subowner），默认收起。 -->
+			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" style="display:none">
+				<td colspan="<%=#d.days + 2%>" class="muted"><%=T("如果你知道这个 App 的域名，去条目里填域名比在这里填网段更准 —— 域名会解析到它当前所有的 CDN 地址，网段只会覆盖这一个。")%> <a href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(r.key)%>"><%=T("去条目里填域名")%></a></td>
+			</tr>
 			<% end %>
 			<% end %>
 			<% end %>
@@ -306,10 +325,11 @@
 		<br/><%=T("目标明细：展开矩阵里「（未归类）」那一行（点前面的 ▸），就能看到该条目所有未归类目标逐个的今天/合计分钟。按今日分钟降序只列前 10 条，其余折叠成一行「还有 N 条未显示」。仍看不到明细的唯一情形是：当天有未归类分钟，但映射表里已经没有该目标的记录（历史或已过期的目标，IP 刷新重建后它已不在表里）——这种情况下分钟还在，只是拆不到具体目标。")%>
 		<br/><%=T("名称格显示「-」有三种情形：① `.map` 存在但某天没有名称维度的记录（老数据、或那天没采样）；② 该条目当天没有装上诊断链（没有未覆盖设备）；③ 有链、当天也采到了名称分钟，但这段分钟全落在「（未归类）」行上（命中目标不在该条目的「封锁名称」里），所以具名的名称行是「-」而「（未归类）」有值。相反的，如果本机没有 `resolveip`（或还没跑过 IP 刷新），`.map` 不会生成 —— 这时名称行整块不会显示，而不是显示「-」。")%>
 		<br/><%=T("「（未归类）」这一行是把这个条目「命中了、但在「封锁名称」里找不到对应名称」的目标分钟合在一起，用来发现「是不是该给这个目标补一条封锁名称」。点开这一行能看到里面每个目标今天／合计各多少分钟，这一行的分钟与子项之间没有可依赖的大小关系：子项「今天」取的是该目标当天的命中分钟，而这一行只累计「名称分钟」那一份，只有未覆盖设备命中的目标不计入（子项分钟只来自「名称分钟」这条采样。）")%>
-		<br/><%=T("「服务」这一列的口径（PTR 反查 + ASN 兜底）见页面底部「口径与参数」。")%>
-		<br/><%=T("归属与 PTR 只在点下面的按钮后才有（默认不查、定时任务里也不查）：归属来自 Team Cymru 公共 ASN 库（DNS TXT 查询），PTR 来自反向解析。每个目标最多三次 DNS 查询（网段归属、组织名、PTR），每次最多查 12 个还没缓存的目标；DNS 服务器不响应时每次查询都要等到解析器自己的超时，所以冷缓存第一次点开最坏能到分钟级，之后再看就走缓存（7 天）、不再查询。IPv6 目标与域名串不查，显示「未查询」；内网与保留地址（10/8、192.168/16、127/8、169.254/16、100.64/10 等）一律不查，同样显示「未查询」—— 不会把本机内网编址发给第三方。")%>
+		<br/><%=T("「归属网络」这一列的口径（PTR 反查 + ASN 归属）见页面底部「口径与参数」。")%>
+		<br/><%=T("「归属网络」是该网段登记的**基础设施**（CDN / 云 / 运营商），不是具体 App。同一个 CDN 网段会被很多应用共用，所以没有域名证据时我们只能写「无法判断具体应用」，不猜。")%>
+		<br/><%=T("归属与 PTR 只在点下面的按钮后才有（默认不查、定时任务里也不查）：归属来自 Team Cymru 公共 ASN 库（DNS TXT 查询），PTR 来自反向解析。每个目标最多三次 DNS 查询（网段归属、组织名、PTR），每次最多查 24 个还没缓存的目标；DNS 服务器不响应时每次查询都要等到解析器自己的超时，所以冷缓存第一次点开最坏能到分钟级，之后再看就走缓存（7 天）、不再查询。每次点开最多查 24 个目标；还有没查的，再点一次会接着查下一批。IPv6 目标与域名串不查，显示「未查询」；内网与保留地址（10/8、192.168/16、127/8、169.254/16、100.64/10 等）一律不查，同样显示「未查询」—— 不会把本机内网编址发给第三方。")%>
 		<% if not d.asn_requested then %>
-		<br/><a class="btn cbi-button cbi-button-neutral cbi-button-small" href="?asn=1"><%=T("查 ASN / 服务（归属网络与 PTR）")%></a>
+		<br/><a class="btn cbi-button cbi-button-neutral cbi-button-small" href="?asn=1"><%=T("查 ASN / 归属网络（ASN 与 PTR）")%></a>
 		<% end %>
 		<br/><%=T("「推测」只在你点按钮时才把该目标的公网网段、该网段的 ASN 组织名、以及本条目已配的封锁名称清单发给 AI；不会发 MAC、主机名、内网 IP 或设备名。推测结果仅供参考，不参与统计口径，也不写入归属。")%>
 		<br/><%=T("「归入条目」会把该目标写进它所在那一行的条目：条目里已有同名封锁名称就追加到该行的域名列表末尾，没有就新增一行「名称|目标」。改完会自动重建规则，约 15–30 秒后回到本页可见。")%>
@@ -417,8 +437,8 @@
 		<tr><td><%=T("重置")%></td><td class="muted">
 			<%=T("额度条目可点「重置额度」立刻清零今天的用量（并写入重置记录）。重置不影响已累计的历史与实际用量。")%>
 		</td></tr>
-		<tr><td><%=T("目标明细的「服务」列")%></td><td class="muted">
-			<%=T("目标明细里的「服务」这一列来自 PTR 反查与 ASN 归属：先看 PTR 反查出来的主机名，取它的可注册域（例如 a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com）；没有 PTR 就退到 ASN 组织名的第一段（例如 AKAMAI-ASN1, NL ⇒ AKAMAI-ASN1）；两者都没有就显示「未知」。它只说明这个目标落在谁的网络里，不是我们识别出的品牌或应用名，也不能作为封锁依据；目标本身（IP 或域名串）仍显示在同一行的灰色小字里。")%>
+		<tr><td><%=T("目标明细的「归属网络」列")%></td><td class="muted">
+			<%=T("目标明细里的「归属网络」这一列只讲「这个目标落在谁的网络里」，它**不是**我们识别出的服务或应用名，也不能作为封锁依据。有三态：① 有 PTR 反查主机名 ⇒ 取它的可注册域作为应用线索（例如 a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com）；② 没有 PTR ⇒ 只写 ASN 组织原文（例如 AKAMAI-ASN1, NL）并明确标「基础设施，无法判断具体应用」，**不会**把组织代号当成服务名展示；③ 还没点开过的条目写「未查询」。之所以不给没有域名的目标猜一个应用名：同一腾讯云/阿里云/CDN 网段上可能跑着别家的游戏或应用，把 ASN 当应用名会误导。目标本身（IP 或域名串）仍显示在同一行的灰色小字里。")%>
 		</td></tr>
 		<tr><td><%=T("可能少计的情况")%></td><td class="muted">
 			<%=T("名称条目（按其域名/IP 计时）在 IPv4 上只能按解析出的目标 IP 匹配，CDN 换到全新段时会短暂漏计；QUIC/HTTP3 的 SNI 加密，任何方案都拦不到。")%>

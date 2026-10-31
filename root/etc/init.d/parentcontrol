@@ -1784,8 +1784,10 @@ hosts_tsv() {
 # 第 5 段（ptr）是 round76 新增的 —— **4 段旧行必须照旧能读**（ptr 当空串，不重写不丢弃）。
 # 查过但没结果也要缓存（空 asn/org/ptr），否则每次点开都重跑一遍 DNS。
 # 绝不在 tick 路径上：默认 stats_tsv 输出里一个 asn 行都没有（见 stats_tsv_inner 的分发）。
+# R77-B（round77）：单次上限 12 ⇒ 24（真机上未归类目标常有二三十个，12 个要连点两三次）。
+# 超出的不写假「无结果」，下一次点开会接着查下一批（页面文案必须这么说）。
 PC_ASN_TTL=${PC_ASN_TTL:-604800}
-PC_ASN_MAX=${PC_ASN_MAX:-12}
+PC_ASN_MAX=${PC_ASN_MAX:-24}
 
 pc_asn_cache_line() { # $1=target → 打印 "<hit>\t<asn>\t<org>\t<ptr>"（hit=1 仅当缓存未过期）
 	local _cache _now

@@ -106,13 +106,18 @@ function M.invariants(d)
 end
 
 -- R76-A（round76）：把「查到的实测数据」派生成一个**服务名**。
--- 输入只能是 PTR 反查主机名与 ASN 组织名 —— **不许**把 IP/目标串当服务名，也不许臆造品牌名。
+-- 输入只能是 PTR 反查主机名 —— **不许**把 IP/目标串当服务名，也不许臆造品牌名。
 --   有 PTR ⇒ 取可注册域（去掉机器名前缀，末两段；末两段是 co.uk/com.cn 这类二级后缀时取三段）
 --              a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com
 --              server-13-32-1-1.cloudfront.net                    ⇒ cloudfront.net
---   无 PTR、有 org ⇒ 组织名第一段（逗号前）：AKAMAI-ASN1, NL ⇒ AKAMAI-ASN1
---   都没有 ⇒ "未知"（页面据此显示未知，而不是编一个名字）
--- 纯函数、无副作用、无 IO —— W271 直接喂夹具单测。
+--   无 PTR ⇒ **nil**（R77-C）。调用方据此显示「归属网络（org 原文）+ 基础设施，无法判断具体应用」。
+--
+-- R77-C（round77）：这里以前在没 PTR 时回落成 org 第一段（AKAMAI-ASN1, NL ⇒ AKAMAI-ASN1），
+-- 于是页面「服务」列把 ASN 组织代号当服务名展示，用户以为那就是应用名。
+-- 用户已明确否决「内置 ASN→服务名常识表」：**ASN 是托管方不是应用**（同一腾讯云/阿里云网段
+-- 上可能跑着别家的游戏），任何 ASN→应用映射都会误导。所以这里干脆**不回落**：没有域名证据
+-- 就老实地返回 nil。org 参数保留只为兼容调用签名（现有调用点都传两个参数），不再使用。
+-- 别把它改回去：改了就是又把代号冒充成服务名。
 local SLD2 = {
 	["co.uk"] = true, ["org.uk"] = true, ["ac.uk"] = true, ["gov.uk"] = true,
 	["com.cn"] = true, ["net.cn"] = true, ["org.cn"] = true, ["gov.cn"] = true,
@@ -135,13 +140,9 @@ function M.service_name(ptr, org)
 		end
 		return p   -- 1 或 2 段：本身已是可注册域（或单标签主机名），原样用
 	end
-	local o = tostring(org or ""):gsub("^%s+", ""):gsub("%s+$", "")
-	if o ~= "" then
-		local first = o:match("^([^,]+)") or o
-		first = first:gsub("^%s+", ""):gsub("%s+$", "")
-		if first ~= "" then return first end
-	end
-	return "未知"
+	-- R77-C：只认 PTR。没有 PTR 就返回 nil（不回落到 ASN 组织名）。
+	-- org 参数刻意不使用 —— 保留它只为兼容调用签名，见函数上方注释。
+	return nil
 end
 
 -- R76-M2（round76b）：asn 行「到底查到了没有」的判定必须容忍 nil。
@@ -564,10 +565,11 @@ function M.collect(raw)
 						-- 必须同口径，否则测试缝与生产行为分叉（round76b 就是靠这条缝发现
 						-- `nil ~= ""` 的）。**不是死代码，别删。**
 						-- shell 对**不可查**的目标（IPv6 / 域名 / 私网保留）也发空票行
-						-- `asn <t> <空> <空> <空>`，所以 `a ~= nil` 不等于「查到了东西」——
-						-- 必须三段都空才算没查到：否则 service 会落到 M.service_name("","")
-						-- 的兜底「未知」，既与页面「IPv6 显示「未查询」」的说明自相矛盾，
-						-- 又会被 data-pc-name 预填成封锁名称（把「未知」写进 uci apps）。
+						-- `asn <t> <空> <空> <空>`，所以 `a ~= nil` 不等于「查到了东西」。
+						-- 必须三段都空才算没查到：否则 queried 会把「没查」当成「查过了」，
+						-- 与页面「IPv6 显示「未查询」」的说明自相矛盾。
+						-- （R77-C 之后 service 在没有 PTR 时就是 nil，不再有「未知」兜底被
+						-- 预填成封锁名称的风险；但 queried 三态仍然依赖这个判定。）
 						local hit, hptr, horg = asn_hit(a)
 						local svc
 						if hit then svc = M.service_name(hptr, horg) end
@@ -877,10 +879,9 @@ function M.load_asn(d)
 					-- （read_asn 只在 `?asn=1` 才跑），那时 service 必然是 nil；
 					-- 不在这里回填，页面就会永远印「未查询」——实测真机就是这样。
 					-- R76-M2：但「空票」不算查到 —— shell 对 IPv6/域名/私网也发
-					-- `asn <t> <空> <空> <空>` 行，若在这里无条件算服务名，就会落到
-					-- M.service_name("","") 的兜底「未知」：页面说明写着「IPv6 显示
-					-- 「未查询」」自相矛盾，且 data-pc-name 会被预填成「未知」，
-					-- 用户点「归入条目」就把「未知」当封锁名称写进 uci apps。
+					-- `asn <t> <空> <空> <空>` 行，若在这里无条件算服务名，queried 会把
+					-- 「没查」当「查过了」，页面「IPv6 显示「未查询」」就成了假话。
+					-- （R77-C：没有 PTR 时 service 就是 nil，页面显示 org + 「无法判断具体应用」。）
 					s.queried = hit and true or nil
 					if hit then s.service = M.service_name(hptr, horg) end
 					n = n + 1

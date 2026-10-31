@@ -49,6 +49,17 @@ e = t:option(Value, "model", translate("模型名称"),
 	translate("点下方「获取模型列表」从 endpoint 拉取候选，或手动填写模型 id。"))
 e.rmempty = true
 
+-- R77-A（round77）：请求超时做成设置项。默认 60 秒 —— 一次推测要把该条目所有未归类目标
+-- 打包发一个请求（round75 的 ai.infer），15 秒在真机上经常不够（`curl: (28) ... 15001
+-- milliseconds`）。注意：common.sh 是禁改文件，但 ai.lua 通过 `PC_AI_TIMEOUT=<秒>` 环境变量
+-- 前缀把值传给 shell 的 `_pc_http_timeout()`，所以这里只存 uci 值即可。
+-- 留空 = 用默认值（60）；非数字/越界的值在 ai.lua 里一律回落默认值（不会拼进命令行）。
+e = t:option(Value, "timeout", translate("请求超时（秒）"),
+	translate("可选，默认 60。范围 5–300。AI 推测一次要把该条目所有未归类目标打包发一个请求，网络慢或模型慢时 15 秒常常不够；超时会报「AI 请求失败」。"))
+e.placeholder = "60"
+e.datatype = "or(\"\", range(5,300))"
+e.rmempty = true
+
 e = t:option(DummyValue, "pc_ai_models", translate("模型列表"),
 	translate("从上面的 endpoint 拉取可用模型，填充「模型名称」的候选。"))
 e.template = "parentcontrol/ai_models"

@@ -263,7 +263,13 @@ local function humanize_http_error(text)
 end
 
 -- 返回 body 字符串；失败返回 nil, 可读原因。
-local function http_run(method, url, body, apikey)
+-- R77-A（round77）：请求超时不再是写死的 15 秒（真机报过
+-- `curl: (28) Operation timed out after 15001 milliseconds`：一次推测要把该条目所有未归类
+-- 目标打包发一个请求，模型慢一点就必然超时）。默认改成 60 秒，并可由 uci `ai.timeout` 覆盖。
+-- 注意：`common.sh` 是禁改文件，但 `_pc_http_timeout()` 读的是
+-- `${PC_HTTP_TIMEOUT:-${PC_AI_TIMEOUT:-15}}` —— 本函数已经把值通过 `PC_AI_TIMEOUT=` 前缀
+-- 传给 shell，所以只改这里就够，shell 一行都不用动。
+local function http_run(method, url, body, apikey, timeout)
 	local out = tmpfile("out")
 	local infile, keyfile
 
@@ -272,9 +278,19 @@ local function http_run(method, url, body, apikey)
 	if f then f:close() end
 	tighten(out)
 
-	-- PC_AI_TIMEOUT 只允许数字，防止环境变量注入。
-	local timeout = (os.getenv("PC_AI_TIMEOUT") or ""):match("^%d+$") or "15"
-	local parts = { "PC_AI_TIMEOUT=" .. timeout }
+	-- 超时优先级：调用方传入（来自 uci ai.timeout）> 环境变量 PC_AI_TIMEOUT > 60。
+	-- 只接受纯数字且限 5..300；越界/非法一律回落到下一级 —— 绝不把非法串拼进命令行
+	-- （这是防止环境变量注入的唯一闸门，别为了「顺手」放宽）。
+	local t = tostring(timeout or ""):match("^%d+$")
+	t = t and tonumber(t) or nil
+	if not t or t < 5 or t > 300 then t = nil end
+	if not t then
+		local e = (os.getenv("PC_AI_TIMEOUT") or ""):match("^%d+$")
+		e = e and tonumber(e) or nil
+		if e and e >= 5 and e <= 300 then t = e end
+	end
+	if not t then t = 60 end
+	local parts = { "PC_AI_TIMEOUT=" .. tostring(t) }
 
 	if apikey and apikey ~= "" then
 		keyfile = tmpfile("key")
@@ -323,7 +339,7 @@ end
 -- ---------- uci 配置 ----------
 
 function M.config()
-	local conf = { endpoint = "", model = "", apikey = "" }
+	local conf = { endpoint = "", model = "", apikey = "", timeout = "" }
 	pcall(function()
 		local uci = require("luci.model.uci").cursor()
 		-- A29/D21：段身份统一为命名节 `ai`，逐字段先读命名节，
@@ -338,6 +354,7 @@ function M.config()
 		conf.endpoint = pick("endpoint")
 		conf.model    = pick("model")
 		conf.apikey   = pick("apikey")
+		conf.timeout  = pick("timeout")
 	end)
 	return conf
 end
@@ -356,7 +373,7 @@ function M.models(endpoint, apikey)
 		return { ok = false, error = T("AI endpoint 无效（需以 http:// 或 https:// 开头）") }
 	end
 
-	local body, err = http_run("GET", endpoint:gsub("/+$", "") .. "/models", nil, apikey)
+	local body, err = http_run("GET", endpoint:gsub("/+$", "") .. "/models", nil, apikey, conf.timeout)
 	if not body then return { ok = false, error = err } end
 
 	local parsed = json_decode(body)
@@ -423,7 +440,7 @@ function M.parse(text, opts)
 		return { ok = false, error = T("无法构造 AI 请求体") }
 	end
 
-	local body, err = http_run("POST", endpoint:gsub("/+$", "") .. "/chat/completions", payload, apikey)
+	local body, err = http_run("POST", endpoint:gsub("/+$", "") .. "/chat/completions", payload, apikey, conf.timeout)
 	if not body then return { ok = false, error = err } end
 
 	local parsed = json_decode(body)
@@ -555,14 +572,26 @@ function M.is_public_prefix(s)
 	return not M.is_private_addr(v)
 end
 
--- 固定系统提示词：唯一职责 = 「网段 + 组织名 + 已配名称」→ 猜这是哪类服务。
--- 明确要求不确定就返回空数组（不许编），并强制 JSON 数组形态便于严格校验。
+-- 固定系统提示词：唯一职责 = 「网段 + 组织名 + 已配名称」→ 说清这是什么**基础设施**，
+-- 并在有把握时对应到已配名称。R77-D（round77）改造了三条口径（用户拍板）：
+--   ① 允许它说人话（新增 note 字段解释「这是什么基础设施、通常承载什么」）；
+--   ② 允许 name 为空（不知道该归到哪个已配名称就留空，不许编）；
+--   ③ **绝对禁止把基础设施提供商当应用名** —— Akamai/Cloudflare/腾讯云 这类是托管方不是应用
+--      （同一腾讯云/阿里云网段上可能跑着别家的游戏），所以「内置 ASN→服务名常识表」被用户否决，
+--      模型自己把托管方名字填进 name 也是同一类错误（解析侧还会再拦一道，见 sanitize_infer）。
+-- 明确要求不确定就留空 name，并强制 JSON 数组形态便于严格校验。
 local INFER_SYS_PROMPT = "你是网络流量归因助手。用户会给出若干「公网网段 + 该网段的 ASN 组织名」"
-	.. "以及该条目已配置的封锁名称清单。请推测每个网段最可能属于哪个被封锁的服务/应用。"
-	.. "只输出一个 JSON 数组，每个元素形如 {\"prefix\":\"网段\",\"name\":\"名称\",\"confidence\":\"low 或 mid\"}，"
+	.. "以及该条目已配置的封锁名称清单。请对每个网段回答两件事："
+	.. "(1) 它属于哪类基础设施（CDN / 云服务商 / 运营商 / 企业网络 / 无法判断）；"
+	.. "(2) 如果该网段很可能就是清单里某个已配名称所用，给出该名称；否则 name 留空。"
+	.. "只输出一个 JSON 数组，每个元素形如 "
+	.. "{\"prefix\":\"网段\",\"name\":\"名称或空串\",\"note\":\"不超过 40 字的说明\","
+	.. "\"confidence\":\"low 或 mid\"}。"
 	.. "不要输出任何解释、不要输出 markdown 代码块。prefix 必须是用户给出的网段之一。"
-	.. "name 用中文或英文的通用服务名，不超过 20 字，不得包含竖线字符。"
-	.. "**不确定就返回空数组 []，绝对不要编造**。"
+	.. "note 要说明这是什么基础设施、通常承载什么；如果无法确定具体是哪个应用，"
+	.. "note 必须明确写「无法判断具体应用」。"
+	.. "绝对不许把基础设施提供商的名字（如 Akamai、Cloudflare、腾讯云、阿里云）当成应用名填进 name。"
+	.. "不确定就留空 name，绝对不要编造。"
 M.INFER_SYS_PROMPT = INFER_SYS_PROMPT
 
 -- 从模型回答里抽出 JSON 数组：容忍 ```json 包裹与前后废话（与 extract 同风格）。
@@ -578,6 +607,47 @@ local function extract_json_array(content)
 	return s:sub(i, k)
 end
 
+-- R77-D：基础设施提供商名不是应用名。
+-- 用户已明确否决「内置 ASN→服务名常识表」（ASN 是托管方不是应用，同一云段上可能跑着别家的游戏），
+-- 同理，模型也不能把 Akamai / Cloudflare / 腾讯云 这类 Provider 名字填进 name —— 那不是
+-- 「哪个应用」。命中就只丢 name（note 保留：它解释基础设施，恰好是我们想要的那部分）。
+-- 大小写不敏感、子串匹配（模型可能写 "Akamai Technologies" / "腾讯云计算"）。
+local INFRA_NAMES = {
+	"akamai", "cloudflare", "amazon", "aws", "google", "microsoft",
+	"azure", "fastly", "腾讯云", "阿里云", "华为云",
+}
+local function is_infra_name(n)
+	local v = tostring(n or ""):lower()
+	if v == "" then return false end
+	for _, w in ipairs(INFRA_NAMES) do
+		if v:find(w, 1, true) then return true end
+	end
+	return false
+end
+
+-- R77-D：note（「这是什么基础设施」）的清洗。与 name 同风格：控制字符→空格、去首尾空白，
+-- 超 40 字截断到 40 字（按 UTF-8 字符数，不按字节 —— 中文一个字三字节，按字节截会把末尾
+-- 半个字截出来变脏）。含竖线 `|` 的 note 直接丢弃**该字段**（不丢整条）：`|` 是 uci apps
+-- 记录的字段分隔符，绝不让它流进页面当封锁名称的预填值。
+local function clean_note(v)
+	if type(v) ~= "string" then return "" end
+	v = v:gsub("[%c]", " ")
+	if v:find("|", 1, true) then return "" end
+	v = v:gsub("^%s+", ""):gsub("%s+$", "")
+	if #v > 40 then
+		-- 按 UTF-8 字符（而非字节）截断：012xxxxx 是续字节，不能当字符首字节。
+		local n, i = 0, 1
+		while i <= #v and n < 40 do
+			local b = v:byte(i)
+			local len = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
+			i = i + len
+			n = n + 1
+		end
+		v = v:sub(1, i - 1):gsub("%s+$", "")
+	end
+	return v
+end
+
 -- 严格校验模型输出。返回 items（只含发送集合里的 prefix），或 nil, 原因。
 local function sanitize_infer(parsed, sentmap)
 	if type(parsed) ~= "table" then return nil, T("AI 响应不是 JSON 数组") end
@@ -587,13 +657,17 @@ local function sanitize_infer(parsed, sentmap)
 			local p = trim(it.prefix or "")
 			local n = trim(it.name or "")
 			local conf = trim(it.confidence or "")
+			local note = clean_note(it.note)
+			-- 名称里带竖线 / 控制字符 / 超长：这条应答不可信 ⇒ 整条丢弃（与 round75 同口径）。
+			local badname = (n:find("|", 1, true) or n:find("%c") or #n > 64) and true or false
+			-- R77-D：name 允许为空串（「不知道该归到哪个已配名称」）；基础设施名降级成空串
+			-- （不是丢整条 —— note 还有用，prefix 也还有用）。
+			if not badname and n ~= "" and is_infra_name(n) then n = "" end
 			-- prefix 必须在**刚才发出去的那批**里：不在的一律丢弃（防模型幻觉塞东西）。
-			if p ~= "" and sentmap[p] and not seen[p] then
-				if n ~= "" and #n <= 64 and not n:find("|", 1, true) and not n:find("%c") then
-					if conf ~= "mid" then conf = "low" end
-					seen[p] = true
-					out[#out + 1] = { prefix = p, name = n, confidence = conf }
-				end
+			if p ~= "" and sentmap[p] and not seen[p] and not badname then
+				if conf ~= "mid" then conf = "low" end
+				seen[p] = true
+				out[#out + 1] = { prefix = p, name = n, note = note, confidence = conf }
 			end
 		end
 	end
@@ -686,7 +760,8 @@ function M.infer(opts)
 	end
 
 	local http = opts.http or http_run
-	local body, err = http("POST", endpoint:gsub("/+$", "") .. "/chat/completions", payload, apikey)
+	-- R77-A：同样把 uci 超时传下去（测试注入的 http 只有 4 个参数，多传一个无影响）。
+	local body, err = http("POST", endpoint:gsub("/+$", "") .. "/chat/completions", payload, apikey, conf.timeout)
 	if not body then
 		return { ok = false, error = err, sent = sent, body = payload }
 	end
