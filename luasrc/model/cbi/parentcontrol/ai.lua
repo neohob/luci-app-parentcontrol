@@ -667,14 +667,19 @@ local function sanitize_infer(parsed, sentmap)
 			-- R77-D：name 允许为空串（「不知道该归到哪个已配名称」）；基础设施名降级成空串
 			-- （不是丢整条 —— note 还有用，prefix 也还有用）。
 			if not badname and n ~= "" and is_infra_name(n) then n = "" end
+			-- L-2（round77f）：name 与 note **都**为空 ⇒ 丢弃。留着它只会在页面上变成一行空白，
+			-- 且归入按钮点下去只会提示「请先点推测是什么」——那是把模型的沉默当成了结果。
+			local useful = (n ~= "" or note ~= "") and true or false
 			-- prefix 必须在**刚才发出去的那批**里：不在的一律丢弃（防模型幻觉塞东西）。
-			if p ~= "" and sentmap[p] and not seen[p] and not badname then
+			if p ~= "" and sentmap[p] and not seen[p] and not badname and useful then
 				if conf ~= "mid" then conf = "low" end
 				seen[p] = true
 				out[#out + 1] = { prefix = p, name = n, note = note, confidence = conf }
 			end
 		end
 	end
+	-- 全被丢弃时给一句人话，而不是让页面显示「推测到 0 项」那种空白态。
+	if #out == 0 then return nil, T("AI 没有给出可用的名称") end
 	return out
 end
 
@@ -846,7 +851,8 @@ end
 -- 都不该在 /tmp 里过夜（用户点名过这批残留）。导出成 M.gc_state 便于单测。
 function M.gc_state()
 	local sd = state_dir()
-	os.execute("find " .. shq(sd) .. " -maxdepth 1 -name 'ai.*' -mmin +60 -exec rm -f {} + 2>/dev/null")
+	-- 排除 ai.log：它是排障依据（用户点名要看「为什么这次没结果」），不该被 GC 当垃圾删掉。
+	os.execute("find " .. shq(sd) .. " -maxdepth 1 -name 'ai.*' ! -name 'ai.log' -mmin +60 -exec rm -f {} + 2>/dev/null")
 	-- `-L`：macOS 的 /tmp 是指向 /private/tmp 的符号链接，BSD find 默认不跟随**起点**
 	-- 符号链接（会一条都匹配不到、清理静默失效）。busybox find 同样支持 -L。
 	os.execute("find -L /tmp -maxdepth 1 -name 'pc-ai-*' -mmin +60 -exec rm -f {} + 2>/dev/null")
@@ -1034,14 +1040,24 @@ function M.infer_start(opts)
 end
 
 -- 终态错误文案（纯函数，可单测）。
--- 关键：stalled 必须说「没有任何输出」，**不能**说成「总时长超时」——
--- 流式之后判据是「流结束」，停滞判定只防对端挂着不动（S55 的靶心）。
-function M.state_error(st, detail, stall)
-	if st == "stalled" then
-		return string.format(T("模型超过 %d 秒没有任何输出，已中断（不是总时长超时）"),
-			tonumber(stall) or 60)
-	end
+-- round77f：curl 对「速率不足被掐」和「撞上 --max-time 总时长墙」都返回 28，所以**不能**再用
+-- 一句「没有任何输出」概括 —— 撞墙时明明一直在收字节（curl 自己会写 with N bytes received），
+-- 那样说就是假话。真实的区分器是 worker 记下的 why（耗时 vs max，与 locale/curl 版本无关）：
+--   idle    ⇒ 连续 N 秒速率低于阈值（实测 idle=2 时 8 秒才断，窗口内可能有零星字节）
+--   maxtime ⇒ 撞上硬总时长上限，**明确否认**「没有输出」
+--   other   ⇒ 透出 curl 原文
+-- cfg = { stall = <秒>, timeout = <秒> }
+function M.state_error(why, detail, cfg)
+	cfg = cfg or {}
 	local d = trim(detail or "")
+	if why == "idle" then
+		return string.format(T("模型连续 %d 秒速率低于阈值，已中断（可能是卡住或网络停滞）"),
+			tonumber(cfg.stall) or 60)
+	end
+	if why == "maxtime" then
+		return string.format(T("超过总时长上限 %d 秒被中断：这条流一直在输出，是被时限截断而不是没有输出"),
+			tonumber(cfg.timeout) or 900)
+	end
 	return d ~= "" and d or T("AI 请求失败")
 end
 
@@ -1058,11 +1074,19 @@ function M.infer_state(key, opts)
 	if out:match("^badkey") then
 		return { ok = false, error = T("条目 key 非法") }
 	end
-	-- 六段以 TAB 分隔（ai_stream_state 的输出）。这里用 %c 而不是 TAB 字面转义：
-	-- test/run.sh 的 check_tsv_unique 只允许 tsv.lua 出现反斜杠-t 形态的解析，
+	-- 七段以 TAB 分隔（ai_stream_state 的输出，round77f 起第 7 段是 why）。这里用 %c 而不是
+	-- TAB 字面转义：test/run.sh 的 check_tsv_unique 只允许 tsv.lua 出现反斜杠-t 形态的解析，
 	-- 其它 Lua 文件一律不许，所以 TAB 只能经 string.char 引入。
-	local st, rc, el, by, ck, fi = out:match("^(%a+)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c?([^%c]*)")
+	-- 向后兼容：旧的 6 段（无 why）与更旧的 4 段状态文件都要能读 —— 缺的段落空串。
+	local st, rc, el, by, ck, fi, wh =
+		out:match("^(%a+)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c?([^%c]*)")
 	if not st then return { state = "failed", error = T("无法读取任务状态") } end
+	-- 第 7 段单独取：仅当上面那行把 6 段都吃掉后还有剩余（旧格式没有它）。
+	do
+		local rest = out:match("^[^%c]+%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c(.*)$")
+		if rest then wh = rest:gsub("%c.*$", "") else wh = "" end
+	end
+	wh = trim(wh or "")
 	local elapsed = tonumber(el) or 0
 	local chunks = tonumber(ck) or 0
 	local bytes = tonumber(by) or 0
@@ -1104,7 +1128,8 @@ function M.infer_state(key, opts)
 		-- 失败时 pc_http_stream 把**原始错误文本**写进 sse 文件（不是 SSE 帧），
 		-- 所以这里取原文而不是 parse_sse 的正文，否则错误原因永远是空、只剩兜底文案。
 		local detail = trim(raw_sse)
-		res = { state = "failed", error = M.state_error(st, detail, tonumber(M.config().stall) or 60) }
+		local cfg = M.config()
+		res = { state = "failed", error = M.state_error(wh, detail, cfg), why = wh }
 		reason = st .. " " .. detail
 	end
 
@@ -1114,7 +1139,9 @@ function M.infer_state(key, opts)
 		stamp, key, "targets=" .. tostring(meta.n or #meta.sent), tostring(res.state),
 		tostring(elapsed) .. "s", first .. "s", tostring(chunks),
 		tostring(log_items), tostring(log_named), tostring(rc),
-		(reason:gsub("%c+", " ")):sub(1, 300),
+		-- why 前置（round77f）：done 与非 28 的失败一律写 why=-，stalled 时写真实原因
+		-- （idle = 速率不足被掐；maxtime = 撞上硬总时长墙）。日志里 why 在最前，方便 grep。
+		("why=" .. (wh ~= "" and wh or "-") .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
 	})
 	job_cleanup(key, { infile = meta.infile, keyfile = meta.keyfile })
 	return res

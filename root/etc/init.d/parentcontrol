@@ -1739,7 +1739,7 @@ _ai_worker_text() {
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 # worker 体必须包进函数：busybox ash 对「函数外的 local」是致命错误（rc=2，脚本当场退出；真机实测）。
 _aiwk() {
-	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s
+	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s _el _why
 _u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"; _st="$6"; _kf="$7"
 [ -n "$_kf" ] && PC_AI_KEY_FILE="$_kf"
 _start=$(date +%s)
@@ -1752,12 +1752,23 @@ while kill -0 "$_cpid" 2>/dev/null; do
 done
 wait "$_cpid"; _rc=$?
 [ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+_el=$(( $(date +%s) - _start ))
+_why=""
 case "$_rc" in
 	0) _s=done ;;
-	28) _s=stalled ;;
-	*) _s=failed ;;
+	28)
+		_s=stalled
+		# curl 对「速率不足被掐」和「撞上 --max-time 总时长墙」都返回 28，单看退出码分不开。
+		# 用「耗时 vs max」区分：停滞耗时 ≪ max（真机实测 idle=2/max=90 ⇒ 8 秒），
+		# 撞墙耗时 ≈ max（实测 max=5 且持续有输出 ⇒ 5 秒）。与 locale/curl 版本无关，
+		# 不依赖 curl 的错误文案（那会随版本与语言变）。
+		# 边界容忍 ±2 秒：curl 只在自身分块时才检查速率窗口，掐断时刻会略晚于 idle。
+		# 不会误判「很短但确实撞墙」的流：max 下限 30、idle 上限 300，两者不重叠。
+		if [ "$_el" -ge "$(( _max - 2 ))" ]; then _why=maxtime; else _why=idle; fi
+		;;
+	*) _s=failed; _why=other ;;
 esac
-printf '%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$(( $(date +%s) - _start ))" "${_first:--1}" \
+printf '%s\t%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$_el" "${_first:--1}" "$_why" \
 	> "$_st.tmp" 2>/dev/null && mv "$_st.tmp" "$_st" 2>/dev/null
 rm -f "$_i"
 exit 0
@@ -1767,7 +1778,7 @@ AIWK
 }
 
 ai_stream_start() { # <key> <url> <infile> <ssefile> <idle> <max>
-	local _k _u _i _o _idle _max _pid _st _wk _p
+	local _k _u _i _o _idle _max _pid _st _wk _p _age_min
 	_k="$1"; _u="$2"; _i="$3"; _o="$4"; _idle="$5"; _max="$6"
 	ai_key_ok "$_k" || { echo "badkey"; return 2; }
 	command -v curl >/dev/null 2>&1 || return 3     # 无 curl ⇒ 不支持流式，调用方降级到 pc_http
@@ -1776,11 +1787,26 @@ ai_stream_start() { # <key> <url> <infile> <ssefile> <idle> <max>
 	_pid="$STATE_DIR/ai.job.$_k.pid"
 	_wk="$STATE_DIR/ai.job.$_k.worker"
 	# 同一 key 已有活任务 ⇒ busy（不重复烧额度）
+	# L-4（round77f）：只看 `kill -0` 不够 —— pidfile 里的 pid 可能早被系统复用给**同用户的
+	# 其它进程**（worker 被 SIGKILL 后 pidfile 会残留），那样 `kill -0` 恒真、该 key 永久 busy，
+	# 用户再也点不动「推测」。所以加一道**时效**兜底：pidfile 的 mtime 超过 max+120 秒就当陈旧。
+	# 阈值 = max + 120：max 是本任务允许的最长总时长（30–1800），120 秒留给建任务、收尾与
+	# mv 状态文件的余量；比 max 更短会把「真在跑的长任务」误杀。
+	# busybox 的「分钟」判定参数只有分钟粒度 ⇒ 向上取整（宁可晚判陈旧，不可误杀活任务）。
 	if [ -f "$_pid" ]; then
 		_p=$(cat "$_pid" 2>/dev/null)
+		_age_min=$(( (${_max%%[!0-9]*} + 120 + 59) / 60 ))
+		[ "$_age_min" -ge 1 ] 2>/dev/null || _age_min=1
 		case "$_p" in
 			''|*[!0-9]*) ;;
-			*) kill -0 "$_p" 2>/dev/null && { echo "busy"; return 0; } ;;
+			*) if kill -0 "$_p" 2>/dev/null; then
+				   # `-mmin +N` = 「超过 N 分钟」（严格大于）⇒ 用 ceil 后的 N 正好落在 max+120 之上。
+				   if find "$_pid" -mmin +"$_age_min" 2>/dev/null | grep -q .; then
+					   : # 陈旧：不 busy，往下走（下面会 rm -f 状态文件并重起）
+				   else
+					   echo "busy"; return 0
+				   fi
+			   fi ;;
 		esac
 		rm -f "$_pid"
 	fi
@@ -1806,7 +1832,7 @@ ai_stream_elapsed() { # <key>
 }
 
 ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"（只读，不建任何文件）
-	local _k _st _pid _sse _s _rc _el _by _ch _fi _p
+	local _k _st _pid _sse _s _rc _el _by _ch _fi _wh _p
 	_k="$1"
 	ai_key_ok "$_k" || { echo "badkey"; return 2; }
 	_st="$STATE_DIR/ai.job.$_k.state"
@@ -1818,6 +1844,9 @@ ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"�
 		_rc=$(awk -F'\t' 'NR == 1 { print $2 }' "$_st" 2>/dev/null)
 		_el=$(awk -F'\t' 'NR == 1 { print $3 }' "$_st" 2>/dev/null)
 		_fi=$(awk -F'\t' 'NR == 1 { print $4 }' "$_st" 2>/dev/null)
+		# 第 5 段 why（round77f）：区分 stalled 的两种真实原因（idle / maxtime）。
+		# 旧 4 段状态文件没有这一列 ⇒ awk 给空串，下游按空处理（向后兼容）。
+		_wh=$(awk -F'\t' 'NR == 1 { print $5 }' "$_st" 2>/dev/null)
 	fi
 	if [ -z "$_s" ]; then
 		# 还没写状态：进程活着就是 running，否则是被外力杀掉（页面关掉不影响 worker）
@@ -1838,7 +1867,9 @@ ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"�
 	case "$_by" in ''|*[!0-9]*) _by=0 ;; esac
 	_ch=$(grep -c '^data:' "$_sse" 2>/dev/null)
 	case "$_ch" in ''|*[!0-9]*) _ch=0 ;; esac
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}"
+	# 7 段：state / rc / elapsed / bytes / chunks / first / why（round77f 起；旧 6 段解析仍兼容）
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}" "${_wh:-}"
 }
 
 # 绑定健康 / 诊断用的「在网设备清单」（第 8 轮 R10/D18/ADR-021）。
