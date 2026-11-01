@@ -1153,7 +1153,7 @@ pc_http_stream() {
 	# 那里已经先 `command -v curl || return 3` 决定是否降级到同步路径；真缺 curl 时
 	# 下面的 curl 调用会以 127 失败，被 _pc_ai_fail 记成可读原因。
 	[ -z "$_i" ] || [ "$_i" = "-" ] || [ -f "$_i" ] || {
-		_pc_ai_fail "$_o" "请求体临时文件不存在：$_i"; return 1
+		_pc_ai_fail "${_o}.err" "请求体临时文件不存在：$_i"; return 1
 	}
 	_k=$(_pc_ai_key)
 	set -- -sS -N --speed-limit 1 --speed-time "$_idle" --max-time "$_max" \
@@ -1161,6 +1161,9 @@ pc_http_stream() {
 	if [ -n "$_k" ]; then set -- "$@" -H "Authorization: Bearer $_k"; fi
 	if [ -n "$_i" ] && [ "$_i" != "-" ]; then set -- "$@" --data-binary "@$_i"; fi
 	# 直接写文件（-o）：`curl -N` 在管道里仍可能被缓冲（见 handoff §7 第 8 条）。
+	# round77i：失败原因只写 "$_o.err"，**绝不覆写 $_o** —— 覆写会让调用方把错误文本
+	# 当成 payload 量（bytes=错误文本长度、first=错误文本到达时刻、silent 被拉近 0），
+	# 这些数字都是假的。payload 文件从此只有真 payload，没有就根本不存在。
 	curl "$@" -o "$_o" "$_u" 2>"$_err"
 	# 退出码必须**当场**存下来：下面的 head/rm 会把 $? 覆盖掉。
 	_rc=$?
@@ -1168,7 +1171,9 @@ pc_http_stream() {
 	# 关键安全点：$_rc 非数字/为空时绝不能走到 `return "$_rc"` —— dash 对 `return ""` 是致命错误
 	# （整个调用方脚本会被打死），而其它 shell 上可能被当成 0 把失败读成成功。兜底成 1。
 	[ "$_rc" -ne 0 ] 2>/dev/null || _rc=1
-	_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' '); rm -f "$_err"
-	_pc_ai_fail "$_o" "${_r:-HTTP 错误或网络不可达}"
+	_r=$(head -c 1024 "$_err" 2>/dev/null | tr '\n' ' ')
+	# 原因落 "$_o.err"（不是 "$_o"）：调用方靠「$_o 是否存在/多大」判断收到了多少数据，
+	# 把错误文本写进去等于伪造 payload（round77i 修的就是这个源头）。
+	_pc_ai_fail "${_o}.err" "${_r:-HTTP 错误或网络不可达}"
 	return "$_rc"
 }

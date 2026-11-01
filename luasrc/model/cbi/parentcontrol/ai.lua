@@ -860,7 +860,7 @@ end
 
 -- 收尾：成功与失败**两条路径**都要删干净（W285.1/W285.2）。key 文件优先删。
 local function job_cleanup(key, extra)
-	for _, ext in ipairs({ "key", "sse", "state", "pid", "worker", "meta", "logged", "start" }) do
+	for _, ext in ipairs({ "key", "sse", "sse.err", "state", "pid", "worker", "meta", "logged", "start" }) do
 		local p = job_path(key, ext)
 		if ext == "key" and extra and extra.key then p = extra.key end
 		os.remove(p)
@@ -1057,27 +1057,38 @@ local SILENT_FLOW = 5
 
 -- why 只回答「哪个计时器先到」；「数据有没有在流」必须由 silent 回答。
 -- silent 缺失（旧状态文件）时**不许断言「一直在输出」**——没有证据就不许断言。
-function M.state_error(why, detail, cfg, silent)
+function M.state_error(why, detail, cfg, silent, got)
 	cfg = cfg or {}
 	local d = trim(detail or "")
 	local sl = tonumber(silent)
+	local gt = tonumber(got)
 	if why == "idle" then
 		return string.format(T("模型连续 %d 秒速率低于阈值，已中断（可能是卡住或网络停滞）"),
 			tonumber(cfg.stall) or 60)
 	end
 	if why == "maxtime" then
 		local mx = tonumber(cfg.timeout) or 900
-		if not sl then
-			-- 旧状态文件没有 silent：只说墙先到，不评价数据流。
+		-- round77i：got 是「这次到底有没有收到过数据」的唯一证据。旧状态文件没有 got
+		-- ⇒ 无证据，只说墙先到，不评价数据流。
+		if gt == nil then
 			-- round77h：这里原本还带「共收到 %d 字节」，那个数字是假的 —— 失败时
-			-- pc_http_stream 的 _pc_ai_fail 会把 curl 错误文本覆写进同一个 sse 文件
-			-- （common.sh），wc -c 量到的是错误文本长度（设备实测真实 13 字节报成 80）。
-			-- 失败路径上没有可靠字节来源，所以文案里干脆不给数字。
+			-- _pc_ai_fail 会把 curl 错误文本覆写进同一个 sse 文件，wc -c 量到的是
+			-- 错误文本长度（设备实测真实 13 字节报成 80）。失败路径上没有可靠字节来源。
+			return string.format(T("超过总时长上限 %d 秒被中断"), mx)
+		end
+		if gt == 0 then
+			-- 零字节：curl 一个字节都没收到（实测 curl 明写 with 0 bytes received，
+			-- 且连 -o 文件都没创建）。这一档以前会落到下面「数据已停止」分支、
+			-- 说出「是时限截断而不是没有输出」—— 与事实相反。
+			return string.format(T("超过总时长上限 %d 秒被中断：期间没有收到任何数据"), mx)
+		end
+		if not sl then
 			return string.format(T("超过总时长上限 %d 秒被中断"), mx)
 		end
 		if sl > SILENT_FLOW then
-			return string.format(T("超过总时长上限 %d 秒被中断：期间数据已停止 %d 秒，是时限截断而不是没有输出"),
-				mx, sl)
+			-- 有数据、但已经停了 sl 秒。删掉「而不是没有输出」这半句：收到过数据
+			-- 不足以支撑「不是没有输出」这种强断言，说清「数据已停止」就够了。
+			return string.format(T("超过总时长上限 %d 秒被中断：期间数据已停止 %d 秒"), mx, sl)
 		end
 		return string.format(T("超过总时长上限 %d 秒被中断：这条流一直在输出，是被时限截断"), mx)
 	end
@@ -1118,6 +1129,22 @@ function M.infer_state(key, opts)
 		if rest2 then si = rest2:gsub("%c.*$", "") else si = "" end
 	end
 	si = trim(si or "")
+	local go
+	do
+		-- 第 9 段 got（round77i）。这里用「按 TAB 切开取第 9 段」而不是再写一个
+		-- %c[^%c]* 计数的模式：段数已经到 9，手数 %c 极易差一位（第一次就数错，
+		-- 结果 got 恒空 ⇒ 文案掉回「无证据」档，W296 当场红）。
+		local f = {}
+		local s2 = out
+		while true do
+			local i = s2:find("%c")
+			if not i then f[#f + 1] = s2; break end
+			f[#f + 1] = s2:sub(1, i - 1)
+			s2 = s2:sub(i + 1)
+		end
+		go = f[9] or ""
+	end
+	go = trim(go or "")
 	local elapsed = tonumber(el) or 0
 	local chunks = tonumber(ck) or 0
 	local bytes = tonumber(by) or 0
@@ -1158,11 +1185,16 @@ function M.infer_state(key, opts)
 		-- stalled（curl 28）要翻成「没有输出」，不要让人以为是「总时长超时」。
 		-- 失败时 pc_http_stream 把**原始错误文本**写进 sse 文件（不是 SSE 帧），
 		-- 所以这里取原文而不是 parse_sse 的正文，否则错误原因永远是空、只剩兜底文案。
-		local detail = trim(raw_sse)
+		-- round77i：失败原因现在写在 <sse>.err（payload 文件只装真 payload），
+		-- 优先读它；老 worker 把原因写进 sse 时仍回落到原文。
+		local errtxt = trim(readfile(job_path(key, "sse") .. ".err") or "")
+		local detail = (errtxt ~= "") and errtxt or trim(raw_sse)
 		local cfg = M.config()
-		-- silent 只在真的是数字时才透传；空串/非数字一律传 nil（= 无证据）。
+		-- silent / got 只在真的是数字时才透传；空串/非数字一律传 nil（= 无证据）。
 		local sl = tonumber(si)
-		res = { state = "failed", error = M.state_error(wh, detail, cfg, sl), why = wh, silent = sl }
+		local gt = tonumber(go)
+		res = { state = "failed", error = M.state_error(wh, detail, cfg, sl, gt),
+			why = wh, silent = sl, got = gt }
 		reason = st .. " " .. detail
 	end
 
@@ -1180,6 +1212,7 @@ function M.infer_state(key, opts)
 		-- why 前置（round77f）：done 与非 28 的失败一律写 why=-，stalled 时写真实原因
 		-- （idle = 速率不足被掐；maxtime = 撞上硬总时长墙）。日志里 why 在最前，方便 grep。
 		("why=" .. (wh ~= "" and wh or "-") .. " silent=" .. (si ~= "" and si or "-")
+			.. " got=" .. (go ~= "" and go or "-")
 			.. " bytes=" .. log_bytes .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
 	})
 	job_cleanup(key, { infile = meta.infile, keyfile = meta.keyfile })

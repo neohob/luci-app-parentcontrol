@@ -1739,18 +1739,24 @@ _ai_worker_text() {
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 # worker 体必须包进函数：busybox ash 对「函数外的 local」是致命错误（rc=2，脚本当场退出；真机实测）。
 _aiwk() {
-	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s _el _why _last _sz _now _cur _silent
+	local _u _i _o _idle _max _st _kf _start _first _got _cpid _rc _s _el _why _last _sz _now _cur _silent
 _u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"; _st="$6"; _kf="$7"
 [ -n "$_kf" ] && PC_AI_KEY_FILE="$_kf"
 _start=$(date +%s)
 _first=""
+# _got：这次请求到底有没有收到过**任何**数据。只在循环内（curl 还活着、且文件非空）置 1。
+# 它是「零字节」与「有数据但停了」的唯一分界，也是 first 的可信来源。
+_got=0
 pc_http_stream "$_u" "$_i" "$_o" "$_idle" "$_max" &
 _cpid=$!
 # 顺手记「最后一次增长的时刻」：elapsed 只能回答「哪个计时器先到」，
 # 「数据到底有没有在流」必须由 _silent（距最后一次增长的秒数）回答。
 _last=$_start; _sz=0
 while kill -0 "$_cpid" 2>/dev/null; do
-	[ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+	if [ -s "$_o" ]; then
+		_got=1
+		[ -z "$_first" ] && _first=$(( $(date +%s) - _start ))
+	fi
 	_now=$(date +%s)
 	_cur=$(wc -c < "$_o" 2>/dev/null | tr -d ' \t'); [ -n "$_cur" ] || _cur=0
 	case "$_cur" in ''|*[!0-9]*) _cur=0 ;; esac
@@ -1758,7 +1764,10 @@ while kill -0 "$_cpid" 2>/dev/null; do
 	sleep 1
 done
 wait "$_cpid"; _rc=$?
-[ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+# round77i：**这里不许再补写 _first**。历史上 pc_http_stream 失败时会把可读原因写进同一个
+# $_o，于是「wait 返回时文件非空」被当成「收到首字节」⇒ 零字节场景 first=elapsed=30，
+# 意思是「第 30 秒收到第一个字节」，而它一个字节都没收到过。现在原因只写 $_o.err，
+# 且 _got 只在 curl 活着时置位，两个来源都干净了。
 _el=$(( $(date +%s) - _start ))
 _silent=$(( $(date +%s) - _last ))
 _why=""
@@ -1780,7 +1789,7 @@ case "$_rc" in
 		;;
 	*) _s=failed; _why=other ;;
 esac
-printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$_el" "${_first:--1}" "$_why" "$_silent" \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$_el" "${_first:--1}" "$_why" "$_silent" "$_got" \
 	> "$_st.tmp" 2>/dev/null && mv "$_st.tmp" "$_st" 2>/dev/null
 rm -f "$_i"
 exit 0
@@ -1843,8 +1852,8 @@ ai_stream_elapsed() { # <key>
 	echo "$_n"
 }
 
-ai_stream_state() { # <key> → 8 段：state/rc/elapsed/bytes/chunks/first/why/silent（只读，不建任何文件）
-	local _k _st _pid _sse _s _rc _el _by _ch _fi _wh _si _p
+ai_stream_state() { # <key> → 9 段：state/rc/elapsed/bytes/chunks/first/why/silent/got（只读，不建任何文件）
+	local _k _st _pid _sse _s _rc _el _by _ch _fi _wh _si _go _p
 	_k="$1"
 	ai_key_ok "$_k" || { echo "badkey"; return 2; }
 	_st="$STATE_DIR/ai.job.$_k.state"
@@ -1863,6 +1872,9 @@ ai_stream_state() { # <key> → 8 段：state/rc/elapsed/bytes/chunks/first/why/
 		# 的证据；elapsed 只说明哪个计时器先到。旧 5 段状态文件没有这一列 ⇒ 空串，
 		# 下游必须按「无证据」处理（不许据此断言「一直在输出」）。
 		_si=$(awk -F'\t' 'NR == 1 { print $6 }' "$_st" 2>/dev/null)
+		# 第 7 段 got（round77i）：这次请求有没有收到过任何数据（0/1）。
+		# 旧 4/5/6 段状态文件没有这一列 ⇒ 空串，下游必须按「无证据」处理。
+		_go=$(awk -F'\t' 'NR == 1 { print $7 }' "$_st" 2>/dev/null)
 	fi
 	if [ -z "$_s" ]; then
 		# 还没写状态：进程活着就是 running，否则是被外力杀掉（页面关掉不影响 worker）
@@ -1883,10 +1895,10 @@ ai_stream_state() { # <key> → 8 段：state/rc/elapsed/bytes/chunks/first/why/
 	case "$_by" in ''|*[!0-9]*) _by=0 ;; esac
 	_ch=$(grep -c '^data:' "$_sse" 2>/dev/null)
 	case "$_ch" in ''|*[!0-9]*) _ch=0 ;; esac
-	# 8 段：state / rc / elapsed / bytes / chunks / first / why / silent
-	# （round77g 起；旧 4/5/6/7 段状态文件都仍能解析，缺的段落空串）
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}" "${_wh:-}" "${_si:-}"
+	# 9 段：state / rc / elapsed / bytes / chunks / first / why / silent / got
+	# （round77i 起；旧 4/5/6/7/8 段状态文件都仍能解析，缺的段落空串）
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}" "${_wh:-}" "${_si:-}" "${_go:-}"
 }
 
 # 绑定健康 / 诊断用的「在网设备清单」（第 8 轮 R10/D18/ADR-021）。
