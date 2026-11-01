@@ -1831,7 +1831,15 @@ ai_stream_start() { # <key> <url> <infile> <ssefile> <idle> <max>
 		esac
 		rm -f "$_pid"
 	fi
-	rm -f "$_st" "$_o" "$STATE_DIR/ai.job.$_k.start"
+	# 上一轮的残留物必须在这里清干净：本轮读它们的地方都不看 mtime，只看到「文件存在」。
+	#   ${_o}.err  —— pc_http_stream 失败时把可读原因写在这里，ai.lua 的 infer_state 就从这里
+	#                 取失败原因。不清 ⇒ 本轮的新失败会显示上一轮的原因（round77i 引入的
+	#                 假证据来源，正是为了消灭假数字才加的 .err 自己变成了假证据）。
+	#   .meta      —— meta_write 在 run_cmd 之后才写，rc~=0/busy 等提前返回的路径会留下上一轮
+	#                 的 sentmap；下一轮 infer_state 会拿它去 sanitize 新内容。同类残留，一并清。
+	# 其余 .state/.sse/.start 本就在清；.pid 由上面的 busy 分支 rm -f；.worker 每次 `>` 重写。
+	# （.logged/.key 在 job_cleanup 的扩展名列表里，但全仓没有写入点，属死条目，不动。）
+	rm -f "$_st" "$_o" "${_o}.err" "$STATE_DIR/ai.job.$_k.meta" "$STATE_DIR/ai.job.$_k.start"
 	date +%s > "$STATE_DIR/ai.job.$_k.start" 2>/dev/null
 	_ai_worker_text > "$_wk" 2>/dev/null || return 1
 	start-stop-daemon -S -b -m -p "$_pid" -x /bin/sh -- "$_wk" \
