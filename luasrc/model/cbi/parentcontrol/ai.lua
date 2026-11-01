@@ -1047,16 +1047,35 @@ end
 --   maxtime ⇒ 撞上硬总时长上限，**明确否认**「没有输出」
 --   other   ⇒ 透出 curl 原文
 -- cfg = { stall = <秒>, timeout = <秒> }
-function M.state_error(why, detail, cfg)
+-- 证据窗口（秒）：silent（距最后一次收到字节的秒数）不超过它就认为「数据还在流」。
+-- 为什么不用 cfg.stall 比：撞墙场景 silent 最多只有 max-1（max 最小 30），而 stall 默认 60、
+-- 上限 300 ⇒「silent >= stall」在这个分支几乎不可达，「数据已停止」档等于不存在，
+-- 静默流仍会被说成「一直在输出」（正是要修的假话）。用绝对窗口才让两档都可达：
+-- 墙在 max 秒时切断，5 秒内没有新字节 ⇒ 数据确实已停止；5 秒内有新字节 ⇒ 确实还在流。
+-- 5 秒 ≈ 5 倍 worker 轮询间隔，远小于 max 的下限 30。
+local SILENT_FLOW = 5
+
+-- why 只回答「哪个计时器先到」；「数据有没有在流」必须由 silent 回答。
+-- silent 缺失（旧状态文件）时**不许断言「一直在输出」**——没有证据就不许断言。
+function M.state_error(why, detail, cfg, silent)
 	cfg = cfg or {}
 	local d = trim(detail or "")
+	local sl = tonumber(silent)
 	if why == "idle" then
 		return string.format(T("模型连续 %d 秒速率低于阈值，已中断（可能是卡住或网络停滞）"),
 			tonumber(cfg.stall) or 60)
 	end
 	if why == "maxtime" then
-		return string.format(T("超过总时长上限 %d 秒被中断：这条流一直在输出，是被时限截断而不是没有输出"),
-			tonumber(cfg.timeout) or 900)
+		local mx = tonumber(cfg.timeout) or 900
+		if not sl then
+			-- 旧状态文件没有 silent：只报客观数字，不评价数据流。
+			return string.format(T("超过总时长上限 %d 秒被中断（共收到 %d 字节）"), mx, tonumber(cfg.bytes) or 0)
+		end
+		if sl > SILENT_FLOW then
+			return string.format(T("超过总时长上限 %d 秒被中断：期间数据已停止 %d 秒（共收到 %d 字节），是时限截断而不是没有输出"),
+				mx, sl, tonumber(cfg.bytes) or 0)
+		end
+		return string.format(T("超过总时长上限 %d 秒被中断：这条流一直在输出，是被时限截断"), mx)
 	end
 	return d ~= "" and d or T("AI 请求失败")
 end
@@ -1081,12 +1100,20 @@ function M.infer_state(key, opts)
 	local st, rc, el, by, ck, fi, wh =
 		out:match("^(%a+)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c([^%c]*)%c?([^%c]*)")
 	if not st then return { state = "failed", error = T("无法读取任务状态") } end
-	-- 第 7 段单独取：仅当上面那行把 6 段都吃掉后还有剩余（旧格式没有它）。
+	-- 第 7 段 why（round77f）、第 8 段 silent（round77g）逐段取：
+	-- 仅当上一段被吃掉后还有剩余才算存在，旧 4/5/6/7 段格式缺的段落空串。
+	local si
 	do
 		local rest = out:match("^[^%c]+%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c(.*)$")
 		if rest then wh = rest:gsub("%c.*$", "") else wh = "" end
 	end
 	wh = trim(wh or "")
+	do
+		-- 从整行里数到第 7 个 TAB 之后的剩余部分，再取到下一个 TAB 之前。
+		local rest2 = out:match("^[^%c]+%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c[^%c]*%c(.*)$")
+		if rest2 then si = rest2:gsub("%c.*$", "") else si = "" end
+	end
+	si = trim(si or "")
 	local elapsed = tonumber(el) or 0
 	local chunks = tonumber(ck) or 0
 	local bytes = tonumber(by) or 0
@@ -1129,7 +1156,10 @@ function M.infer_state(key, opts)
 		-- 所以这里取原文而不是 parse_sse 的正文，否则错误原因永远是空、只剩兜底文案。
 		local detail = trim(raw_sse)
 		local cfg = M.config()
-		res = { state = "failed", error = M.state_error(wh, detail, cfg), why = wh }
+		-- silent 只在真的是数字时才透传；空串/非数字一律传 nil（= 无证据）。
+		local sl = tonumber(si)
+		cfg.bytes = bytes
+		res = { state = "failed", error = M.state_error(wh, detail, cfg, sl), why = wh, silent = sl }
 		reason = st .. " " .. detail
 	end
 
@@ -1141,7 +1171,7 @@ function M.infer_state(key, opts)
 		tostring(log_items), tostring(log_named), tostring(rc),
 		-- why 前置（round77f）：done 与非 28 的失败一律写 why=-，stalled 时写真实原因
 		-- （idle = 速率不足被掐；maxtime = 撞上硬总时长墙）。日志里 why 在最前，方便 grep。
-		("why=" .. (wh ~= "" and wh or "-") .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
+		("why=" .. (wh ~= "" and wh or "-") .. " silent=" .. (si ~= "" and si or "-") .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
 	})
 	job_cleanup(key, { infile = meta.infile, keyfile = meta.keyfile })
 	return res

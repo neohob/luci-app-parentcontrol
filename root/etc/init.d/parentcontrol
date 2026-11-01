@@ -1739,20 +1739,28 @@ _ai_worker_text() {
 . "${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
 # worker 体必须包进函数：busybox ash 对「函数外的 local」是致命错误（rc=2，脚本当场退出；真机实测）。
 _aiwk() {
-	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s _el _why
+	local _u _i _o _idle _max _st _kf _start _first _cpid _rc _s _el _why _last _sz _now _cur _silent
 _u="$1"; _i="$2"; _o="$3"; _idle="$4"; _max="$5"; _st="$6"; _kf="$7"
 [ -n "$_kf" ] && PC_AI_KEY_FILE="$_kf"
 _start=$(date +%s)
 _first=""
 pc_http_stream "$_u" "$_i" "$_o" "$_idle" "$_max" &
 _cpid=$!
+# 顺手记「最后一次增长的时刻」：elapsed 只能回答「哪个计时器先到」，
+# 「数据到底有没有在流」必须由 _silent（距最后一次增长的秒数）回答。
+_last=$_start; _sz=0
 while kill -0 "$_cpid" 2>/dev/null; do
 	[ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
+	_now=$(date +%s)
+	_cur=$(wc -c < "$_o" 2>/dev/null | tr -d ' \t'); [ -n "$_cur" ] || _cur=0
+	case "$_cur" in ''|*[!0-9]*) _cur=0 ;; esac
+	if [ "$_cur" -gt "$_sz" ]; then _sz=$_cur; _last=$_now; fi
 	sleep 1
 done
 wait "$_cpid"; _rc=$?
 [ -z "$_first" ] && [ -s "$_o" ] && _first=$(( $(date +%s) - _start ))
 _el=$(( $(date +%s) - _start ))
+_silent=$(( $(date +%s) - _last ))
 _why=""
 case "$_rc" in
 	0) _s=done ;;
@@ -1762,13 +1770,17 @@ case "$_rc" in
 		# 用「耗时 vs max」区分：停滞耗时 ≪ max（真机实测 idle=2/max=90 ⇒ 8 秒），
 		# 撞墙耗时 ≈ max（实测 max=5 且持续有输出 ⇒ 5 秒）。与 locale/curl 版本无关，
 		# 不依赖 curl 的错误文案（那会随版本与语言变）。
-		# 边界容忍 ±2 秒：curl 只在自身分块时才检查速率窗口，掐断时刻会略晚于 idle。
-		# 不会误判「很短但确实撞墙」的流：max 下限 30、idle 上限 300，两者不重叠。
+		# 边界容忍 ±2 秒：curl 只在自身分块时才检查速率窗口（实测掐断时刻约 idle+6 秒）。
+		# 注意 why 只回答「哪个计时器先到」，**不回答「数据有没有在流」**：
+		# curl 速率检查有粒度（t_stall≈idle+6s），所以 idle >= max-8 时几乎必然落到
+		# maxtime —— max 下限 30 与 idle 上限 300 是**大面积重叠**（timeout=30 时
+		# stall>=22 全落进墙先到的区间），静默流也会被判成 maxtime 且 elapsed≈max。
+		# 「有没有在流」交给下面的 _silent，文案按它分档，不许用 elapsed 反推。
 		if [ "$_el" -ge "$(( _max - 2 ))" ]; then _why=maxtime; else _why=idle; fi
 		;;
 	*) _s=failed; _why=other ;;
 esac
-printf '%s\t%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$_el" "${_first:--1}" "$_why" \
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_s" "$_rc" "$_el" "${_first:--1}" "$_why" "$_silent" \
 	> "$_st.tmp" 2>/dev/null && mv "$_st.tmp" "$_st" 2>/dev/null
 rm -f "$_i"
 exit 0
@@ -1831,8 +1843,8 @@ ai_stream_elapsed() { # <key>
 	echo "$_n"
 }
 
-ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"（只读，不建任何文件）
-	local _k _st _pid _sse _s _rc _el _by _ch _fi _wh _p
+ai_stream_state() { # <key> → 8 段：state/rc/elapsed/bytes/chunks/first/why/silent（只读，不建任何文件）
+	local _k _st _pid _sse _s _rc _el _by _ch _fi _wh _si _p
 	_k="$1"
 	ai_key_ok "$_k" || { echo "badkey"; return 2; }
 	_st="$STATE_DIR/ai.job.$_k.state"
@@ -1847,6 +1859,10 @@ ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"�
 		# 第 5 段 why（round77f）：区分 stalled 的两种真实原因（idle / maxtime）。
 		# 旧 4 段状态文件没有这一列 ⇒ awk 给空串，下游按空处理（向后兼容）。
 		_wh=$(awk -F'\t' 'NR == 1 { print $5 }' "$_st" 2>/dev/null)
+		# 第 6 段 silent（round77g）：距「最后一次输出增长」的秒数。它才是「数据有没有在流」
+		# 的证据；elapsed 只说明哪个计时器先到。旧 5 段状态文件没有这一列 ⇒ 空串，
+		# 下游必须按「无证据」处理（不许据此断言「一直在输出」）。
+		_si=$(awk -F'\t' 'NR == 1 { print $6 }' "$_st" 2>/dev/null)
 	fi
 	if [ -z "$_s" ]; then
 		# 还没写状态：进程活着就是 running，否则是被外力杀掉（页面关掉不影响 worker）
@@ -1867,9 +1883,10 @@ ai_stream_state() { # <key> → "state<TAB>rc<TAB>elapsed<TAB>bytes<TAB>chunks"�
 	case "$_by" in ''|*[!0-9]*) _by=0 ;; esac
 	_ch=$(grep -c '^data:' "$_sse" 2>/dev/null)
 	case "$_ch" in ''|*[!0-9]*) _ch=0 ;; esac
-	# 7 段：state / rc / elapsed / bytes / chunks / first / why（round77f 起；旧 6 段解析仍兼容）
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}" "${_wh:-}"
+	# 8 段：state / rc / elapsed / bytes / chunks / first / why / silent
+	# （round77g 起；旧 4/5/6/7 段状态文件都仍能解析，缺的段落空串）
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$_s" "${_rc:--}" "${_el:--}" "$_by" "$_ch" "${_fi:--}" "${_wh:-}" "${_si:-}"
 }
 
 # 绑定健康 / 诊断用的「在网设备清单」（第 8 轮 R10/D18/ADR-021）。
