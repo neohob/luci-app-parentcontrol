@@ -1068,12 +1068,16 @@ function M.state_error(why, detail, cfg, silent)
 	if why == "maxtime" then
 		local mx = tonumber(cfg.timeout) or 900
 		if not sl then
-			-- 旧状态文件没有 silent：只报客观数字，不评价数据流。
-			return string.format(T("超过总时长上限 %d 秒被中断（共收到 %d 字节）"), mx, tonumber(cfg.bytes) or 0)
+			-- 旧状态文件没有 silent：只说墙先到，不评价数据流。
+			-- round77h：这里原本还带「共收到 %d 字节」，那个数字是假的 —— 失败时
+			-- pc_http_stream 的 _pc_ai_fail 会把 curl 错误文本覆写进同一个 sse 文件
+			-- （common.sh），wc -c 量到的是错误文本长度（设备实测真实 13 字节报成 80）。
+			-- 失败路径上没有可靠字节来源，所以文案里干脆不给数字。
+			return string.format(T("超过总时长上限 %d 秒被中断"), mx)
 		end
 		if sl > SILENT_FLOW then
-			return string.format(T("超过总时长上限 %d 秒被中断：期间数据已停止 %d 秒（共收到 %d 字节），是时限截断而不是没有输出"),
-				mx, sl, tonumber(cfg.bytes) or 0)
+			return string.format(T("超过总时长上限 %d 秒被中断：期间数据已停止 %d 秒，是时限截断而不是没有输出"),
+				mx, sl)
 		end
 		return string.format(T("超过总时长上限 %d 秒被中断：这条流一直在输出，是被时限截断"), mx)
 	end
@@ -1158,10 +1162,14 @@ function M.infer_state(key, opts)
 		local cfg = M.config()
 		-- silent 只在真的是数字时才透传；空串/非数字一律传 nil（= 无证据）。
 		local sl = tonumber(si)
-		cfg.bytes = bytes
 		res = { state = "failed", error = M.state_error(wh, detail, cfg, sl), why = wh, silent = sl }
 		reason = st .. " " .. detail
 	end
+
+	-- round77h：失败路径的 bytes 不可信（sse 文件被 curl 错误文本覆写），
+	-- 只有 done / rc==0 时文件才是原样的响应体。没有可靠来源就记 "-"。
+	local log_bytes = "-"
+	if st == "done" or tostring(rc) == "0" then log_bytes = tostring(bytes) end
 
 	local stamp = os.date("%Y-%m-%d %H:%M:%S")
 	local first = (fi ~= nil and fi ~= "" and fi ~= "-") and fi or "-"
@@ -1171,7 +1179,8 @@ function M.infer_state(key, opts)
 		tostring(log_items), tostring(log_named), tostring(rc),
 		-- why 前置（round77f）：done 与非 28 的失败一律写 why=-，stalled 时写真实原因
 		-- （idle = 速率不足被掐；maxtime = 撞上硬总时长墙）。日志里 why 在最前，方便 grep。
-		("why=" .. (wh ~= "" and wh or "-") .. " silent=" .. (si ~= "" and si or "-") .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
+		("why=" .. (wh ~= "" and wh or "-") .. " silent=" .. (si ~= "" and si or "-")
+			.. " bytes=" .. log_bytes .. " " .. (reason:gsub("%c+", " "))):sub(1, 300),
 	})
 	job_cleanup(key, { infile = meta.infile, keyfile = meta.keyfile })
 	return res
