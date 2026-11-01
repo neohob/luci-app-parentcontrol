@@ -1188,14 +1188,28 @@ function M.infer_state(key, opts)
 		-- round77i：失败原因现在写在 <sse>.err（payload 文件只装真 payload），
 		-- 优先读它；老 worker 把原因写进 sse 时仍回落到原文。
 		local errtxt = trim(readfile(job_path(key, "sse") .. ".err") or "")
-		local detail = (errtxt ~= "") and errtxt or trim(raw_sse)
+		-- round77k（M-1）：.err 为空（worker 被 kill -9、curl 还没写 .err）时**不许**把整段
+		-- 原始 SSE 当错误文案吐给用户 —— 那会在页面上摊出 data:{"choices":…} × N 条，用户看不懂。
+		-- 用户可见的 error 只给一句短话；原始 SSE 的长度与首块摘要只进 ai.log。
+		local detail
+		if errtxt ~= "" then
+			detail = errtxt
+		elseif raw_sse:find("data:", 1, true) then
+			detail = T("请求被中断（模型没有返回完整结果）")
+		else
+			detail = T("请求被中断")
+		end
 		local cfg = M.config()
 		-- silent / got 只在真的是数字时才透传；空串/非数字一律传 nil（= 无证据）。
 		local sl = tonumber(si)
 		local gt = tonumber(go)
 		res = { state = "failed", error = M.state_error(wh, detail, cfg, sl, gt),
 			why = wh, silent = sl, got = gt }
-		reason = st .. " " .. detail
+		-- 排障需要原始 SSE，但**只进日志**：折叠换行、截到 200 字，绝不进用户可见的 error。
+		local sse_brief = (raw_sse or ""):gsub("%c+", " ")
+		if #sse_brief > 200 then sse_brief = sse_brief:sub(1, 200) end
+		reason = st .. " sse_bytes=" .. tostring(#(raw_sse or "")) .. " " .. detail
+		if sse_brief ~= "" then reason = reason .. " | " .. sse_brief end
 	end
 
 	-- round77h：失败路径的 bytes 不可信（sse 文件被 curl 错误文本覆写），
