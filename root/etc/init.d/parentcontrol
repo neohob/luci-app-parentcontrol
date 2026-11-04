@@ -1968,77 +1968,12 @@ hosts_tsv() {
 }
 
 # ============================================================================
-# R74-A：机械 ASN（Team Cymru 公共 TXT 库）—— 只在用户点开「（未归类）」明细时按需查
+# 外发门禁：哪些目标可以拿去反查 DNS（私网/保留/IPv6/域名一律不查，绝不把内网编址发给第三方）
 # ============================================================================
-# 为什么走 TXT 而不只走 PTR：PTR 不可靠（23.11.207.1 直接 NXDOMAIN，但 Cymru 有记录），
-# 而且 PTR 只能给出反解名字，给不出「归属哪个 AS / 哪个组织」。反过来 PTR 能给 ASN 给不出的
-# 东西（具体主机名 ⇒ 可注册域，比 AS 组织名更像「服务」），所以 round76 起两条**都查**：
-#   PTR 命中 ⇒ 服务名用 PTR 的可注册域；没 PTR ⇒ 退 ASN 组织名第一段；都没 ⇒ 未知。
-# 设备上没有 whois/dig/host，只有 busybox nslookup（真机实测 -type=TXT 可用）：
-#   nslookup -type=TXT 207.11.23.1.origin.asn.cymru.com → text = "20940 | 23.11.207.0/24 | US | arin | …"
-#   nslookup -type=TXT AS20940.asn.cymru.com          → text = "20940 | NL | ripencc | 2001-07-10 | AKAMAI-ASN1, NL"
-#   nslookup -type=PTR 0.173.45.23.in-addr.arpa       → name = a23-45-173-0.deploy.static.akamaitechnologies.com.
-# 归属/反解信息只说明该目标落在哪个网络，**不代表我们识别出了它是什么服务**（页面必须这么写）。
-# 缓存：$STATE_DIR/asn.cache，一行 <target>\t<expiry_epoch>\t<asn>\t<org>\t<ptr>，有效期 7 天。
-# 第 5 段（ptr）是 round76 新增的 —— **4 段旧行必须照旧能读**（ptr 当空串，不重写不丢弃）。
-# 查过但没结果也要缓存（空 asn/org/ptr），否则每次点开都重跑一遍 DNS。
-# 绝不在 tick 路径上：默认 stats_tsv 输出里一个 asn 行都没有（见 stats_tsv_inner 的分发）。
-# R77-B（round77）：单次上限 12 ⇒ 24（真机上未归类目标常有二三十个，12 个要连点两三次）。
-# 超出的不写假「无结果」，下一次点开会接着查下一批（页面文案必须这么说）。
-PC_ASN_TTL=${PC_ASN_TTL:-604800}
-PC_ASN_MAX=${PC_ASN_MAX:-24}
-
-pc_asn_cache_line() { # $1=target → 打印 "<hit>\t<asn>\t<org>\t<ptr>"（hit=1 仅当缓存未过期）
-	local _cache _now
-	_cache="$STATE_DIR/asn.cache"
-	[ -f "$_cache" ] || { printf '0\t\t\t'; return 0; }
-	_now=$(date +%s)
-	# R76-A（round76）：第 5 段是 PTR 反查主机名。**向后兼容 4 段旧行**（读不到 $5 就当
-	# 空 PTR —— 不许报错、不许因为缓存是老格式就丢弃它，否则升级后要重查一遍全网）。
-	awk -F'\t' -v t="$1" -v now="$_now" '
-		$1 == t && NF >= 4 && $2 + 0 > now { h = 1; a = $3; o = $4; p = $5 }
-		END { printf "%s\t%s\t%s\t%s", (h ? 1 : 0), a, o, p }' "$_cache" 2>/dev/null
-}
-
-pc_asn_query() { # $1=IPv4（无掩码） → 打印 "<asn>\t<org>"（任何失败都给空串，绝不猜）
-	local _rev _raw _asn _org
-	command -v nslookup >/dev/null 2>&1 || { printf '\t'; return 0; }
-	_rev=$(printf '%s\n' "$1" | awk -F. 'NF >= 4 { printf "%s.%s.%s.%s", $4, $3, $2, $1 }')
-	[ -n "$_rev" ] || { printf '\t'; return 0; }
-	# busybox nslookup 的 TXT 输出形如 `<qname>\ttext = "…"`；只要引号里的那串。
-	_raw=$(nslookup -type=TXT "$_rev.origin.asn.cymru.com" 2>/dev/null | sed -n 's/.*text = "\(.*\)".*/\1/p' | head -1)
-	_asn=$(printf '%s\n' "$_raw" | awk -F'|' '{ v = $1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }')
-	case "$_asn" in ''|*[!0-9]*) printf '\t'; return 0 ;; esac
-	_raw=$(nslookup -type=TXT "AS${_asn}.asn.cymru.com" 2>/dev/null | sed -n 's/.*text = "\(.*\)".*/\1/p' | head -1)
-	# 组织名在第 5 段（AKAMAI-ASN1, NL）。可能含逗号/&/' ⇒ 去掉 Tab/CR/LF 再落盘/输出。
-	_org=$(printf '%s\n' "$_raw" | awk -F'|' 'NF >= 5 { v = $5; gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }' | tr -d '\t\r\n')
-	printf '%s\t%s' "$_asn" "$_org"
-}
-
-# R76-A（round76）：PTR 反查。只对**已通过 pc_asn_queryable 的公网 IPv4** 调用（私网/保留/
-# IPv6/域名一律不查，调用点如下 pc_asn_report 只传 $_q）。失败/无结果一律空串，**绝不猜**：
-# 页面的服务名是「PTR 的**可注册域** ⇒ 没有就 ASN 组织名第一段 ⇒ 都没有显示未知」，
-# 任何一环都不允许凭空造品牌名。busybox nslookup 默认就是 PTR 查询，两种输出形态都认：
-#   nslookup -type=PTR 0.173.45.23.in-addr.arpa → `0.173.45.23.in-addr.arpa\tname = host.example.com.`
-#   默认形态                                     → `Name:    host.example.com`
-pc_ptr_query() { # $1=IPv4（无掩码） → 打印 PTR 主机名（失败给空串）
-	local _rev _raw _ptr
-	command -v nslookup >/dev/null 2>&1 || return 0
-	_rev=$(printf '%s\n' "$1" | awk -F. 'NF >= 4 { printf "%s.%s.%s.%s", $4, $3, $2, $1 }')
-	[ -n "$_rev" ] || return 0
-	_raw=$(nslookup -type=PTR "$_rev.in-addr.arpa" 2>/dev/null)
-	_ptr=$(printf '%s\n' "$_raw" | sed -n 's/.*name = \(.*\)$/\1/p' | head -1)
-	[ -n "$_ptr" ] || _ptr=$(printf '%s\n' "$_raw" | sed -n 's/^[[:space:]]*[Nn]ame:[[:space:]]*\([^[:space:]]*\)$/\1/p' | head -1)
-	_ptr=${_ptr%.}
-	printf '%s' "$_ptr"
-}
-
-# 目标能不能查：只认「IPv4 或 IPv4/nn」，且**必须是公网地址**。IPv6 与域名串不查
-# （IPv6 显示「未查询」，绝不编）。
-# R74-M1（round74b）：这里原来只校验「形状像 a.b.c.d」⇒ 私网/保留地址会被反序拼成
-# `<rev>.origin.asn.cymru.com` 发给 Team Cymru，等于把用户内网编址泄露给第三方 DNS
-# （复审实测 18 个私网地址 18 个都被查）。下面按首/次八位组挡掉非公网段。
-pc_asn_queryable() { # $1=target → 打印要查询的 IPv4（不可查则空）
+# round79：原来的机械 ASN（Team Cymru）整条链已删（页面上那句「归属 AKAMAI-ASN1 …」被用户判为
+# 无用信息）。这里只保留**查询门禁**：round78 的 PTR 反查（rev_ptr_query → pc_ptr_query）仍然
+# 要它挡掉 RFC1918/保留段，否则等于把用户内网编址外发（round74b 复审实测过 18/18 泄露）。
+pc_out_ok() { # $1=target → 打印可查询的 IPv4（不可查则空）
 	printf '%s\n' "$1" | awk '{
 		t = $0; sub(/\/[0-9]+$/, "", t)
 		if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
@@ -2061,55 +1996,20 @@ pc_asn_queryable() { # $1=target → 打印要查询的 IPv4（不可查则空�
 	}'
 }
 
-pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org> <ptr>`
-	local _t _rest _hit _asn _org _ptr _q _cnt _cache _now _exp
-	_cache="$STATE_DIR/asn.cache"
-	mkdir -p "$STATE_DIR"
-	_now=$(date +%s)
-	_cnt=0
-	for _t in "$@"; do
-		[ -n "$_t" ] || continue
-		# 目标串里出现分隔符就不处理：它会把 TSV 列数与缓存键搞乱（同 .map 的注入面）。
-		case "$_t" in *"|"*|*"$TAB"*) continue ;; esac
-		_rest=$(pc_asn_cache_line "$_t")
-		_hit=${_rest%%"$TAB"*}
-		_rest=${_rest#*"$TAB"}
-		_asn=${_rest%%"$TAB"*}
-		_rest=${_rest#*"$TAB"}
-		_org=${_rest%%"$TAB"*}
-		_ptr=${_rest#*"$TAB"}
-		if [ "$_hit" = "1" ]; then
-			printf 'asn\t%s\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org" "$_ptr"
-			continue
-		fi
-		_q=$(pc_asn_queryable "$_t")
-		if [ -z "$_q" ]; then
-			# IPv6 / 域名串 / 私网 / 保留：不查询、不缓存，直接空票（页面渲染「未查询」）。
-			# PTR 同理 —— 它也只在这个分支之外被调用，绝不为不可查目标发 DNS。
-			printf 'asn\t%s\t\t\t\n' "$_t"
-			continue
-		fi
-		if [ "$_cnt" -ge "$PC_ASN_MAX" ]; then
-			# 配额用完：本次不查也不缓存，留给下一次点开（否则会写一条假「无结果」）。
-			printf 'asn\t%s\t\t\t\n' "$_t"
-			continue
-		fi
-		_cnt=$((_cnt + 1))
-		_rest=$(pc_asn_query "$_q")
-		_asn=${_rest%%"$TAB"*}
-		_org=${_rest#*"$TAB"}
-		# R76-A：同一个已过滤的 IPv4 最多再加 1 次 PTR（每目标 ≤ 3 次 DNS）。ASN 查不到也照样试。
-		_ptr=$(pc_ptr_query "$_q")
-		_exp=$((_now + PC_ASN_TTL))
-		printf '%s\t%s\t%s\t%s\t%s\n' "$_t" "$_exp" "$_asn" "$_org" "$_ptr" >> "$_cache" 2>/dev/null
-		printf 'asn\t%s\t%s\t%s\t%s\n' "$_t" "$_asn" "$_org" "$_ptr"
-	done
-	# 紧凑化缓存（同一 target 后写覆盖先写；否则文件会随目标变动无限长）。
-	if [ -f "$_cache" ]; then
-		awk -F'\t' 'NF >= 4 { m[$1] = $0 } END { for (k in m) print m[k] }' "$_cache" > "$_cache.new" 2>/dev/null \
-			&& mv "$_cache.new" "$_cache" || rm -f "$_cache.new"
-	fi
-	return 0
+# PTR 反查本身（busybox nslookup；-type=PTR 与默认形态两种输出都认）。调用点只有
+# rev_ptr_query()（先过 pc_out_ok）。失败/无结果一律空串，**绝不猜**：页面上没有名字就显示 '-'。
+#   nslookup -type=PTR 0.173.45.23.in-addr.arpa → `<rev>.in-addr.arpa\tname = host.example.com.`
+#   默认形态                                     → `Name:    host.example.com`
+pc_ptr_query() { # $1=IPv4（无掩码） → 打印 PTR 主机名（失败给空串）
+	local _rev _raw _ptr
+	command -v nslookup >/dev/null 2>&1 || return 0
+	_rev=$(printf '%s\n' "$1" | awk -F. 'NF >= 4 { printf "%s.%s.%s.%s", $4, $3, $2, $1 }')
+	[ -n "$_rev" ] || return 0
+	_raw=$(nslookup -type=PTR "$_rev.in-addr.arpa" 2>/dev/null)
+	_ptr=$(printf '%s\n' "$_raw" | sed -n 's/.*name = \(.*\)$/\1/p' | head -1)
+	[ -n "$_ptr" ] || _ptr=$(printf '%s\n' "$_raw" | sed -n 's/^[[:space:]]*[Nn]ame:[[:space:]]*\([^[:space:]]*\)$/\1/p' | head -1)
+	_ptr=${_ptr%.}
+	printf '%s' "$_ptr"
 }
 
 # 看板/列表数据：结构化 TSV（Lua 侧解析；不在 shell 里手拼 JSON）。
@@ -2229,6 +2129,9 @@ rev_ptr_query() { # $1=target → 打印 PTR 名（查不到/不支持给空）
 	local _ip _o
 	_ip=$(rev_rep_addr "$1")
 	[ -n "$_ip" ] || return 0
+	# 门禁：私网/保留地址一律不查（round74 的归属查询顺手挡过，round79 删那条链后挪到这里，
+	# 不许因为「掌管私网判定」的函数跟着被删而丢掉这道门 —— W301.3 直测这一行为）
+	[ -n "$(pc_out_ok "$_ip")" ] || return 0
 	_o=$(pc_ptr_query "$_ip" | rev_sanitize_name | head -n 1)
 	printf '%s' "$_o"
 }
@@ -2638,13 +2541,6 @@ stats_tsv() { pc_uci_snap_begin; stats_tsv_inner "$@"; pc_uci_snap_drop; }
 stats_tsv_inner() {
 	local _brief _tt _min_kb _keep _m _i _key _name _mac _q _u _pool _live _f _t _n _dump _unl _dd _hs _dtf _df _di _dname _donl _k _snap _amf _akey _aapps _ah _atgt _anr
 	_brief="${1:-}"
-	# R74-A：`stats_tsv asn <target>…` 是**独立子命令**，只输出 asn 行，早退 —— 默认
-	# stats_tsv 的输出里必须一行 asn 都没有（首屏不变慢，测试也不依赖环境有没有 nslookup）。
-	if [ "$_brief" = "asn" ]; then
-		shift
-		pc_asn_report "$@"
-		return 0
-	fi
 	_tt=$(pc_today_type)
 	_min_kb=$(pc_uget "@basic[0].usage_min_kb")
 	case "$_min_kb" in ''|*[!0-9]*) _min_kb=8 ;; esac
@@ -2745,13 +2641,18 @@ stats_tsv_inner() {
 					| awk -F'\t' -v k="$_akey" '{ printf "appname\t%s\t%d\t%s\n", k, NR, $1 }'
 			fi
 			awk -F'\t' -v k="$_akey" 'NF >= 2 { printf "appmap\t%s\t%s\t%s\n", k, $2, $1 }' "$_amf"
-			# round78：未归类目标的反解线索（L1 PTR + L2 被动 DNS）。**只读缓存、不发 DNS**
-			# —— stats_tsv 是读路径，查 DNS 会让整页卡住（PTR sweep 在 tick 里做）。
-			# 一个线索都没有就**不输出该行**，UI 侧据此不渲染「反解：」小字。
+			# round79：「反解主机名」列 —— 未归类目标的 PTR 名，唯一来源是缓存
+			# （round78 的 ptrmap，由 tick 里的 rev_ptr_sweep 写）。**只读、零 DNS**：
+			# stats_tsv 是读路径，在这里查 DNS 会让整页卡住。阴性（-）/ 没查过都输出
+			# '-'，让页面永远有一个确定值可显示（不回落成空、更不猜）。
+			# AI 线索（PTR + 被动 DNS 拼成 a;b）仍在 shell 侧生成，供 controller 的
+			# unclassified_infer 用；页面不再渲染它。
 			if pc_dnsrev_on; then
 				while IFS="$TAB" read -r _atgt _anr; do
 					[ "$_anr" = "0" ] || continue
 					[ -n "$_atgt" ] || continue
+					_ah=$(rev_ptr_raw "$_atgt")
+					printf 'ptr\t%s\t%s\n' "$_atgt" "${_ah:--}"
 					_ah=$(rev_hint_names "$_atgt")
 					[ -n "$_ah" ] || continue
 					printf 'dnshint\t%s\t%s\t%s\n' "$_akey" "$_atgt" "$_ah"

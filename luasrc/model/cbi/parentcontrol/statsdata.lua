@@ -105,19 +105,15 @@ function M.invariants(d)
 	return drift
 end
 
--- R76-A（round76）：把「查到的实测数据」派生成一个**服务名**。
--- 输入只能是 PTR 反查主机名 —— **不许**把 IP/目标串当服务名，也不许臆造品牌名。
---   有 PTR ⇒ 取可注册域（去掉机器名前缀，末两段；末两段是 co.uk/com.cn 这类二级后缀时取三段）
+-- R76-A（round76，round79 收窄）：把 PTR 反查主机名派生成一个**可注册域**，用作「反解主机名」列的值。
+-- 输入**只能**是 PTR 主机名 —— 不许把 IP/目标串当名字，也不许臆造品牌名。
+--   有 PTR ⇒ 取可注册域（去机器名前缀，末两段；末两段是 co.uk/com.cn 这类二级后缀时取三段）
 --              a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com
 --              server-13-32-1-1.cloudfront.net                    ⇒ cloudfront.net
---   无 PTR ⇒ **nil**（R77-C）。调用方据此显示「归属网络（org 原文）+ 基础设施，无法判断具体应用」。
---
--- R77-C（round77）：这里以前在没 PTR 时回落成 org 第一段（AKAMAI-ASN1, NL ⇒ AKAMAI-ASN1），
--- 于是页面「服务」列把 ASN 组织代号当服务名展示，用户以为那就是应用名。
+--   无 PTR ⇒ **nil**。调用方据此显示「-」。
 -- 用户已明确否决「内置 ASN→服务名常识表」：**ASN 是托管方不是应用**（同一腾讯云/阿里云网段
--- 上可能跑着别家的游戏），任何 ASN→应用映射都会误导。所以这里干脆**不回落**：没有域名证据
--- 就老实地返回 nil。org 参数保留只为兼容调用签名（现有调用点都传两个参数），不再使用。
--- 别把它改回去：改了就是又把代号冒充成服务名。
+-- 上可能跑着别家的游戏），任何 ASN→应用映射都会误导。round79 起 ASN 整条链已删除，这个函数
+-- 的输入唯一来源是 tick 里 rev_ptr_sweep 写的 $USAGE_DIR/ptrmap（经 stats_tsv 的 ptr 行）。
 local SLD2 = {
 	["co.uk"] = true, ["org.uk"] = true, ["ac.uk"] = true, ["gov.uk"] = true,
 	["com.cn"] = true, ["net.cn"] = true, ["org.cn"] = true, ["gov.cn"] = true,
@@ -126,10 +122,12 @@ local SLD2 = {
 	["com.sg"] = true, ["co.nz"] = true, ["co.in"] = true, ["com.mx"] = true,
 	["com.tr"] = true, ["com.ru"] = true, ["co.za"] = true,
 }
-function M.service_name(ptr, org)
+function M.service_name(ptr)
 	local p = tostring(ptr or ""):gsub("%s+$", ""):gsub("%.$", "")
 	p = p:lower()
-	if p ~= "" then
+	-- round79 R4：`-` 是 ptrmap 里「阴性 / 没查到」的占位，不是域名 —— 必须当没有，
+	-- 否则它会一路变成服务名 `-` 并预填进「归入条目」的名称里。
+	if p ~= "" and p ~= "-" then
 		local lab = {}
 		for seg in p:gmatch("[^.]+") do lab[#lab + 1] = seg end
 		local n = #lab
@@ -140,23 +138,9 @@ function M.service_name(ptr, org)
 		end
 		return p   -- 1 或 2 段：本身已是可注册域（或单标签主机名），原样用
 	end
-	-- R77-C：只认 PTR。没有 PTR 就返回 nil（不回落到 ASN 组织名）。
-	-- org 参数刻意不使用 —— 保留它只为兼容调用签名，见函数上方注释。
+	-- 只认 PTR。没有 PTR 就返回 nil（不回落到任何组织代号）。
 	return nil
 end
-
--- R76-M2（round76b）：asn 行「到底查到了没有」的判定必须容忍 nil。
--- 旧版 tsv.lua（<= v1.8.12）没有 ptr 字段，`asn <t> <空> <空>` 行也可能只切出 3 段
--- ⇒ `a.ptr` 是 nil，而 `nil ~= ""` 为真 ⇒ 空票被当成「查到了」⇒ 服务名落到
--- M.service_name("","") 的兜底「未知」（真机实测：`?asn=1` 时「未知」被预填进
--- data-pc-name，用户点「归入条目」就把「未知」写进 uci apps）。所以这里统一取默认空串。
-local function asn_hit(a)
-	if not a then return false, nil, nil end
-	local asn, org, ptr = a.asn or "", a.org or "", a.ptr or ""
-	if asn == "" and org == "" and ptr == "" then return false, nil, nil end
-	return true, ptr, org
-end
-
 
 -- 采集 + 分析
 -- A38 惯例：raw 是**可选的测试缝**（直喂人造 TSV 跑归约）。生产调用一律不传参。
@@ -537,7 +521,7 @@ function M.collect(raw)
 				if (perday[day.date] or {})[0] then has0 = true end
 			end
 			-- 明细数据全部来自已有 TSV 行（appmap + diagtgt/diagdaytgt），**不新增任何采样**；
-			-- 服务名来自 asn 行的 PTR/org（只在用户点「查 ASN / 服务」时才查，默认不查）。
+			-- 「反解主机名」列的值来自 ptr 行（只读 ptrmap，不发起任何 DNS 查询）。
 			local subs, subs_more = nil, 0
 			do
 				local amap = (d.app_map or {})[key] or {}
@@ -555,36 +539,23 @@ function M.collect(raw)
 							local v = ((d.diag_day_tgt or {})[day.date] or {})[key .. "|" .. tgt]
 							if v then sby[day.date] = v; stot = stot + v; sn = sn + 1 end
 						end
-						local a = (d.asn or {})[tgt]
 						local tmv = tmin[tgt]
-						-- R76-A / R76-M2：服务名只能是「实测数据的派生」。
-						-- R76B-I1（round76c）路径口径：**生产不可达** —— 默认 `stats_tsv`
-						-- 不带 asn 行，`d.asn` 恒为空表，所以这里的 `hit` 恒为 false；真正
-						-- 回填服务名的是下面 `M.load_asn()`（`?asn=1` 时才跑）。这里保留
-						-- 同一判据的理由：`M.collect(raw)` 测试缝可直接喂 asn 行，两条路径
-						-- 必须同口径，否则测试缝与生产行为分叉（round76b 就是靠这条缝发现
-						-- `nil ~= ""` 的）。**不是死代码，别删。**
-						-- shell 对**不可查**的目标（IPv6 / 域名 / 私网保留）也发空票行
-						-- `asn <t> <空> <空> <空>`，所以 `a ~= nil` 不等于「查到了东西」。
-						-- 必须三段都空才算没查到：否则 queried 会把「没查」当成「查过了」，
-						-- 与页面「IPv6 显示「未查询」」的说明自相矛盾。
-						-- （R77-C 之后 service 在没有 PTR 时就是 nil，不再有「未知」兜底被
-						-- 预填成封锁名称的风险；但 queried 三态仍然依赖这个判定。）
-						local hit, hptr, horg = asn_hit(a)
+						-- round79：「反解主机名」列的值只有一条来源 —— `ptr` TSV 行（shell 侧从
+						-- $USAGE_DIR/ptrmap 只读导出，取自 tick 里的 rev_ptr_sweep，页面零 DNS）。
+						-- 阴性/未查都是 `-`，这里一律当没有 ⇒ 模板显示「-」，绝不拿别的字段顶替。
+						local _p = (d.ptr or {})[tgt]
+						local ptr = (_p and _p ~= "" and _p ~= "-") and _p or nil
 						local svc
-						if hit then svc = M.service_name(hptr, horg) end
-						-- round78：反解线索（L1 PTR + L2 被动 DNS）。**它只是线索**，
-						-- 不是「这个目标是什么服务」—— 判定交给 AI（见 ai.lua 的系统提示）。
+						if ptr then svc = M.service_name(ptr) end
+						-- round78：反解线索（L1 PTR + L2 被动 DNS）仍随行下发，只用于 AI 推测的
+						-- 请求内容；它**不是**「这个目标是什么服务」的结论（见 ai.lua 系统提示）。
 						local hint = ((d.dns_hint or {})[key] or {})[tgt]
 						if hint == "" then hint = nil end
 						acc[#acc + 1] = { target = tgt, today = tmv, by = sby,
 							hint = hint,
 							total = (sn > 0) and stot or nil,
-							asn = (a and (a.asn or "") ~= "") and a.asn or nil,
-							org = (a and (a.org or "") ~= "") and a.org or nil,
-							ptr = (a and (a.ptr or "") ~= "") and a.ptr or nil,
+							ptr = ptr,
 							service = svc,
-							queried = hit and true or nil,
 							-- design §4.2：未覆盖设备独占的目标有 t 行、但名称分钟只算名单内
 							-- 设备 ⇒ 不产生 n(0) 分钟。不标一句，用户看到「明细有 12 分钟、
 							-- 上面只有 3 分钟」会以为是 bug。
@@ -605,9 +576,8 @@ function M.collect(raw)
 				end
 				if #acc > 0 then
 					local m1 = kmeta[key]
-					subs = { head = { target = "目标", service = "服务",
-						today = "今天", total = "合计",
-						asn = "AS", org = "归属组织", note = "备注" },
+					subs = { head = { target = "目标", service = "反解主机名",
+						today = "今天", total = "合计", note = "备注" },
 						keyname = (m1 and m1.name) or "（未知条目）",
 						key = key, device = dr.device, rows = acc }
 				end
@@ -721,85 +691,23 @@ function M.collect(raw)
 	while #rr > 60 do table.remove(rr) end
 	d.reset_rows = rr
 
-	-- 9) 诊断明细（第 8 轮 R13/D19/A24）：未被条目覆盖、但命中了条目目标的流量。
-	--    行 = (条目, MAC)：按今日命中分钟降序；每行带 30 天按天合计（与 d.days 对齐、缺日补零）。
-	--    目标列表**仅在**该条目只有一台未覆盖客户端有命中时内联；多台时标注「目标未区分设备」。
-	-- 诊断区沿用上面的 dlabel/dstate（已并入权威名单 d.names，含 off/gone）。
-	-- R76-L1：诊断面板的「命中过的目标」也必须受折叠口径约束 —— 它对每个条目把当天所有
-	-- 目标全列出来（实测 30+ 条），绕过了矩阵里「只列前 10、其余收起」。这里按与矩阵
-	-- 完全相同的规则截断：今日分钟降序、同分按目标名升序，第 11 条起只留计数。
-	local DIAG_TOP = 10
-	local tgt_by_key, tgt_more = {}, {}
-	for _, tg in ipairs(d.diag_tgt or {}) do
-		tgt_by_key[tg.key] = tgt_by_key[tg.key] or {}
-		local l = tgt_by_key[tg.key]
-		l[#l + 1] = { target = tg.target, minutes = tg.minutes }
-	end
-	for k, l in pairs(tgt_by_key) do
-		table.sort(l, function(a, b)
-			local am, bm = a.minutes or 0, b.minutes or 0
-			if am ~= bm then return am > bm end
-			return a.target < b.target
-		end)
-		if #l > DIAG_TOP then
-			tgt_more[k] = #l - DIAG_TOP
-			for _ = #l, DIAG_TOP + 1, -1 do l[_] = nil end
-		end
-	end
-	local drows = {}
-	for _, r in ipairs(d.diag or {}) do
-		local _ix = key_idx(r.key)
-		local row = {
-			key = r.key, mac = r.mac, ip = r.ip, hostname = r.hostname,
-			online = r.online, minutes = r.minutes, first = r.first, last = r.last,
-			-- D29/A36：名称一律取 stats_tsv 已解析的行内 name（remarks → apps 首项）；
-			-- 条目已停用/已删除时仍有权威名单（dlabel 已并入 d.names）兜底，
-			-- 只有行内 name 也为空才退「条目 #N」—— 诊断区永不出现 weburl_N 这类裸 key
-			-- （行内 name 由 shell 三档回退保证非空；本链再对空串兜底，A57 前提）。
-			-- A55：nz 让空串行内 name 也回退（shell 侧三档全空时不再渲染空白）。
-			-- A43：行内 name 判空后再进 nz 链 —— Lua 的 and/or 返回操作数本身，子表达式
-			-- (A and B) 为真时结果是布尔 true，会把字面量 true 渲染进页面。
-			entry = (r.name ~= nil and r.name ~= "") and r.name
-				or nz(dlabel[r.key], nz(d.names[r.key] and d.names[r.key].label,
-					"条目 #" .. (_ix and _ix + 1 or "?"))),
-			device = M.device_name(r.mac),
-			days30 = {}, total30 = 0, by_date = {},
-		}
-		-- 条目已停用/已删除：其封锁规则已清理，但历史诊断计数仍保留（模板据此加注说明）。
-		-- A50：判据改用权威名单的 state（off/gone → stale）；名单缺行（老数据源）视为启用。
-		row.stale = ((dstate[r.key] or "on") ~= "on")
-		local perday = (d.diag_day or {})
-		for _, day in ipairs(d.days) do
-			local v = (perday[day.date] or {})[r.key .. "|" .. r.mac] or 0
-			row.days30[#row.days30 + 1] = { date = day.date, label = day.label, minutes = v }
-			row.by_date[day.date] = v
-			row.total30 = row.total30 + v
-		end
-		drows[#drows + 1] = row
-	end
-	table.sort(drows, function(x, y)
-		if x.minutes ~= y.minutes then return x.minutes > y.minutes end
-		return x.mac < y.mac
-	end)
-	local perkey = {}
-	for _, r in ipairs(drows) do perkey[r.key] = (perkey[r.key] or 0) + 1 end
-	for _, r in ipairs(drows) do
-		if perkey[r.key] == 1 then
-			r.targets = tgt_by_key[r.key] or {}
-			r.targets_more = tgt_more[r.key]
-		else
-			r.multi = true
-		end
-	end
-	d.diag_rows = drows
-
-	-- 9b) P-C/D6：未覆盖设备提醒。数据只来自上面的 diag 行（今天、分钟 >= 1），
+	-- 9b) P-C/D6：未覆盖设备提醒。数据直接来自 diag 行（今天、分钟 >= 1），
 	--     不新增采集、不新增 iptables 调用（D1）。零命中 => n = 0，模板连容器都不渲染。
 	-- 同一台设备命中多个未覆盖条目时按设备聚合：台数不重复计、分钟相加，
 	-- keys 保留它命中的所有条目（模板的「查看」链到分钟最高的那个条目）。
 	local uncmap, uncord = {}, {}
-	for _, r in ipairs(drows) do
-		if (r.minutes or 0) >= 1 then
+	for _, r in ipairs(d.diag or {}) do
+		if (tonumber(r.minutes) or 0) >= 1 then
+			local _ix = key_idx(r.key)
+			-- 行内 name（shell 三档回退保证非空）→ 权威名单 → 「条目 #N」，与矩阵同一回退链。
+			local _entry = (r.name ~= nil and r.name ~= "") and r.name
+				or nz(dlabel[r.key], nz(d.names[r.key] and d.names[r.key].label,
+					"条目 #" .. (_ix and _ix + 1 or "?")))
+			r.device = r.device or M.device_name(r.mac)
+			r.entry = _entry
+			-- 条目已停用/已删除：其封锁规则已清理，但历史诊断计数仍保留（提醒据此排除）。
+			-- 判据与矩阵同一套：权威名单 state ~= "on"；名单缺行（老数据源）视为启用。
+			r.stale = ((dstate[r.key] or "on") ~= "on")
 			local m = r.mac
 			local u = uncmap[m]
 			if not u then
@@ -842,59 +750,5 @@ function M.collect(raw)
 	return d
 end
 
--- R74-A（round74）：机械 ASN 回填。**只在用户主动点开「（未归类）」明细时调用**
--- （模板里看 `luci.http.formvalue("asn")`），走 `stats_tsv asn <target>…` 子命令：
---   * 默认首屏 stats_tsv **不会**产生 asn 行，所以默认路径零 DNS、零延迟；
---   * 7 天缓存落在 shell 侧 `$STATE_DIR/asn.cache`，Lua 不管缓存；
---   * 归属信息来自 Team Cymru 公共 ASN 库，只说明「该目标落在哪个网络」，
---     **不代表它是什么服务**（文案见 stats.htm）；
---   * IPv6/域名串 shell 侧不查 ⇒ 本函数拿不到值 ⇒ 模板印「未查询」，绝不编。
--- 返回填过的 target 个数（供模板/自检参考）。
-function M.load_asn(d)
-	if type(d) ~= "table" then return 0 end
-	local want, seen = {}, {}
-	for _, r in ipairs(d.dev_key_day_rows or {}) do
-		local subs = r.subs
-		if subs and subs.rows then
-			for _, s in ipairs(subs.rows) do
-				if s.target and not seen[s.target] then
-					seen[s.target] = true
-					want[#want + 1] = s.target
-				end
-			end
-		end
-	end
-	if #want == 0 then return 0 end
-	local asn = tsv.read_asn(want) or {}
-	local n = 0
-	for _, r in ipairs(d.dev_key_day_rows or {}) do
-		local subs = r.subs
-		if subs and subs.rows then
-			for _, s in ipairs(subs.rows) do
-				local a = asn[s.target]
-				if a then
-					local hit, hptr, horg = asn_hit(a)
-					s.asn = ((a.asn or "") ~= "") and a.asn or nil
-					s.org = ((a.org or "") ~= "") and a.org or nil
-					s.ptr = ((a.ptr or "") ~= "") and a.ptr or nil
-					-- R76B-I1（round76c）：这是服务名的**唯一生产路径**（`?asn=1` 时
-					-- tsv.read_asn 才有数据）。上面 `unc_row()` 那处同判据在生产不可达，
-					-- 两处刻意保持同一口径（asn_hit）以防漂移 —— 改一处必须改两处。
-					-- 服务名必须在拿到 ptr/org 之后重算：`unc_row()` 建行时 d.asn 还是空的
-					-- （read_asn 只在 `?asn=1` 才跑），那时 service 必然是 nil；
-					-- 不在这里回填，页面就会永远印「未查询」——实测真机就是这样。
-					-- R76-M2：但「空票」不算查到 —— shell 对 IPv6/域名/私网也发
-					-- `asn <t> <空> <空> <空>` 行，若在这里无条件算服务名，queried 会把
-					-- 「没查」当「查过了」，页面「IPv6 显示「未查询」」就成了假话。
-					-- （R77-C：没有 PTR 时 service 就是 nil，页面显示 org + 「无法判断具体应用」。）
-					s.queried = hit and true or nil
-					if hit then s.service = M.service_name(hptr, horg) end
-					n = n + 1
-				end
-			end
-		end
-	end
-	return n
-end
 
 return M

@@ -124,22 +124,12 @@ function unclassified_infer()
 		if (tonumber(nr) or 0) == 0 and tgt ~= "" then tgts[#tgts + 1] = tgt end
 	end
 
-	-- 组织名必须走 `stats_tsv asn`（tsv.read_asn）：默认 stats_tsv **不输出 asn 行**，
-	-- 直接读 d.asn 永远是空表 ⇒ org 全空 ⇒ ai.infer 会把所有目标都过滤掉、一个字节都不发、
-	-- 按钮永远「没有推测出可信结果」。read_asn 会先吃缓存，只对未缓存的公网目标查 Team Cymru
-	-- （私网/保留地址由 shell 侧 pc_asn_queryable 挡掉，不产生任何外发查询）。
-	local asnmap = {}
-	if #tgts > 0 and tsv.read_asn then
-		local okasn, m = pcall(tsv.read_asn, tgts)
-		if okasn and type(m) == "table" then asnmap = m end
-	end
 	local items = {}
 	for _, tgt in ipairs(tgts) do
-		local a = asnmap[tgt]
-		-- round78：把反解线索（PTR / 被动 DNS）一起带上。它让「没查到 ASN 的目标」
-		-- 也有可发的内容；但**线索不是结论**，ai.lua 的系统提示里另有约束句。
+		-- round79：ASN 整条链已删，可发内容只剩反解线索（PTR / 被动 DNS，round78 的 dnshint 行）。
+		-- 一个线索都没有的目标就不发 —— **线索不是结论**，ai.lua 的系统提示里另有约束句。
 		local hint = ((d.dns_hint or {})[key] or {})[tgt] or ""
-		items[#items + 1] = { target = tgt, org = (type(a) == "table" and a.org) or "", hint = hint }
+		items[#items + 1] = { target = tgt, hint = hint }
 	end
 
 	-- 该条目的 apps 原文 → 名称清单（不含域名）。

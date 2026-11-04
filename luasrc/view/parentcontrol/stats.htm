@@ -1,31 +1,9 @@
 <%
 	local stats = require "luci.model.cbi.parentcontrol.statsdata"
 	local d = stats.collect()
-	-- R74-A：机械 ASN 只在用户主动点「查 ASN」时算（默认零 DNS、零等待）。
-	-- 怎么读开关：**直接读 `http.message.env.QUERY_STRING`**，既不调 `http.formvalue` 也不调
-	-- `http.getenv`。真机实测（ImmortalWrt 23.05 + ucode 版 LuCI）两个调用都不可用：
-	--   ① `http.formvalue("asn")` 抛在 C 侧（`this.parsed_input`），模板里接不住 ⇒ 整页 500；
-	--   ② `http.getenv`（dot 与 colon 两种形态都试）报
-	--      `Reference error: left-hand side expression is null` —— 它是 ucode 侧 userdata 闭包，
-	--      在模板里没有可用的 self。
-	-- 而模板里的 `http` 就是**请求对象**本身（`http.message.env` / `http.message.params` 都是
-	-- 普通 Lua 表），所以直接读字段最稳：没有跨语言调用、不会抛、沙箱里也能跑。
-	local _qs
-	local _env = http and http.message and http.message.env
-	-- 注意：`http` / `http.message` / `.env` 在真机是 **ucode 对象**（`type()` 报 userdata，
-	-- 但字段访问与 Lua 表一样），所以不能写 `type(_env) == "table"` —— 那样永远不会成立。
-	-- 只做 nil 判定 + tostring，两种实现都能过。
-	if _env ~= nil and _env.QUERY_STRING ~= nil then _qs = tostring(_env.QUERY_STRING) end
-	-- 注意：Lua 的 string.match **没有 alternation**（`(^|&)` 会当字面量，永不命中）——
-	-- 这里不用正则，改成把 `&` 统一成逗号再两头补逗号做子串判定。
-	local want_asn = false
-	if _qs then
-		local _norm = "," .. (string.gsub(_qs, "&", ",")) .. ","
-		want_asn = (string.find(_norm, ",asn=1,", 1, true) ~= nil)
-	end
-	if want_asn then stats.load_asn(d) end
-	-- 做法（二）：模板不直接读 `want_asn`（见下）—— 把开关放回 `d`，模板里一律走 `d.*`。
-	d.asn_requested = want_asn
+	-- round79：对外部数据库查归属那条链（含带参数的入口与按钮）已整体删除 —— 页面显示的
+	-- 「反解主机名」来自 PTR 反解缓存（定时任务里的 rev_ptr_sweep 写 $USAGE_DIR/ptrmap），
+	-- 统计页零 DNS、不需要任何按钮触发，所以这里也不再解析 QUERY_STRING。
 	local m = d.meta or {}
 	local T = translate
 	local function pct(v) return math.max(0, math.min(100, v or 0)) end
@@ -102,7 +80,6 @@
 		 <a href="<%=url("admin/control/parentcontrol/weburl_edit")%>/<%=pcdata(_u.key)%>"><%=pcdata(_u.entry or _u.key)%></a>
 		<% end %>
 		<% end %>
-		<br/><a href="#pc-diag"><%=T("查看下方「未被条目覆盖的命中流量」明细")%></a>
 	</div>
 	<% end %>
 	<div class="pc-kv">
@@ -266,35 +243,25 @@
 				     条目子行（kind == "key"）的合计来自台账，恒有值，保持原样。 -->
 				<td><%=r.total or "-"%></td>
 			</tr>
-			<!-- R76-C（round76）：目标明细从页尾独立区块搬进矩阵 —— 每条目标行自带「推测」「归入条目」
-			     两个按钮（data-pc-key 指该行所在条目，所以多条目设备也写对条目）。
-			     R77-C（round77）：主列从「服务名」改成「归属网络」，**三态**渲染：
-			       有 PTR（s.service 非空）⇒ 主列 <b>可注册域</b>（这才是应用线索）；
-			       查过但无 PTR（s.queried 真）⇒ 主列只放 org 原文 + 「基础设施，无法判断具体应用」，
-			         且**不加粗** —— 加粗会让代号看起来像是我们识别出的服务名（本轮修的正是这个冒充）；
-			       没查（s.queried 空）⇒ 「未查询」（未点 ?asn=1 时是 "-"）。
-			     data-pc-name 只在有真实域名时才有值：绝不把 ASN 组织代号预填成封锁名称。
+			<!-- R76-C（round76）：目标明细从页尾独立区块搬进矩阵 —— 每条目标行自带「归入条目」按钮
+			     （data-pc-key 指该行所在条目，所以多条目设备也写对条目）。
+			     round79：主列改成「反解主机名」—— 只显示 round78 的 PTR 反解（`ptr` TSV 行，来自
+			     tick 里的 rev_ptr_sweep，页面零 DNS）。有名字就<b>加粗</b>显示，没有就是 `-`；
+			     原来那三态（服务名 / 组织名 + 免责小字 / 待查占位）已整体删除。
+			     data-pc-name 只在真的有域名时才预填 —— 绝不把代号当名称。
 			     字符串一律 pcdata()；裸输出的只有整数 s.total / r.subs_more（W207④ 白名单同口径）。 -->
 			<% if _sid then %>
-			<!-- R77-E（round76d 的入口）：没带 ?asn=1 时在明细区第一行给「查归属网络」入口。
-			     三属性缺一不可：data-pc-owner（否则设备级折叠不认它，成孤儿行）、
-			     data-pc-subowner（否则 pcSubResync 不收敛）、style="display:none"（默认收起）。
-			     刻意**不带** data-pc-sub / onclick="pcSubToggle" —— 那是未归类行自己的开关。 -->
-			<% if not d.asn_requested then %>
-			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" style="display:none">
-				<td colspan="<%=#d.days + 2%>"><%=T("想看归属网络而不是 IP？")%> <a href="?asn=1"><%=T("查 ASN / 归属网络")%></a><%=T("（每次最多查 24 个，再点一次继续查）")%></td>
+			<!-- round79 R3/R4：明细行没有独立表头（它们挂在矩阵同一张表里、跟着设备行展开），
+			     所以用一行随组显示的表头把列名说清楚 —— 否则用户看到一列域名不知道那是什么。
+			     这一行和其它明细行一样默认 display:none，跟着展开一起出现。 -->
+			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" data-pc-row="<%=pcdata("_head")%>" style="display:none">
+				<td colspan="<%=#d.days + 2%>" class="muted"><b><%=T("反解主机名")%></b>
+					<span style="font-size:11px"><%=T("（下面每一行是该条目下一个未归类目标的每日分钟；主机名来自 PTR 反解缓存，没有反解时显示「-」）")%></span></td>
 			</tr>
-			<% end %>
 			<% for _, s in ipairs(r.subs.rows) do %>
-			<!-- round78：这条目标的反解线索（PTR / 被动 DNS）。**只是线索**，不是「它是什么服务」，
-			     所以文案只有「反解：」加域名，绝不下结论。没有线索就整行不渲染（不写「暂无」）。
-			     全角分号只为可读性；shell 侧已截到 3 个，所以不显示「（+N）」—— 那个数字拿不到，
-			     编一个就是假数字。 -->
-			<% local _hint = s.hint and (s.hint:gsub(";", "；")) or nil %>
 			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" data-pc-key="<%=pcdata(r.key)%>" data-pc-row="<%=pcdata(s.target)%>" style="display:none">
-				<td><% if s.service then %><b><%=pcdata(s.service)%></b><% elseif s.queried then %><%=pcdata(s.org or "")%> <span class="muted"><%=pcdata(T("基础设施，无法判断具体应用"))%></span><% else %><%=pcdata(d.asn_requested and T("未查询") or "-")%><% end %><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% end %><% if s.service and s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if _hint then %> <span class="pc-hint" style="font-size:11px;color:#666"><%=pcdata(T("反解："))%><%=pcdata(_hint)%></span><% end %><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
-					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferOne(this)"
-						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("推测是什么")%></button><span class="muted" data-pc-infer="1"></span>
+				<td><% if s.ptr and s.ptr ~= "-" then %><b><%=pcdata(s.ptr)%></b><% else %>-<% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
+					<span class="muted" data-pc-infer="1"></span>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcApplyOne(this)"
 						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>" data-pc-name="<%=pcdata(s.service or "")%>"><%=T("归入条目")%></button><span class="muted" data-pc-apply="1"></span>
 				</td>
@@ -320,89 +287,13 @@
 		</table>
 	</div>
 	<div class="muted" style="margin-top:6px">
-		<%=T("每格是该设备当天计入额度统计的分钟数（名称子行的格子除外，见下方说明）；「-」= 该格没有可用记录（设备行 = 当天没有该设备的用量记录；名称行 = 该天没有名称维度的记录，见下方说明）。列顺序与上方柱状图一致，可横向滚动。")%>
-		<br/><%=T("多条目设备点行可展开它命中的各条目；只有 1 个条目的设备直接在行内标出条目名。子行与设备行同一列口径，按该设备下的条目分别计时。")%>
-		<br/><%=T("若某条目写有多行「封锁名称」，只绑到这一条目的设备点行展开的就是名称（如小红书、我的世界…），行内同时标出条目名与名称个数。")%>
-		<br/><%=T("名称行的分钟数按「名称」计：同一分钟内，一个名称名下只要有一个目标在命中就记 1 分钟（同一分钟里多个目标不重复计），所以值不会超过当天分钟数；同一分钟里若有多个不同名称在命中，每个名称各记 1 分钟。名称行只用来看「时间花在哪个名称上」，不参与额度扣减。")%>
-		<br/><%=T("名称分钟的统计范围：只算「本条目设备名单里的设备」打到该目标的总流量。不在名单里的设备（即上方「N 台未覆盖设备命中」提醒里那些）不进入名称分钟 —— 它们只出现在那份提醒里（提醒保留，便于发现该不该把它们加进名单）。名称分钟只在该条目存在「未覆盖设备」时才会产生，所以名单为空、或名单已覆盖当前全部在线设备时，都没有名称分钟：名单已覆盖全部在线设备时该条目不装诊断链，名称格显示「-」；名单为空（条目没绑任何设备）时，该条目在「按设备每日用量」这张按设备归属的表里整块不显示。")%>
-		<br/><%=T("名称分钟是近似值：实现是「本条目打到该目标的总流量」减去「最近一次构建时列出的未覆盖设备的流量」。因此最近一次构建之后才出现的未覆盖设备，最多有一个采样周期的流量会落进名称分钟（下一分钟自愈）。")%>
-		<br/><%=T("名称分钟与条目分钟不同源：条目与设备条目子行按该设备自己的额度计数（字节阈值）计，名称分钟按上面那份设备集合打到该目标的总流量计。因此：① 名称分钟不是单台设备的分钟，不要与设备行、条目子行的分钟相加或相减；② 某一分钟里若流量分散在多个目标上、没有任何单个目标到阈值，这一分钟只会计入条目、不落到任何名称上，所以名称行合计不保证不少于条目分钟。")%>
-		<br/><%=T("目标明细：展开矩阵里「（未归类）」那一行（点前面的 ▸），就能看到该条目所有未归类目标逐个的今天/合计分钟。按今日分钟降序只列前 10 条，其余折叠成一行「还有 N 条未显示」。仍看不到明细的唯一情形是：当天有未归类分钟，但映射表里已经没有该目标的记录（历史或已过期的目标，IP 刷新重建后它已不在表里）——这种情况下分钟还在，只是拆不到具体目标。")%>
-		<br/><%=T("名称格显示「-」有三种情形：① `.map` 存在但某天没有名称维度的记录（老数据、或那天没采样）；② 该条目当天没有装上诊断链（没有未覆盖设备）；③ 有链、当天也采到了名称分钟，但这段分钟全落在「（未归类）」行上（命中目标不在该条目的「封锁名称」里），所以具名的名称行是「-」而「（未归类）」有值。相反的，如果本机没有 `resolveip`（或还没跑过 IP 刷新），`.map` 不会生成 —— 这时名称行整块不会显示，而不是显示「-」。")%>
-		<br/><%=T("「（未归类）」这一行是把这个条目「命中了、但在「封锁名称」里找不到对应名称」的目标分钟合在一起，用来发现「是不是该给这个目标补一条封锁名称」。点开这一行能看到里面每个目标今天／合计各多少分钟，这一行的分钟与子项之间没有可依赖的大小关系：子项「今天」取的是该目标当天的命中分钟，而这一行只累计「名称分钟」那一份，只有未覆盖设备命中的目标不计入（子项分钟只来自「名称分钟」这条采样。）")%>
-		<br/><%=T("「归属网络」这一列的口径（PTR 反查 + ASN 归属）见页面底部「口径与参数」。")%>
-		<br/><%=T("「归属网络」是该网段登记的**基础设施**（CDN / 云 / 运营商），不是具体 App。同一个 CDN 网段会被很多应用共用，所以没有域名证据时我们只能写「无法判断具体应用」，不猜。")%>
-		<br/><%=T("归属与 PTR 只在点下面的按钮后才有（默认不查、定时任务里也不查）：归属来自 Team Cymru 公共 ASN 库（DNS TXT 查询），PTR 来自反向解析。每个目标最多三次 DNS 查询（网段归属、组织名、PTR），每次最多查 24 个还没缓存的目标；DNS 服务器不响应时每次查询都要等到解析器自己的超时，所以冷缓存第一次点开最坏能到分钟级，之后再看就走缓存（7 天）、不再查询。每次点开最多查 24 个目标；还有没查的，再点一次会接着查下一批。IPv6 目标与域名串不查，显示「未查询」；内网与保留地址（10/8、192.168/16、127/8、169.254/16、100.64/10 等）一律不查，同样显示「未查询」—— 不会把本机内网编址发给第三方。")%>
-		<% if not d.asn_requested then %>
-		<br/><a class="btn cbi-button cbi-button-neutral cbi-button-small" href="?asn=1"><%=T("查 ASN / 归属网络（ASN 与 PTR）")%></a>
-		<% end %>
-		<br/><%=T("「推测」只在你点按钮时才把该目标的公网网段、该网段的 ASN 组织名、以及本条目已配的封锁名称清单发给 AI；不会发 MAC、主机名、内网 IP 或设备名。推测结果仅供参考，不参与统计口径，也不写入归属。")%>
-		<br/><%=T("「归入条目」会把该目标写进它所在那一行的条目：条目里已有同名封锁名称就追加到该行的域名列表末尾，没有就新增一行「名称|目标」。改完会自动重建规则，约 15–30 秒后回到本页可见。")%>
-		<br/><%=T("未覆盖设备按在线优先最多跟踪 8 台：超出的未覆盖设备不会出现在上面那份提醒里，也因此扣不掉，仍会计入名称分钟。另外，本次口径变更对历史数据不重算——升级前已记下的名称分钟保留原样。")%>
-		<br/><%=T("另外，升级/重启后的第一个采样周期按旧口径计（未覆盖部分尚未建立基线，因此该周期不扣减），每个名称最多多出 1 分钟；之后自愈。")%>
-		<br/><%=T("名称归属按「封锁名称」的行号记：只改名称文字不会影响历史；但增删或移动中间行后，历史分钟会按行号对齐到占该行的新名称，最长影响 30 天窗。")%>
-		<br/><%=T("名称归属在每次 IP 刷新时重建（默认随定时任务）；改了条目的「封锁名称」后，行号归属可能要等到下一次刷新（或重启）才更新，期间名称行可能仍按旧归属显示，最多一个刷新周期。")%>
-	</div>
-	<% end %>
-
-	<h3 id="pc-diag"><%=T("未被条目覆盖的命中流量（诊断）")%></h3>
-	<% if #d.diag_rows == 0 then %>
-		<div class="muted"><%=T("暂无——说明所有命中封锁目标的设备都在条目范围内，或还没有命中。")%></div>
-		<div class="muted" style="margin-top:6px"><%=T("注意：诊断明细与额度计时共用「用量判定阈值(KB/分钟)」（见「网址过滤」页）。该阈值调大时，低于阈值的流量不计入诊断——此时这里会长期为空，看起来像“没人绕过”。")%></div>
-	<% else %>
-	<table>
-		<tr>
-			<th><%=T("设备")%></th><th><%=T("IP")%></th><th><%=T("主机名")%></th><th><%=T("命中的条目")%></th>
-			<th class="num"><%=T("今日分钟")%></th><th><%=T("首次命中")%></th><th><%=T("最近命中")%></th>
-			<th class="num"><%=T("最近 30 天")%></th><th><%=T("命中过的目标")%></th>
-		</tr>
-		<% for _, r in ipairs(d.diag_rows) do %>
-		<tr>
-			<td><%=pcdata(r.mac)%>
-				<% if not r.online then %><span class="muted">(<%=T("已离线")%>)</span><% end %></td>
-			<td class="muted"><%=pcdata(r.ip or "")%></td>
-			<td class="muted"><%=pcdata(r.hostname or "")%></td>
-			<td><%=pcdata(r.entry or "")%><% if r.stale then %> <span class="muted"><%=T("（已停用或已删除）")%></span><% end %></td>
-			<td class="num"><%=r.minutes%></td>
-			<td class="muted"><%=pcdata(r.first or "")%></td>
-			<td class="muted"><%=pcdata(r.last or "")%></td>
-			<td class="num"><%=r.total30%>
-				<%
-					-- 按天合计（最近 30 天）：只列有数据的天，避免 30 个 0 刷屏
-					local parts = {}
-					for _, day in ipairs(r.days30 or {}) do
-						if day.minutes > 0 then
-							parts[#parts + 1] = day.label .. ":" .. day.minutes
-						end
-					end
-					if #parts > 0 then
-				%>
-				<span class="muted" style="font-size:11px">(<%=pcdata(table.concat(parts, " "))%>)</span>
-				<% end %>
-			</td>
-			<td>
-				<% if r.multi then %>
-					<span class="muted"><%=T("多设备命中，目标未区分设备")%></span>
-				<% elseif r.targets and #r.targets > 0 then %>
-					<%
-						local tl = {}
-						for _, tg in ipairs(r.targets) do
-							tl[#tl + 1] = tg.target .. "(" .. tg.minutes .. ")"
-						end
-					%>
-					<%=pcdata(table.concat(tl, "、"))%><% if r.targets_more and r.targets_more > 0 then %> <span class="muted"><%=T("另有")%> <%=r.targets_more%> <%=T("个目标未列出（按今日分钟降序只列前 10 个）")%></span><% end %>
-				<% else %>-<% end %>
-			</td>
-		</tr>
-		<% end %>
-	</table>
-	<div class="muted" style="margin-top:6px">
-		<%=T("诊断统计的是「命中了封锁目标、但不在该条目设备范围内」的客户端流量，用来发现绕过（例如设备换了 MAC 导致原条目不再生效）。限制：每个条目最多统计 8 台未覆盖客户端（在线优先）；多台客户端命中同一条目时，目标列表不区分设备。阈值与额度计时一致。")%>
-		<br/><%=T("「命中的条目」这一列是被命中的条目，不是这台设备绑定的条目 —— 正因为这台设备不在该条目的设备名单里，它的流量才没有被计时。")%>
-		<br/><%=T("「命中过的目标」这一列统计的是该条目当天被命中过的目标（不分设备）；下方「多设备命中，目标未区分设备」表示该条目有多台未覆盖客户端，无法把目标归到具体某台。")%>
-	</div>
-	<div class="muted" style="margin-top:6px">
-		<%=T("已停用/已删除条目的历史诊断计数仍保留，其封锁规则已清理。")%>
+		<%=T("每格是该设备当天计入额度统计的分钟数（名称子行的格子除外）；「-」= 该格没有可用记录：设备行是当天没有该设备的用量记录，名称行是该天没有名称维度的记录；另外，当某个条目的设备名单已覆盖当前全部在线设备时，它不产名称分钟，名称格也是「-」。列顺序与上方柱状图一致，可横向滚动。")%>
+		<br/><%=T("多条目设备点行可展开它命中的各条目；只有 1 个条目的设备直接在行内标出条目名。子行与设备行同一列口径，按该设备下的条目分别计时。条目写有多行「封锁名称」时，展开的是名称行，行内同时标出条目名与名称个数。")%>
+		<br/><%=T("名称行的分钟数按「名称」计：同一分钟内一个名称名下只要有一个目标在命中就记 1 分钟（同一分钟里多个目标不重复计），所以不会超过当天分钟数；多个不同名称在命中则各记 1 分钟。名称行只用来看「时间花在哪个名称上」，不参与额度扣减。")%>
+		<br/><%=T("目标明细的「反解主机名」列是反向解析（PTR）缓存里已经有的域名：有就显示域名，没有就显示「-」。它只是线索 —— 一个网段常被多个应用共用，反解出来的域名不等于「这个目标就是那个服务」。反解由定时任务在后台做，本页不发起任何 DNS 查询。")%>
+		<br/><%=T("名称分钟是近似值，且与条目分钟不同源：条目与设备条目子行按该设备自己的额度计数（字节阈值）计，名称分钟按「本条目设备名单里的设备」打到该目标的总流量计。所以 ① 名称分钟不是单台设备的分钟，不要与设备行、条目子行的分钟相加或相减；② 某一分钟里流量分散在多个目标上、没有任何单个目标到阈值时，这一分钟只计入条目、不落到任何名称上，因此名称行合计不保证不少于条目分钟。不在名单里的设备不进名称分钟。")%>
+		<br/><%=T("「（未归类）」这一行把这个条目「命中了、但在「封锁名称」里找不到对应名称」的目标分钟合在一起，用来发现「是不是该给这个目标补一条封锁名称」。点开这一行能看到里面每个目标今天／合计各多少分钟，按今日分钟降序只列前 10 条，其余折叠成一行「还有 N 条未显示」。仍看不到明细的唯一情形是：当天有未归类分钟，但映射表里已经没有该目标的记录（历史或已过期的目标，IP 刷新重建后它已不在表里）—— 这种情况下分钟还在，只是拆不到具体目标。这一行的分钟与子项之间没有可依赖的大小关系：子项「今天」是该目标当天的命中分钟，而这一行只累计「名称分钟」那一份。")%>
+		<br/><%=T("「推测本行目标」会把该条目未归类目标的公网网段与反解线索发给 AI，不会发 MAC、主机名、内网 IP 或设备名；结果仅供参考，不参与统计口径。「归入条目」会把该目标写进它所在那一行的条目：已有同名封锁名称就追加到该行的域名列表末尾，没有就新增一行「名称|目标」。改完会自动重建规则，约 15–30 秒后回到本页可见。")%>
 	</div>
 	<% end %>
 
@@ -442,9 +333,8 @@
 		<tr><td><%=T("重置")%></td><td class="muted">
 			<%=T("额度条目可点「重置额度」立刻清零今天的用量（并写入重置记录）。重置不影响已累计的历史与实际用量。")%>
 		</td></tr>
-		<tr><td><%=T("目标明细的「归属网络」列")%></td><td class="muted">
-			<%=T("目标明细里的「归属网络」这一列只讲「这个目标落在谁的网络里」，它**不是**我们识别出的服务或应用名，也不能作为封锁依据。有三态：① 有 PTR 反查主机名 ⇒ 取它的可注册域作为应用线索（例如 a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com）；② 没有 PTR ⇒ 只写 ASN 组织原文（例如 AKAMAI-ASN1, NL）并明确标「基础设施，无法判断具体应用」，**不会**把组织代号当成服务名展示；③ 还没点开过的条目写「未查询」。之所以不给没有域名的目标猜一个应用名：同一腾讯云/阿里云/CDN 网段上可能跑着别家的游戏或应用，把 ASN 当应用名会误导。目标本身（IP 或域名串）仍显示在同一行的灰色小字里。")%>
-		</td></tr>
+		<tr><td><%=T("目标明细的「反解主机名」列")%></td><td class="muted">
+			<%=T("这一列只显示反向解析（PTR）缓存里已经存在的域名，且只取它的可注册域（例如 a23-45-173-0.deploy.static.akamaitechnologies.com ⇒ akamaitechnologies.com）；缓存里没有就显示「-」。没有域名时不猜、也不拿别的字段顶替 —— 一个网段常被多个应用共用，凭空给个名字会误导。反解只在定时任务里做，统计页本身不发任何 DNS 查询；域名串与 IPv6 目标不做反解。")%></td></tr>
 		<tr><td><%=T("AI 推测被打断")%></td><td class="muted">
 			<%=T("两种原因，页面会分开说清：①「连续 N 秒速率低于阈值」—— 判据是平均速率（低于 1 字节/秒），窗口内有零星字节也算慢；curl 只在自身分块时才检查速率，所以实际掐断时刻可能晚于 N 秒。②「超过总时长上限 N 秒被中断」—— 这是硬上限，到点就断，即使当时一直在收数据；这种情形**不是**没有输出，页面会明确写「是被时限截断而不是没有输出」。两个 N 分别对应设置页的「停滞判定」与「总时长上限」。")%>
 		</td></tr>
@@ -530,9 +420,9 @@
 						if (it.name) {
 							b2[k].setAttribute('data-pc-name', it.name);
 						} else {
-							/* 只清掉名称，**不禁用**按钮：pcApplyOne 在没有名称时会提示
-							   「请先点「推测是什么」」，禁用就把这条提示也堵死了（用户只能干瞪眼）。
-							   安全性由 pcApplyOne 的名称守卫保证 —— 空名称不会写进 uci。 */
+							/* 只清掉名称，**不禁用**按钮：pcApplyOne 在没有名称时会给出提示，
+							   禁用就把这条提示也堵死了（用户只能干瞪眼）。安全性由 pcApplyOne
+							   的名称守卫保证 —— 空名称不会写进 uci。 */
 							b2[k].removeAttribute('data-pc-name');
 						}
 					}
@@ -616,10 +506,6 @@
 		});
 	}
 
-	function pcInferOne(btn) {
-		pcInferRun(btn.getAttribute('data-pc-key'));
-	}
-
 	function pcInferAll(btn) {
 		pcInferRun(btn.getAttribute('data-pc-key'));
 	}
@@ -685,7 +571,7 @@
 		var row = btn.parentNode.parentNode;
 		var out = row ? row.querySelector('[data-pc-apply]') : null;
 		if (!name) {
-			pcInferMsg(out, '<%=translate("请先点「推测是什么」")%>', false);
+			pcInferMsg(out, '<%=translate("这个目标还没有反解出域名，请先点「推测本行目标」看看能不能归入")%>', false);
 			return;
 		}
 		pcInferMsg(out, '<%=translate("正在归入…")%>', true);
