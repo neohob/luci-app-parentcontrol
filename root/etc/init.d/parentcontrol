@@ -2348,60 +2348,11 @@ rev_hint_names() { # $1=target → 打印 "a;b;c"（无则空）
 # 注意应答行**源是 DNS 服务器、客户端在 > 右侧** —— 这是最容易搞错的地方。
 # 配平键 = (客户端 IP, DNS 事务 id)：75 秒样本 193 查 / 190 答 / 0 条配不上。
 rev_dns_parse() { # stdin=tcpdump 文本 → stdout "<ip>\t<name>"
-	awk '
-	function port_of(x,   i) { i = 0; sub(/.*\./, "", x); return x }
-	function strip_port(x) { sub(/\.[0-9]+$/, "", x); return x }
-	function emit(ip, nm) {
-		sub(/\.$/, "", nm)
-		if (ip == "" || nm == "") return
-		if (index(nm, "\t") > 0 || index(nm, "|") > 0 || index(nm, ";") > 0) return
-		gsub(/[^A-Za-z0-9._-]/, "-", nm)
-		if (nm == "" || length(nm) > 64) return
-		printf "%s\t%s\n", ip, nm
-	}
-	{
-		i = index($0, " IP ")
-		if (i == 0) next
-		s = substr($0, i + 4)
-		a = index(s, " > ")
-		if (a == 0) next
-		src = substr(s, 1, a - 1)
-		t = substr(s, a + 3)
-		b = index(t, ": ")
-		if (b == 0) next
-		dst = substr(t, 1, b - 1)
-		rest = substr(t, b + 2)
-		sq = port_of(src); dq = port_of(dst)
-		if (dq == 53) {
-			cli = strip_port(src)
-			if (!match(rest, /^[0-9]+[+*]?[ ]/)) next
-			id = substr(rest, 1, RLENGTH - 1)
-			sub(/[+*]$/, "", id)
-			q = substr(rest, RLENGTH + 1)
-			split(q, w, " ")
-			if (w[2] == "") next
-			qk = cli SUBSEP id
-			qname[qk] = w[2]
-			qcli[qk] = cli
-		} else if (sq == 53) {
-			cli = strip_port(dst)
-			if (!match(rest, /^[0-9]+[ ]/)) next
-			id = substr(rest, 1, RLENGTH - 1)
-			qk = cli SUBSEP id
-			if (!(qk in qname)) next
-			# 只取 A / AAAA（CNAME 只是别名链，写进去会把域名互相串起来）
-			# RR 段按 ", " 切成一条条：首条前面**没有**逗号，所以不能用「以 , 开头」的正则。
-			sec = substr(rest, RLENGTH + 1)
-			sub(/^[0-9]+\/[0-9]+\/[0-9]+[ ]/, "", sec)   # 先吃掉 "1/0/0" 这段计数头
-			nr = split(sec, rr, /, /)
-			for (ri = 1; ri <= nr; ri++) {
-				split(rr[ri], z, " ")
-				if (z[1] == "A" || z[1] == "AAAA") emit(z[2], qname[qk])
-			}
-			# 不 delete：一条查询常对应多个应答包（先 CNAME 再 A/AAAA），删掉的话后续包
-			# 就成了「没有对应查询的应答」被丢弃 —— 真机会整条漏掉 A 记录。
-		}
-	}'
+	# 程序体只有一份：`_dns_awk_text`。这里不再内嵌任何 awk —— 历史上这里抄过一份，
+	# 抄完之后两份开始漂移（函数版 `port_of(x, i)`、heredoc 版 `port_of(x)`），
+	# 而测试跑内嵌那份、生产跑生成那份，是「门绿线上错」的经典形状。
+	# busybox awk 接受「程序体作为一个参数」，所以不必落临时文件。
+	awk "$(_dns_awk_text)"
 }
 
 # 把 stage 里的 <ip>\t<name>（每行一次观测）并进 dnsmap：累加 count、刷新 lastts、
@@ -2442,18 +2393,23 @@ rev_dns_merge() { # $1=stage 文件
 }
 
 # 被动 DNS 采集 worker 的脚本文本（由 dns_watch 写到 STATE_DIR 再后台执行）。
-# 链：tcpdump → 解析（rev_dns_parse 的同一段 awk，写成文件避免每包重解析函数体）
+# 链：tcpdump → 解析（`_dns_awk_text` 的同一份程序体，写成文件避免每包重解析函数体）
 #     → 攒够 50 行或满 10 秒 flush 进 stage → rev_dns_merge 落盘。
 # **snaplen 必须是 0**：-s 120 会把应答截断成 [|domain]，A 记录就拿不到（真机实测）。
 _dns_worker_text() {
 	cat <<'DNSW'
 #!/bin/sh
-# argv: <iface> <stage> <awkfile> <libfile>
+# argv: <iface> <stage> <awkfile> <initd> <usagedir>
 # 注意：下面这些变量属于**被生成出来的那个脚本**，不是本函数的局部变量；这里一律不用
 # 下划线前缀，否则 test/lint_locals.py 会把它们当成本函数漏 local 的临时变量（实测报过
 # `_dns_worker_text 未 local: _if _ln _n`）。
-dw_iface="$1"; dw_stage="$2"; dw_awk="$3"; dw_lib="$4"
+dw_iface="$1"; dw_stage="$2"; dw_awk="$3"; dw_lib="$4"; dw_usage="$5"
+# 第 4 个参数是 **init.d 本体**（它自己会 source common.sh），不是 common.sh：
+# worker 要调 rev_dns_merge，而 rev_dns_merge 定义在 init.d 里 —— 只 source common.sh 会
+# `rev_dns_merge: not found`，于是 stage 只增不减、dnsmap 永远是空的（真机实测）。
+# 测试没抓到是因为测试都在 init.d 上下文里直接调 rev_dns_merge，从来没跑过 worker 这条路径。
 [ -f "$dw_lib" ] && . "$dw_lib"
+USAGE_DIR="$dw_usage"; export USAGE_DIR
 command -v tcpdump >/dev/null 2>&1 || exit 0
 : > "$dw_stage"
 tcpdump -i "$dw_iface" -nn -l -s 0 "udp port 53" 2>/dev/null | awk -f "$dw_awk" | {
@@ -2471,12 +2427,14 @@ tcpdump -i "$dw_iface" -nn -l -s 0 "udp port 53" 2>/dev/null | awk -f "$dw_awk" 
 DNSW
 }
 
-# 把解析器写成独立 awk 文件（worker 用 awk -f，避免内联转义地狱）。
+# 解析器的**唯一**一份实现。rev_dns_parse 用 `awk "$(_dns_awk_text)"` 直接跑它，
+# worker 把它写成 $STATE_DIR/dns.awk 用 `awk -f` 跑 —— 两条路径同一份程序体（W308 对拍）。
+# 往这里加东西就等于同时改「测试跑的那份」和「线上跑的那份」。
 _dns_awk_text() {
-	sed -n '/^rev_dns_parse() { # stdin/,/^\t}$/p' "${PC_SELF:-/etc/init.d/parentcontrol}" 2>/dev/null | head -n 0
 	cat <<'DNSA'
 function port_of(x) { sub(/.*\./, "", x); return x }
 function strip_port(x) { sub(/\.[0-9]+$/, "", x); return x }
+BEGIN { CAP = 4096 }
 function emit(ip, nm) {
 	sub(/\.$/, "", nm)
 	if (ip == "" || nm == "") return
@@ -2507,7 +2465,15 @@ function emit(ip, nm) {
 		split(q, w, " ")
 		if (w[2] == "") next
 		qk = cli SUBSEP id
+		# 有界：qname 只增不减的话，7×24 跑一年就是几十万条键、几十 MB（router 上是事故）。
+		# 淘汰按**插入顺序**（不是「有没有应答过」）—— 一条查询常对应多个应答包，
+		# 「应答完就删」会让后续包变成「没有查询的应答」被丢弃（真机整条漏 A 记录）。
+		# CAP 远大于任何时刻的在飞查询数（家用网络通常 < 50），所以按插入时间淘汰
+		# 不会误伤正在等应答的查询。
+		# 同一个 (客户端,id) 重传时**不重复占位**：否则淘汰到旧槽位会把仍在用的键删掉。
+		if (!(qk in qname)) qorder[++qn] = qk
 		qname[qk] = w[2]
+		if (qn > CAP) { delete qname[qorder[qn - CAP]]; delete qorder[qn - CAP] }
 	} else if (sq == 53) {
 		cli = strip_port(dst)
 		if (!match(rest, /^[0-9]+[ ]/)) next
@@ -2541,21 +2507,35 @@ dns_watch() {
 	mkdir -p "$STATE_DIR" "$USAGE_DIR" 2>/dev/null
 	_stage="$STATE_DIR/dns.stage"
 	_aw="$STATE_DIR/dns.awk"
-	_lib="${PC_LIB:-/usr/lib/parentcontrol/common.sh}"
+	_lib="${PC_SELF:-/etc/init.d/parentcontrol}"   # worker 要 rev_dns_merge ⇒ 给 init.d 本体
 	_dns_worker_text > "$STATE_DIR/dns.worker" 2>/dev/null
 	_dns_awk_text > "$_aw" 2>/dev/null
 	start-stop-daemon -S -b -m -p "$_pidf" -x /bin/sh -- \
-		"$STATE_DIR/dns.worker" "$PC_DNS_IFACE" "$_stage" "$_aw" "$_lib" 2>/dev/null \
+		"$STATE_DIR/dns.worker" "$PC_DNS_IFACE" "$_stage" "$_aw" "$_lib" "$USAGE_DIR" 2>/dev/null \
 		|| { rm -f "$_pidf"; return 1; }
 	return 0
 }
 
 dns_watch_stop() {
-	local _pidf _p
+	local _pidf _p _c _pat
 	_pidf=$(_dns_pidfile)
-	[ -f "$_pidf" ] || return 0
 	_p=$(cat "$_pidf" 2>/dev/null)
 	[ -n "$_p" ] && kill "$_p" 2>/dev/null
+	# worker 的管道子进程（`tcpdump | awk`）**不会**随 worker 的 sh 一起退出：只杀 worker 会留下
+	# 一个还在抓包的 tcpdump，下次 tick 再拉起就成了 2 个（真机实测就是这样漏的）。
+	# 两条都杀掉：awk 的命令行带着本 STATE_DIR 独占的 dns.awk 路径；tcpdump 的命令行是我们
+	# 写死的那一串。只杀 awk 也能让 tcpdump 在**下一个 DNS 包**上收到 SIGPIPE 自己退出，但没
+	# 流量时它会一直挂着（真机实测过），所以这条 tcpdump 也明确收掉。
+	# 不用 `[ -f "$_pidf" ] || return 0` 提前返回：pidfile 丢了但孤儿还在，才是最该清理的时候。
+	# ps 的取法要两边都能用：busybox 不认 -x（unrecognized option）、macOS 的裸 ps 只列同终端
+	# 进程（测试里 awk 是后台无 tty ⇒ 裸 ps 看不到）。两个都跑、取并集去重。
+	for _pat in "awk -f $STATE_DIR/dns.awk" \
+		"tcpdump -i $PC_DNS_IFACE -nn -l -s 0 udp port 53"; do
+		for _c in $({ ps -x 2>/dev/null; ps 2>/dev/null; } \
+			| awk -v f="$_pat" 'index($0, f) { print $1 }' | sort -u); do
+			kill "$_c" 2>/dev/null
+		done
+	done
 	rm -f "$_pidf" 2>/dev/null
 	return 0
 }
