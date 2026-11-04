@@ -2098,8 +2098,7 @@ pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org> <ptr>
 		_rest=$(pc_asn_query "$_q")
 		_asn=${_rest%%"$TAB"*}
 		_org=${_rest#*"$TAB"}
-		# R76-A：同一个已过滤的 IPv4，最多再加 1 次 PTR 查询（每目标 ≤ 3 次 DNS：
-		# origin.asn + AS<asn>.asn + PTR）。ASN 查不到也照样试 PTR —— 反解名可能还在。
+		# R76-A：同一个已过滤的 IPv4 最多再加 1 次 PTR（每目标 ≤ 3 次 DNS）。ASN 查不到也照样试。
 		_ptr=$(pc_ptr_query "$_q")
 		_exp=$((_now + PC_ASN_TTL))
 		printf '%s\t%s\t%s\t%s\t%s\n' "$_t" "$_exp" "$_asn" "$_org" "$_ptr" >> "$_cache" 2>/dev/null
@@ -2123,20 +2122,14 @@ pc_asn_report() { # $@ = 目标列表 → 打印 `asn <target> <asn> <org> <ptr>
 #   histkey  <YYYYMMDD> <条目key> <分钟>
 #   reset    <YYYYMMDD> <HH:MM:SS> <条目key> <重置前已用分钟>
 # ============================================================================
-# round78：目标反解（L1 PTR + L2 被动 DNS）—— 只产证据，不做判定
-#
-# 用户原话（m01925）：「反解做下试试，但是还是得 AI 判断，反解肯定是第一步，反解出来
-# 不一定马上就是具体对应的服务」。所以本段只回答「这个网段解析出了什么名字」，
-# 「它是什么应用」永远交给 AI，且系统提示里必须写明「线索不等于目标对应的应用」。
-#
+# round78：目标反解（L1 PTR + L2 被动 DNS）—— 只产证据，不做判定。用户原话（m01925）：
+# 「反解肯定是第一步，反解出来不一定马上就是具体对应的服务」⇒ 本段只回答「这个网段解析出了
+# 什么名字」，「它是什么应用」永远交给 AI，系统提示里写明「线索不等于目标对应的应用」。
 # 三层证据：L1 PTR（当场覆盖，便宜）→ L2 被动 DNS（常驻累积，覆盖慢）→ L3 ASN（已有）。
-# 覆盖率是**诚实**的：PTR 当场能覆盖多数目标；被动 DNS 靠客户端真的发起解析才碰到，
-# 单窗口命中率很低（真机 75 秒样本只命中 13 个目标里的 3 个），所以必须常驻 + 长期累积。
-#
-# 落盘（都在 $USAGE_DIR，**绝不写 /etc/config**）：
+# 被动层单窗口命中率很低（真机 75 秒样本 13 个目标只命中 3 个），所以必须常驻 + 长期累积。
+# 落盘（$USAGE_DIR，**绝不写 /etc/config**；两个文件都原子写 > .new 再 mv）：
 #   ptrmap  <target>\t<name|->\t<ts>          阴性（-）也缓存，否则每次都重问 DNS
 #   dnsmap  <ip>\t<name>\t<count>\t<lastts>   按 (ip,name) 累加；>7 天删；总行数 <= PC_DNSMAP_MAX
-# 两个文件都**原子写**（> .new 再 mv），任何一步失败就当没发生。
 # ============================================================================
 PC_PTR_TTL=${PC_PTR_TTL:-86400}        # ptrmap 行有效期（秒）
 PC_DNS_TTL=${PC_DNS_TTL:-604800}       # dnsmap 行有效期（秒，7 天）
@@ -2144,6 +2137,8 @@ PC_DNSMAP_MAX=${PC_DNSMAP_MAX:-2000}   # dnsmap 总行数上限（超出按 coun
 PC_PTR_MAX=${PC_PTR_MAX:-8}            # 每次 sweep 最多查几个目标（控 DNS 压力）
 PC_PTR_MIN_AGE=${PC_PTR_MIN_AGE:-10}   # sweep 最小间隔（分钟）
 PC_DNS_IFACE=${PC_DNS_IFACE:-br-lan}   # 被动 DNS 采集接口
+# 采集器登记表：**不能放 $STATE_DIR**（停用分支 rm -rf 那里 ⇒ round50 现场 tcpdump 成孤儿）。
+PC_RUN_DIR=${PC_RUN_DIR:-/var/run/parentcontrol-dns}
 
 # 「目标反解」总开关：默认开；uci 里显式 0 才算关（C7 关掉后进程要停、页面不再显示线索）。
 pc_dnsrev_on() {
@@ -2152,8 +2147,7 @@ pc_dnsrev_on() {
 	[ "$_v" != "0" ]
 }
 
-# 名字清洗（§2 定死）：去尾点、只留 [A-Za-z0-9._-]、截 64 字节；
-# **原始串含 TAB / | / ; 一律丢弃**（它们是下游分隔符，替换成 '-' 也会污染口径）。
+# 名字清洗（§2 定死）：去尾点、只留 [A-Za-z0-9._-]、截 64 字节；**原始串含 TAB/|/; 一律丢弃**。
 rev_sanitize_name() {
 	awk '{
 		n = $0
@@ -2168,8 +2162,7 @@ rev_sanitize_name() {
 	}'
 }
 
-# 前缀归属（A16）：IPv4 走整数区间（纯算术，busybox awk 没位运算也能算）；
-# IPv6 **只认 /64**（前 4 个 hextet 展开比较），其它长度一律不匹配 —— 宁缺勿错。
+# 前缀归属（A16）：IPv4 走整数区间；IPv6 **只认 /64**，其它长度一律不匹配 —— 宁缺勿错。
 pc_ip_in_cidr() { # $1=ip $2=cidr → 退出码 0 命中 / 1 不命中
 	awk -v ip="$1" -v cd="$2" '
 	function v4(s,   a) {
@@ -2208,8 +2201,7 @@ pc_ip_in_cidr() { # $1=ip $2=cidr → 退出码 0 命中 / 1 不命中
 	}'
 }
 
-# 目标 CIDR → 代表地址（PTR 只能查单个地址）。/24 取 .1（真机 13 个目标实测就是这种形状），
-# 其它长度取网段首地址；IPv6 直接给空（ip6.arpa 基本 NXDOMAIN，允许为空）。
+# 目标 CIDR → 代表地址：/24 取 .1（真机就是这种形状），其它取网段首地址；IPv6 给空。
 rev_rep_addr() {
 	awk -v cd="$1" '
 	function v4(s,   a) {
@@ -2232,9 +2224,7 @@ rev_rep_addr() {
 	}'
 }
 
-# PTR 查询：**必须用 nslookup**（不能用 resolveip —— 后者对 IP 只是原样回显，真机实测）。
-# 复用 round76 已有的 pc_ptr_query（它已经认 busybox 的两种输出形态，并在末位去掉尾点）；
-# 这里只多做两件事：把 CIDR 换成代表地址、把结果过一遍名字清洗。
+# PTR 查询：**必须用 nslookup**（resolveip 对 IP 只是原样回显，真机实测）。复用 pc_ptr_query。
 rev_ptr_query() { # $1=target → 打印 PTR 名（查不到/不支持给空）
 	local _ip _o
 	_ip=$(rev_rep_addr "$1")
@@ -2341,22 +2331,16 @@ rev_hint_names() { # $1=target → 打印 "a;b;c"（无则空）
 		| awk '{ a[NR] = $0 } END { for (i = 1; i <= NR; i++) printf "%s%s", (i > 1 ? ";" : ""), a[i] }'
 }
 
-# 从 tcpdump 文本里配平 DNS 查询/应答，输出 "<ip>\t<域名>"。
-# 真机格式（§0 实测，别再猜）：
-#   查：IP <client>.<port> > <dns>.53: 17096+ A? time.apple.com. (32)
-#   答：IP <dns>.53 > <client>.<port>: 17096 4/0/0 CNAME time.g.aaplimg.com., A 23.46.216.200, A …
-# 注意应答行**源是 DNS 服务器、客户端在 > 右侧** —— 这是最容易搞错的地方。
-# 配平键 = (客户端 IP, DNS 事务 id)：75 秒样本 193 查 / 190 答 / 0 条配不上。
+# 从 tcpdump 文本里配平 DNS 查询/应答，输出 "<ip>\t<域名>"。真机格式（§0 实测，别再猜）：
+#   答：IP <dns>.53 > <client>.<port>: 17096 4/0/0 CNAME x.aaplimg.com., A 23.46.216.200, A …
+# 应答行**源是 DNS 服务器、客户端在 > 右侧**（最容易搞错）；配平键 = (客户端 IP, DNS 事务 id)。
 rev_dns_parse() { # stdin=tcpdump 文本 → stdout "<ip>\t<name>"
-	# 程序体只有一份：`_dns_awk_text`。这里不再内嵌任何 awk —— 历史上这里抄过一份，
-	# 抄完之后两份开始漂移（函数版 `port_of(x, i)`、heredoc 版 `port_of(x)`），
-	# 而测试跑内嵌那份、生产跑生成那份，是「门绿线上错」的经典形状。
+	# 程序体只有一份：`_dns_awk_text`（历史上这里抄过一份，抄完就漂移成「门绿线上错」）。
 	# busybox awk 接受「程序体作为一个参数」，所以不必落临时文件。
 	awk "$(_dns_awk_text)"
 }
 
-# 把 stage 里的 <ip>\t<name>（每行一次观测）并进 dnsmap：累加 count、刷新 lastts、
-# 丢 >7 天的行、超出上限按 count 小者淘汰。原子写。
+# 把 stage 的 <ip>\t<name> 并进 dnsmap：累加 count、刷新 lastts、丢 >7 天、超限按 count 淘汰。原子写。
 rev_dns_merge() { # $1=stage 文件
 	local _stage="$1" _now
 	_now=$(date +%s)
@@ -2392,44 +2376,52 @@ rev_dns_merge() { # $1=stage 文件
 	return 0
 }
 
-# 被动 DNS 采集 worker 的脚本文本（由 dns_watch 写到 STATE_DIR 再后台执行）。
-# 链：tcpdump → 解析（`_dns_awk_text` 的同一份程序体，写成文件避免每包重解析函数体）
-#     → 攒够 50 行或满 10 秒 flush 进 stage → rev_dns_merge 落盘。
-# **snaplen 必须是 0**：-s 120 会把应答截断成 [|domain]，A 记录就拿不到（真机实测）。
+# 被动 DNS 采集 worker 的脚本文本（dns_watch 写到 STATE_DIR 再后台执行）：tcpdump →
+# `_dns_awk_text` 的同一份程序体 → 每 50 行 rev_dns_merge 落盘。**snaplen 必须是 0**（-s 120 会截断应答）。
 _dns_worker_text() {
 	cat <<'DNSW'
 #!/bin/sh
-# argv: <iface> <stage> <awkfile> <initd> <usagedir>
-# 注意：下面这些变量属于**被生成出来的那个脚本**，不是本函数的局部变量；这里一律不用
-# 下划线前缀，否则 test/lint_locals.py 会把它们当成本函数漏 local 的临时变量（实测报过
-# `_dns_worker_text 未 local: _if _ln _n`）。
-dw_iface="$1"; dw_stage="$2"; dw_awk="$3"; dw_lib="$4"; dw_usage="$5"
-# 第 4 个参数是 **init.d 本体**（它自己会 source common.sh），不是 common.sh：
-# worker 要调 rev_dns_merge，而 rev_dns_merge 定义在 init.d 里 —— 只 source common.sh 会
-# `rev_dns_merge: not found`，于是 stage 只增不减、dnsmap 永远是空的（真机实测）。
-# 测试没抓到是因为测试都在 init.d 上下文里直接调 rev_dns_merge，从来没跑过 worker 这条路径。
-[ -f "$dw_lib" ] && . "$dw_lib"
-USAGE_DIR="$dw_usage"; export USAGE_DIR
+# argv: <iface> <stage> <awkfile> <initd> <usagedir> <statedir> <rundir>
+# 变量一律 dw_ 前缀（不带下划线）：生成脚本里的全局变量，下划线开头的会被 lint_locals.py 误判。
+dw_iface=$1; dw_stage=$2; dw_awk=$3; dw_lib=$4; dw_usage=$5; dw_state=$6; dw_run=$7
+# 路径**全部由 argv 给定**，source 只用来拿函数；缺文件 / 缺函数都必须显式失败（F4）。
+if [ ! -f "$dw_lib" ]; then
+	printf 'init script missing: %s\n' "$dw_lib" > "$dw_state/dns.nolib" 2>/dev/null
+	exit 1
+fi
+. "$dw_lib"
+if ! command -v rev_dns_merge >/dev/null 2>&1; then
+	printf 'rev_dns_merge missing after sourcing %s\n' "$dw_lib" > "$dw_state/dns.nolib" 2>/dev/null
+	exit 1
+fi
+USAGE_DIR="$dw_usage"; STATE_DIR="$dw_state"; export USAGE_DIR STATE_DIR
 command -v tcpdump >/dev/null 2>&1 || exit 0
 : > "$dw_stage"
-tcpdump -i "$dw_iface" -nn -l -s 0 "udp port 53" 2>/dev/null | awk -f "$dw_awk" | {
-	dw_n=0
-	while IFS= read -r dw_line; do
-		printf '%s\n' "$dw_line" >> "$dw_stage"
-		dw_n=$((dw_n + 1))
-		if [ "$dw_n" -ge 50 ]; then
-			rev_dns_merge "$dw_stage" && : > "$dw_stage"
-			dw_n=0
-		fi
-	done
-	rev_dns_merge "$dw_stage"
-}
+# 两个 fifo 只为拿到 tcpdump/awk 的**确切 pid**（管道里 $! 只给最后一个元素，靠 ps 匹配会误伤别人）。
+dw_in="$dw_run/fifo.$$.in"; dw_out="$dw_run/fifo.$$.out"
+rm -f "$dw_in" "$dw_out"
+mkfifo "$dw_in" "$dw_out" 2>/dev/null || exit 1
+trap 'rm -f "$dw_in" "$dw_out"' EXIT
+trap 'rm -f "$dw_in" "$dw_out"; exit 0' INT TERM
+tcpdump -i "$dw_iface" -nn -l -s 0 "udp port 53" 2>/dev/null > "$dw_in" &
+dw_tp=$!
+awk -f "$dw_awk" < "$dw_in" > "$dw_out" 2>/dev/null &
+dw_aw=$!
+printf '%s %s\n' "$dw_tp" "$dw_aw" > "$dw_run/pids"
+dw_n=0
+while IFS= read -r dw_line; do
+	printf '%s\n' "$dw_line" >> "$dw_stage"
+	dw_n=$((dw_n + 1))
+	if [ "$dw_n" -ge 50 ]; then
+		rev_dns_merge "$dw_stage" && : > "$dw_stage"
+		dw_n=0
+	fi
+done < "$dw_out"
+rev_dns_merge "$dw_stage"
 DNSW
 }
 
-# 解析器的**唯一**一份实现。rev_dns_parse 用 `awk "$(_dns_awk_text)"` 直接跑它，
-# worker 把它写成 $STATE_DIR/dns.awk 用 `awk -f` 跑 —— 两条路径同一份程序体（W308 对拍）。
-# 往这里加东西就等于同时改「测试跑的那份」和「线上跑的那份」。
+# 解析器的**唯一**一份实现：rev_dns_parse 用 `awk "$(_dns_awk_text)"`、worker 写成 dns.awk 用 `awk -f`（W308 对拍）。
 _dns_awk_text() {
 	cat <<'DNSA'
 function port_of(x) { sub(/.*\./, "", x); return x }
@@ -2465,12 +2457,8 @@ function emit(ip, nm) {
 		split(q, w, " ")
 		if (w[2] == "") next
 		qk = cli SUBSEP id
-		# 有界：qname 只增不减的话，7×24 跑一年就是几十万条键、几十 MB（router 上是事故）。
-		# 淘汰按**插入顺序**（不是「有没有应答过」）—— 一条查询常对应多个应答包，
-		# 「应答完就删」会让后续包变成「没有查询的应答」被丢弃（真机整条漏 A 记录）。
-		# CAP 远大于任何时刻的在飞查询数（家用网络通常 < 50），所以按插入时间淘汰
-		# 不会误伤正在等应答的查询。
-		# 同一个 (客户端,id) 重传时**不重复占位**：否则淘汰到旧槽位会把仍在用的键删掉。
+		# 有界：qname 只增不减会跑到几十万键（router 上是事故）。按**插入顺序**淘汰（不是「应答完
+		# 就删」—— 一条查询常对应多个应答包，删了后续包会被丢弃）；重传不重复占位。
 		if (!(qk in qname)) qorder[++qn] = qk
 		qname[qk] = w[2]
 		if (qn > CAP) { delete qname[qorder[qn - CAP]]; delete qorder[qn - CAP] }
@@ -2480,7 +2468,7 @@ function emit(ip, nm) {
 		id = substr(rest, 1, RLENGTH - 1)
 		qk = cli SUBSEP id
 		if (!(qk in qname)) next
-		# RR 段按 ", " 切成一条条：首条前面**没有**逗号，所以不能用「以 , 开头」的正则。
+		# RR 段首条前面没有逗号 ⇒ 不能按「以 , 开头」切。
 		sec = substr(rest, RLENGTH + 1)
 		sub(/^[0-9]+\/[0-9]+\/[0-9]+[ ]/, "", sec)   # 先吃掉 "1/0/0" 这段计数头
 		nr = split(sec, rr, /, /)
@@ -2488,66 +2476,111 @@ function emit(ip, nm) {
 			split(rr[ri], z, " ")
 			if (z[1] == "A" || z[1] == "AAAA") emit(z[2], qname[qk])
 		}
-		# 不 delete：一条查询常对应多个应答包（先 CNAME 再 A/AAAA），删掉的话后
-		# 面的包就成了「没有对应查询的应答」被丢弃 —— 真机实测会整条漏掉 A 记录。
+		# 不 delete：一条查询常对应多个应答包（先 CNAME 再 A），删了后面的包会被丢弃。
 	}
 }
 DNSA
 }
 
-_dns_pidfile() { printf '%s/dnswatch.pid' "$STATE_DIR"; }
+# 采集器登记表：worker.pid（worker 的 sh）+ pids（tcpdump awk 两个 pid）。
+_dns_pidfile() { printf '%s/worker.pid' "$PC_RUN_DIR"; }   # worker.pid / pids 都在这
+_dns_pidsfile() { printf '%s/pids' "$PC_RUN_DIR"; }
+_dns_ps() { local _o; _o=$(ps -x -ww 2>/dev/null); [ -n "$_o" ] || _o=$(ps -x 2>/dev/null); [ -n "$_o" ] || _o=$(ps 2>/dev/null); printf '%s\n' "$_o"; }
+# $1=pid $2=命令行的特征子串 $3=ps 快照 ⇒ 活着、且命令行确实是我们的才认。
+_dns_is_ours() {
+	local _p="$1" _c
+	case $_p in ''|*[!0-9]*) return 1 ;; esac
+	[ "$_p" = "$$" ] && return 1
+	[ "$_p" = "$PPID" ] && return 1
+	kill -0 "$_p" 2>/dev/null || return 1   # ps 取法两边都能用：busybox 只认裸 ps，macOS 裸 ps 只看同终端
+	_c=$(printf '%s\n' "$3" | awk -v p="$_p" '$1 == p { $1 = ""; sub(/^ +/, ""); print; exit }')
+	[ -n "$_c" ] || return 1
+	case $_c in *"$2"*) return 0 ;; esac
+	return 1
+}
+_dns_ppid() {   # $1=pid：Linux 走 /proc（零 fork），macOS 退回 ps
+	local _s
+	if IFS= read -r _s 2>/dev/null < "/proc/$1/stat"; then _s=${_s#*)}; set -- $_s; printf '%s' "$2"; return 0; fi
+	_s=$(ps -o ppid= -p "$1" 2>/dev/null); printf '%s' "${_s# }"
+}
 
-# 显式子命令：起 / 停 / 自愈。tcpdump 不存在 ⇒ 整条 L2 静默关掉（A19：pidfile 不写、
-# 不报错、UI 不出现空壳），L1/L3 照常。
+# 显式子命令：起 / 停 / 自愈。tcpdump 不存在 ⇒ 整条 L2 静默关掉（A19），L1/L3 照常。
 dns_watch() {
 	local _pidf _stage _aw _lib
 	_pidf=$(_dns_pidfile)
 	pc_dnsrev_on || { dns_watch_stop; return 0; }
 	command -v tcpdump >/dev/null 2>&1 || return 0
-	mkdir -p "$STATE_DIR" "$USAGE_DIR" 2>/dev/null
+	mkdir -p "$STATE_DIR" "$USAGE_DIR" "$PC_RUN_DIR" 2>/dev/null
+	# 开起来就把「关闭态已清扫」与「装坏了」两个标记清掉：后续再关闭才会重新真清扫。
+	rm -f "$STATE_DIR/dns.off" "$STATE_DIR/dns.nolib" "$STATE_DIR/dns.nolib.logged" "$(_dns_pidsfile)" 2>/dev/null
 	_stage="$STATE_DIR/dns.stage"
 	_aw="$STATE_DIR/dns.awk"
 	_lib="${PC_SELF:-/etc/init.d/parentcontrol}"   # worker 要 rev_dns_merge ⇒ 给 init.d 本体
 	_dns_worker_text > "$STATE_DIR/dns.worker" 2>/dev/null
 	_dns_awk_text > "$_aw" 2>/dev/null
 	start-stop-daemon -S -b -m -p "$_pidf" -x /bin/sh -- \
-		"$STATE_DIR/dns.worker" "$PC_DNS_IFACE" "$_stage" "$_aw" "$_lib" "$USAGE_DIR" 2>/dev/null \
+		"$STATE_DIR/dns.worker" "$PC_DNS_IFACE" "$_stage" "$_aw" "$_lib" "$USAGE_DIR" "$STATE_DIR" "$PC_RUN_DIR" 2>/dev/null \
 		|| { rm -f "$_pidf"; return 1; }
 	return 0
 }
 
 dns_watch_stop() {
-	local _pidf _p _c _pat
-	_pidf=$(_dns_pidfile)
+	local _pidf _pids _p _c _psl _pr _had
+	_pidf=$(_dns_pidfile); _pids=$(_dns_pidsfile)
+	_psl=$(_dns_ps)                      # 一次快照、所有校验复用（原来每个模式各取两次 ⇒ 4 ps/次）
 	_p=$(cat "$_pidf" 2>/dev/null)
-	[ -n "$_p" ] && kill "$_p" 2>/dev/null
-	# worker 的管道子进程（`tcpdump | awk`）**不会**随 worker 的 sh 一起退出：只杀 worker 会留下
-	# 一个还在抓包的 tcpdump，下次 tick 再拉起就成了 2 个（真机实测就是这样漏的）。
-	# 两条都杀掉：awk 的命令行带着本 STATE_DIR 独占的 dns.awk 路径；tcpdump 的命令行是我们
-	# 写死的那一串。只杀 awk 也能让 tcpdump 在**下一个 DNS 包**上收到 SIGPIPE 自己退出，但没
-	# 流量时它会一直挂着（真机实测过），所以这条 tcpdump 也明确收掉。
-	# 不用 `[ -f "$_pidf" ] || return 0` 提前返回：pidfile 丢了但孤儿还在，才是最该清理的时候。
-	# ps 的取法要两边都能用：busybox 不认 -x（unrecognized option）、macOS 的裸 ps 只列同终端
-	# 进程（测试里 awk 是后台无 tty ⇒ 裸 ps 看不到）。两个都跑、取并集去重。
-	for _pat in "awk -f $STATE_DIR/dns.awk" \
-		"tcpdump -i $PC_DNS_IFACE -nn -l -s 0 udp port 53"; do
-		for _c in $({ ps -x 2>/dev/null; ps 2>/dev/null; } \
-			| awk -v f="$_pat" 'index($0, f) { print $1 }' | sort -u); do
-			kill "$_c" 2>/dev/null
+	_had=$([ -n "$_p" ] || [ -f "$_pids" ] && echo 1)   # 登记表在 ⇒ 不用模式兜底（省 fork）
+	# worker 的 sh 退出**不带**子进程（真机：stop 后 tcpdump 还在抓）⇒ 先按登记表收，再模式扫描兜底。
+	[ -n "$_p" ] && _dns_is_ours "$_p" "/dns.worker " "$_psl" && kill "$_p" 2>/dev/null
+	if [ -f "$_pids" ]; then
+		for _c in $(cat "$_pids" 2>/dev/null); do
+			if _dns_is_ours "$_c" "/dns.awk" "$_psl" || _dns_is_ours "$_c" "udp port 53" "$_psl"; then
+				kill "$_c" 2>/dev/null
+			else
+				elog "被动 DNS 采集：登记表里的 pid $_c 已不是采集进程，跳过（PID 复用）"
+			fi
 		done
+		rm -f "$_pids" 2>/dev/null
+	fi
+	# 兜底：登记表丢了才按命令行扫。排除 $$/$PPID/含 dns_watch_stop 的调用方，且父进程须是
+	# 1 或我们的 worker（否则别人 argv 里恰好有这串参数就被误杀 —— round50 现场 exit 143/137）。
+	[ -n "$_had" ] || for _c in $(printf '%s\n' "$_psl" | awk -v a="/dns.awk" -v t="udp port 53" -v me="$$" -v pp="$PPID" \
+			'$1 == me || $1 == pp { next } index($0, "dns_watch_stop") { next }
+			 index($0, a) || (index($0, t) && index($0, "-nn -l -s 0")) { print $1 }' | sort -u); do
+		case $_c in ''|*[!0-9]*) continue ;; esac
+		_pr=$(_dns_ppid "$_c")
+		[ "$_pr" = "1" ] || { [ -n "$_p" ] && [ "$_pr" = "$_p" ]; } || continue
+		kill "$_c" 2>/dev/null
 	done
-	rm -f "$_pidf" 2>/dev/null
+	rm -f "$_pidf" "$_pids" "$STATE_DIR/dns.off" 2>/dev/null
 	return 0
 }
 
-# tick 自愈：活着就什么都不做（不产生第二个 tcpdump），死了**最多拉起一次**。
-# 稳态成本 = 一次 [ -f ] + 一次 kill -0（无 fork、无 iptables）。
+dns_watch_off() {   # 关闭态跃迁清扫：只在「启用→关闭」那一次真清扫，之后每 tick 只 stat 标记文件
+	local _off
+	_off="$STATE_DIR/dns.off"
+	if [ -f "$_off" ]; then return 0; fi
+	dns_watch_stop
+	mkdir -p "$STATE_DIR" 2>/dev/null
+	: > "$_off" 2>/dev/null
+	return 0
+}
+
+# tick 自愈：活着什么都不做，死了**最多拉起一次**。稳态 = 一次 [ -f ] + 一次 kill -0。
 dns_watch_ensure() {
-	local _pidf _p
-	pc_dnsrev_on || { dns_watch_stop; return 0; }
+	local _pidf _pids _p _c _psl _r
+	pc_dnsrev_on || { dns_watch_off; return 0; }
+	# F4：worker 起不来（缺 init.d / source 后没有 rev_dns_merge）只记一行，此后不再反复拉起。
+	if [ -f "$STATE_DIR/dns.nolib" ] || [ -f "$STATE_DIR/dns.nolib.logged" ]; then
+		if [ -f "$STATE_DIR/dns.nolib" ]; then
+			_r=$(head -n 1 "$STATE_DIR/dns.nolib" 2>/dev/null)
+			mv -f "$STATE_DIR/dns.nolib" "$STATE_DIR/dns.nolib.logged" 2>/dev/null
+			elog "被动 DNS 采集未启用：$_r"
+		fi
+		return 0
+	fi
 	if ! command -v tcpdump >/dev/null 2>&1; then
-		# A19：没有 tcpdump 就整条被动层关掉（PTR/ASN 照常）。但要说一次，否则用户
-		# 永远不知道「反解为什么没有被动 DNS 线索」。标记文件保证只记 1 行，不每 tick 刷。
+		# A19：没有 tcpdump 就整条被动层关掉（PTR/ASN 照常），但要说一次。
 		if [ ! -f "$STATE_DIR/dns.no-tcpdump" ]; then
 			mkdir -p "$STATE_DIR" 2>/dev/null
 			: > "$STATE_DIR/dns.no-tcpdump" 2>/dev/null
@@ -2555,12 +2588,28 @@ dns_watch_ensure() {
 		fi
 		return 0
 	fi
-	rm -f "$STATE_DIR/dns.no-tcpdump" 2>/dev/null
+	if [ -f "$STATE_DIR/dns.no-tcpdump" ]; then rm -f "$STATE_DIR/dns.no-tcpdump" 2>/dev/null; fi
 	_pidf=$(_dns_pidfile)
 	if [ -f "$_pidf" ]; then
 		_p=$(cat "$_pidf" 2>/dev/null)
 		[ -n "$_p" ] && kill -0 "$_p" 2>/dev/null && return 0
 		rm -f "$_pidf" 2>/dev/null
+	fi
+	# 登记表里那两个采集子进程：父（worker 的 sh）还活着 ⇒ 收养，绝不起第二个（否则 dnsmap 双份）；
+	# 父已经死了（worker 崩了，TERM 不传播）⇒ 它们是在抓包的孤儿，先收尸再起，否则同样双份。
+	_pids=$(_dns_pidsfile)
+	if [ -f "$_pids" ]; then
+		_psl=$(_dns_ps)
+		for _c in $(cat "$_pids" 2>/dev/null); do
+			_dns_is_ours "$_c" "/dns.awk" "$_psl" || _dns_is_ours "$_c" "udp port 53" "$_psl" || continue
+			_p=$(_dns_ppid "$_c")
+			if [ -n "$_p" ] && _dns_is_ours "$_p" "/dns.worker " "$_psl"; then
+				printf '%s\n' "$_p" > "$_pidf" 2>/dev/null
+				return 0
+			fi
+			kill "$_c" 2>/dev/null
+		done
+		rm -f "$_pids" 2>/dev/null
 	fi
 	dns_watch >/dev/null 2>&1
 	return 0
@@ -2891,6 +2940,9 @@ tick_body() {
 		# A23/D15：恢复动作挂「已停用」这个必然项，不挂「有残留」这个可选项（review2 B1）。
 		# 停用只改 uci、不走 stop()；restore_offload 自带 nft 双守卫 + 幂等 + A7 静默 ⇒ 无条件安全。
 		restore_offload
+		# F5：**先停采集器再删目录**。顺序反了就是 round50 现场：rm -rf 把 pidfile 带走、
+		# tcpdump 成孤儿继续抓包（进程 12973 存活），再启用时 ensure 看不到 pidfile ⇒ 起第二个。
+		dns_watch_stop
 		rm -rf "$STATE_DIR"
 		return 0
 	fi
