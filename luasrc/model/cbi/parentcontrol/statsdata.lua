@@ -573,7 +573,12 @@ function M.collect(raw)
 						local hit, hptr, horg = asn_hit(a)
 						local svc
 						if hit then svc = M.service_name(hptr, horg) end
+						-- round78：反解线索（L1 PTR + L2 被动 DNS）。**它只是线索**，
+						-- 不是「这个目标是什么服务」—— 判定交给 AI（见 ai.lua 的系统提示）。
+						local hint = ((d.dns_hint or {})[key] or {})[tgt]
+						if hint == "" then hint = nil end
 						acc[#acc + 1] = { target = tgt, today = tmv, by = sby,
+							hint = hint,
 							total = (sn > 0) and stot or nil,
 							asn = (a and (a.asn or "") ~= "") and a.asn or nil,
 							org = (a and (a.org or "") ~= "") and a.org or nil,

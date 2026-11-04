@@ -136,7 +136,10 @@ function unclassified_infer()
 	local items = {}
 	for _, tgt in ipairs(tgts) do
 		local a = asnmap[tgt]
-		items[#items + 1] = { target = tgt, org = (type(a) == "table" and a.org) or "" }
+		-- round78：把反解线索（PTR / 被动 DNS）一起带上。它让「没查到 ASN 的目标」
+		-- 也有可发的内容；但**线索不是结论**，ai.lua 的系统提示里另有约束句。
+		local hint = ((d.dns_hint or {})[key] or {})[tgt] or ""
+		items[#items + 1] = { target = tgt, org = (type(a) == "table" and a.org) or "", hint = hint }
 	end
 
 	-- 该条目的 apps 原文 → 名称清单（不含域名）。

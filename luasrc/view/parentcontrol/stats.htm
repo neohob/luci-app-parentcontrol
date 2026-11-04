@@ -286,8 +286,13 @@
 			</tr>
 			<% end %>
 			<% for _, s in ipairs(r.subs.rows) do %>
+			<!-- round78：这条目标的反解线索（PTR / 被动 DNS）。**只是线索**，不是「它是什么服务」，
+			     所以文案只有「反解：」加域名，绝不下结论。没有线索就整行不渲染（不写「暂无」）。
+			     全角分号只为可读性；shell 侧已截到 3 个，所以不显示「（+N）」—— 那个数字拿不到，
+			     编一个就是假数字。 -->
+			<% local _hint = s.hint and (s.hint:gsub(";", "；")) or nil %>
 			<tr class="pc-matrix-sub" data-pc-owner="<%=_dev%>" data-pc-subowner="<%=pcdata(_sid)%>" data-pc-key="<%=pcdata(r.key)%>" data-pc-row="<%=pcdata(s.target)%>" style="display:none">
-				<td><% if s.service then %><b><%=pcdata(s.service)%></b><% elseif s.queried then %><%=pcdata(s.org or "")%> <span class="muted"><%=pcdata(T("基础设施，无法判断具体应用"))%></span><% else %><%=pcdata(d.asn_requested and T("未查询") or "-")%><% end %><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% end %><% if s.service and s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
+				<td><% if s.service then %><b><%=pcdata(s.service)%></b><% elseif s.queried then %><%=pcdata(s.org or "")%> <span class="muted"><%=pcdata(T("基础设施，无法判断具体应用"))%></span><% else %><%=pcdata(d.asn_requested and T("未查询") or "-")%><% end %><% if s.asn then %> <span class="muted">AS<%=pcdata(s.asn)%></span><% end %><% if s.service and s.org then %> <span class="muted"><%=pcdata(s.org)%></span><% end %> <span class="muted" style="font-size:11px"><%=pcdata(s.target)%></span><% if _hint then %> <span class="pc-hint" style="font-size:11px;color:#666"><%=pcdata(T("反解："))%><%=pcdata(_hint)%></span><% end %><% if s.solo then %> <span class="muted"><%=pcdata(T("（仅未覆盖设备命中，不计入名称分钟）"))%></span><% end %>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcInferOne(this)"
 						data-pc-key="<%=pcdata(r.key)%>" data-pc-target="<%=pcdata(s.target)%>"><%=T("推测是什么")%></button><span class="muted" data-pc-infer="1"></span>
 					<button type="button" class="btn cbi-button cbi-button-small" onclick="pcApplyOne(this)"

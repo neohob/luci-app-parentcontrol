@@ -31,6 +31,11 @@ end
 --              所需的目标集合只存在于这一行里（`.map` 只由 shell 读，Lua 拿不到）。
 --   diagdaytgt <YYYYMMDD> <key> <target> <minutes>
 --           —— 同上，按天×目标的分钟（R74-C 一起恢复解析）。
+--   dnshint <key> <target> <names>
+--           —— round78：未归类目标的**反解线索**（L1 PTR + L2 被动 DNS），`names` 用 `;` 连接、
+--              最多 3 个、先 PTR 再按被动 DNS 计数降序、同名去重。一个线索都没有时**整行不输出**
+--              ⇒ 缺行 = 没有线索（UI 不渲染「反解：」小字，也不写「暂无」）。缺行（老 shell）
+--              与「没有线索」同义，完全向后兼容。
 --   asn     <target> <asn> <org> <ptr>
 --           —— R74-A：Team Cymru 机械 ASN。**只在 `stats_tsv asn <target>…`（用户点开明细）
 --              时输出**，默认 stats_tsv 的首屏输出里一行都没有（D1：不在 tick/首屏路径查询）。
@@ -61,6 +66,8 @@ function M.parse(raw)
 		-- R74-A：<target> → { asn = "20940", org = "AKAMAI-ASN1, NL", ptr = "a23-45-…" }
 		-- （只在点开明细时才有；ptr 是 round76 新增，缺省空串）
 		asn = {},
+		-- round78：<key> → <target> → 反解线索串（"a;b"）。只在有线索时才有键。
+		dns_hint = {},
 		-- A50/D34：name 行的权威名单（key → { label, state }）。缺行（老 shell）时
 		-- 保持空表 —— 下游回退「条目 #N」，永不裸 key，向后兼容。
 		names = {},
@@ -147,6 +154,13 @@ function M.parse(raw)
 				if ky and f[4] then
 					d.app_map[ky] = d.app_map[ky] or {}
 					d.app_map[ky][f[4]] = num(f[3])
+				end
+			elseif k == "dnshint" then
+				-- round78：<key> <target> <names> ⇒ d.dns_hint[key][target] = "a;b"
+				local ky = f[2]
+				if ky and f[3] and (f[4] or "") ~= "" then
+					d.dns_hint[ky] = d.dns_hint[ky] or {}
+					d.dns_hint[ky][f[3]] = f[4]
 				end
 			elseif k == "diagdaytgt" then
 				-- R74-C：<YYYYMMDD> <key> <target> <分钟> ⇒ d.diag_day_tgt[dt][key.."|"..target]

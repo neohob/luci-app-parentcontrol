@@ -596,6 +596,13 @@ local INFER_SYS_PROMPT = "你是网络流量归因助手。用户会给出若干
 	.. "note 必须明确写「无法判断具体应用」。"
 	.. "绝对不许把基础设施提供商的名字（如 Akamai、Cloudflare、腾讯云、阿里云）当成应用名填进 name。"
 	.. "不确定就留空 name，绝对不要编造。"
+	-- round78：反解线索（PTR / 被动 DNS）必须被当作**线索**而不是结论。用户原话：
+	-- 「反解肯定是第一步，反解出来不一定马上就是具体对应的服务」。
+	.. "有些网段后面附了以「←」开头的域名列表，那是反解析（PTR）与本机被动 DNS 采到的线索，"
+	.. "可能是 CDN 边缘节点、托管平台、统计/广告域，也可能一个域名对应很多应用；"
+	.. "这些域名**不等于**该网段对应的应用。线索可以帮你判断基础设施类型，"
+	.. "但不要因为看到一个域名就直接把它或它的品牌当成 name；拿不准就把你的理解写进 note，"
+	.. "name 宁可留空。"
 M.INFER_SYS_PROMPT = INFER_SYS_PROMPT
 
 -- 从模型回答里抽出 JSON 数组：容忍 ```json 包裹与前后废话（与 extract 同风格）。
@@ -698,6 +705,30 @@ local function clean_org(s)
 	return v
 end
 
+-- round78：反解线索是第二类「不经用户手写就进请求体」的字段（来自 PTR / 被动 DNS）。
+-- 同 clean_org 的理由与口径：控制字符→空格、抹掉 IPv4/IPv6 字面量（线索里不该出现地址，
+-- 出现就是上游把 IP 当名字了）、只留最多 3 个、每个 ≤64 字、用 ';' 连接、总长 ≤200。
+-- 注意**保留** `.` `-` `_`：域名就是靠它们；`;` 是下游分隔符，不能被名字内容带进来。
+local function clean_hint(s)
+	local v = tostring(s or "")
+	v = v:gsub("[%c]", " ")
+	local out = {}
+	for one in v:gmatch("[^;]+") do
+		local w = one:gsub("^ +", ""):gsub(" +$", "")
+		w = w:gsub("^[%w%-%._]+://", "")          -- 去掉误带的 scheme
+		w = w:gsub("%d+%.%d+%.%d+%.%d+", "")      -- IPv4 字面量
+		w = w:gsub("[%x:]*:[%x:]*:%x[%x:]*", "")  -- IPv6 字面量
+		w = w:gsub("[^%w%-%._]", "")              -- 只留域名合法字符
+		w = w:gsub("^[%.%-]+", ""):gsub("[%.%-]+$", "")
+		if #w > 64 then w = w:sub(1, 64) end
+		if w ~= "" then out[#out + 1] = w end
+		if #out >= 3 then break end
+	end
+	local r = table.concat(out, ";")
+	if #r > 200 then r = r:sub(1, 200) end
+	return r
+end
+
 -- R75-C 主流程。
 -- opts = {
 --   items = { { target = "<网段>", org = "<ASN 组织名>" }, ... },   -- 来自 round74 的 ASN 数据
@@ -736,17 +767,25 @@ end
 -- M.infer_start（流式）共用同一份，避免两条路径的隐私口径分叉。
 -- 返回 { payload, sent, sentmap, names } 或 { empty = true } 或 { err, sent }。
 local function build_request(opts, endpoint, model, stream)
-	-- ① 可发送项：公网 IPv4 网段 + 有 ASN 组织名。没有组织名（查询失败 / IPv6 / 域名）
-	--    一律跳过 —— 发一个光秃秃的网段既没信息量，又白白多泄露一个编址。
+	-- ① 可发送项：公网 IPv4 网段 + （有 ASN 组织名 **或** 有反解线索）。
+	--    round78 放宽了条件：反解线索（PTR / 被动 DNS）本身就有信息量，没查到 ASN 时
+	--    也能让 AI 看一眼域名 —— 但**线索不是结论**，系统提示里另有约束句。
+	--    仍然只发公网前缀：私网/保留地址与域名一律跳过（发一个光秃秃的网段既没信息量，
+	--    又白白多泄露一个编址）。
+	--    hint 用 ';' 连接、最多 3 个（shell 侧已截好），这里再兜一次长度与字符。
 	local sent, sentmap, lines = {}, {}, {}
 	for _, it in ipairs(opts.items or {}) do
 		if type(it) == "table" then
 			local tgt = trim(it.target or "")
 			local org = clean_org(it.org)
-			if tgt ~= "" and org ~= "" and M.is_public_prefix(tgt) and not sentmap[tgt] then
+			local hint = clean_hint(it.hint)
+			if tgt ~= "" and (org ~= "" or hint ~= "") and M.is_public_prefix(tgt)
+				and not sentmap[tgt] then
 				sentmap[tgt] = true
 				sent[#sent + 1] = tgt
-				lines[#lines + 1] = tgt .. "  " .. org
+				local ln = tgt .. "  " .. (org ~= "" and org or "?")
+				if hint ~= "" then ln = ln .. "  ← " .. hint end
+				lines[#lines + 1] = ln
 			end
 		end
 	end
