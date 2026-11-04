@@ -2025,7 +2025,7 @@ pc_ptr_query() { # $1=IPv4（无掩码） → 打印 PTR 主机名（失败给�
 # round78：目标反解（L1 PTR + L2 被动 DNS）—— 只产证据，不做判定。用户原话（m01925）：
 # 「反解肯定是第一步，反解出来不一定马上就是具体对应的服务」⇒ 本段只回答「这个网段解析出了
 # 什么名字」，「它是什么应用」永远交给 AI，系统提示里写明「线索不等于目标对应的应用」。
-# 三层证据：L1 PTR（当场覆盖，便宜）→ L2 被动 DNS（常驻累积，覆盖慢）→ L3 ASN（已有）。
+# 两层证据：L1 PTR（当场覆盖，便宜）→ L2 被动 DNS（常驻累积，覆盖慢）。
 # 被动层单窗口命中率很低（真机 75 秒样本 13 个目标只命中 3 个），所以必须常驻 + 长期累积。
 # 落盘（$USAGE_DIR，**绝不写 /etc/config**；两个文件都原子写 > .new 再 mv）：
 #   ptrmap  <target>\t<name|->\t<ts>          阴性（-）也缓存，否则每次都重问 DNS
@@ -2483,11 +2483,11 @@ dns_watch_ensure() {
 		return 0
 	fi
 	if ! command -v tcpdump >/dev/null 2>&1; then
-		# A19：没有 tcpdump 就整条被动层关掉（PTR/ASN 照常），但要说一次。
+		# A19：没有 tcpdump 就整条被动层关掉（PTR 照常），但要说一次。
 		if [ ! -f "$STATE_DIR/dns.no-tcpdump" ]; then
 			mkdir -p "$STATE_DIR" 2>/dev/null
 			: > "$STATE_DIR/dns.no-tcpdump" 2>/dev/null
-			elog "被动 DNS 采集未启用：系统里没有 tcpdump（PTR 反解与 ASN 查询不受影响）"
+			elog "被动 DNS 采集未启用：系统里没有 tcpdump（PTR 反解不受影响）"
 		fi
 		return 0
 	fi
@@ -2495,7 +2495,11 @@ dns_watch_ensure() {
 	_pidf=$(_dns_pidfile)
 	if [ -f "$_pidf" ]; then
 		_p=$(cat "$_pidf" 2>/dev/null)
-		[ -n "$_p" ] && kill -0 "$_p" 2>/dev/null && return 0
+		if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+			# 只验「pid 活着」不够：长期运行后 worker 崩过、pid 被别的进程复用 ⇒ 永久早退，采集器静默停摆。
+			_dns_is_ours "$_p" "/dns.worker " "$(_dns_ps)" && return 0
+			elog "被动 DNS 采集：pidfile 里的 pid $_p 已不是采集进程（PID 复用），重新拉起"
+		fi
 		rm -f "$_pidf" 2>/dev/null
 	fi
 	# 登记表里那两个采集子进程：父（worker 的 sh）还活着 ⇒ 收养，绝不起第二个（否则 dnsmap 双份）；

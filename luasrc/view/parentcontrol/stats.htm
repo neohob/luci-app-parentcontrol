@@ -481,7 +481,7 @@
 				pcInferMsg(msg, (res && res.error) || '<%=translate("推测失败")%>', false);
 				return;
 			}
-			/* 没有可发的东西（未归类目标全是私网/无组织名）⇒ 后端直接给 done，不发任何请求。 */
+			/* 没有可发的东西（未归类目标全是私网或没有可用线索）⇒ 后端直接给 done，不发任何请求。 */
 			if (res.state === 'done') {
 				pcBusySet(key, false);
 				var n0 = pcInferShow(key, res);
