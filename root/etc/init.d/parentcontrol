@@ -2039,6 +2039,9 @@ PC_PTR_MIN_AGE=${PC_PTR_MIN_AGE:-10}   # sweep 最小间隔（分钟）
 PC_DNS_IFACE=${PC_DNS_IFACE:-br-lan}   # 被动 DNS 采集接口
 # 采集器登记表：**不能放 $STATE_DIR**（停用分支 rm -rf 那里 ⇒ round50 现场 tcpdump 成孤儿）。
 PC_RUN_DIR=${PC_RUN_DIR:-/var/run/parentcontrol-dns}
+# 进程命令行的读取根：产品上恒为 /proc；只在测试里覆盖（macOS 没有 /proc，
+# 不注入就没法验证 /proc 分支本身 —— 见 W320）。
+PC_PROC=${PC_PROC:-/proc}
 
 # 「目标反解」总开关：默认开；uci 里显式 0 才算关（C7 关掉后进程要停、页面不再显示线索）。
 pc_dnsrev_on() {
@@ -2386,17 +2389,23 @@ DNSA
 }
 
 # 采集器登记表：worker.pid（worker 的 sh）+ pids（tcpdump awk 两个 pid）。
-_dns_pidfile() { printf '%s/worker.pid' "$PC_RUN_DIR"; }   # worker.pid / pids 都在这
+# worker.pid / pids 都在这（注释单独一行：行尾注释会让 lint_locals 把单行函数当多行，
+# 函数体一路吞到下一个独立 '}' ⇒ 后面函数的临时变量被算到它头上，报成「未 local」）。
+_dns_pidfile() { printf '%s/worker.pid' "$PC_RUN_DIR"; }
 _dns_pidsfile() { printf '%s/pids' "$PC_RUN_DIR"; }
 _dns_ps() { local _o; _o=$(ps -x -ww 2>/dev/null); [ -n "$_o" ] || _o=$(ps -x 2>/dev/null); [ -n "$_o" ] || _o=$(ps 2>/dev/null); printf '%s\n' "$_o"; }
-# $1=pid $2=命令行的特征子串 $3=ps 快照 ⇒ 活着、且命令行确实是我们的才认。
+# $1=pid $2=命令行的特征子串 $3=ps 快照（兜底） ⇒ 活着、且命令行确实是我们的才认。
+# Linux 优先读 /proc/<pid>/cmdline：完整不截断、零 fork。busybox ps 不认 -x/-o，裸 ps 把整行
+# 截在 78 字符 —— 路径稍长就把 "dns.worker" 截掉 ⇒ 永判「不是我们的」⇒ 该收的孤儿收不掉、
+# 该早退的反而重新拉起。macOS 没有 /proc，仍回退到调用方传进来的 ps 快照。
 _dns_is_ours() {
-	local _p="$1" _c
+	local _p="$1" _c=""
 	case $_p in ''|*[!0-9]*) return 1 ;; esac
 	[ "$_p" = "$$" ] && return 1
 	[ "$_p" = "$PPID" ] && return 1
-	kill -0 "$_p" 2>/dev/null || return 1   # ps 取法两边都能用：busybox 只认裸 ps，macOS 裸 ps 只看同终端
-	_c=$(printf '%s\n' "$3" | awk -v p="$_p" '$1 == p { $1 = ""; sub(/^ +/, ""); print; exit }')
+	kill -0 "$_p" 2>/dev/null || return 1
+	[ -r "$PC_PROC/$_p/cmdline" ] && _c=$(tr '\000' ' ' < "$PC_PROC/$_p/cmdline" 2>/dev/null)
+	[ -n "$_c" ] || _c=$(printf '%s\n' "$3" | awk -v p="$_p" '$1 == p { $1 = ""; sub(/^ +/, ""); print; exit }')
 	[ -n "$_c" ] || return 1
 	case $_c in *"$2"*) return 0 ;; esac
 	return 1

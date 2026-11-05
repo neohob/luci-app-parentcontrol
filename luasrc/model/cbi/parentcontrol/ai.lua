@@ -675,7 +675,7 @@ local function sanitize_infer(parsed, sentmap)
 			-- （不是丢整条 —— note 还有用，prefix 也还有用）。
 			if not badname and n ~= "" and is_infra_name(n) then n = "" end
 			-- L-2（round77f）：name 与 note **都**为空 ⇒ 丢弃。留着它只会在页面上变成一行空白，
-			-- 且归入按钮点下去只会提示「请先点推测是什么」——那是把模型的沉默当成了结果。
+			-- 且归入按钮点下去只会提示「请先点「推测本行目标」」——那是把模型的沉默当成了结果。
 			local useful = (n ~= "" or note ~= "") and true or false
 			-- prefix 必须在**刚才发出去的那批**里：不在的一律丢弃（防模型幻觉塞东西）。
 			if p ~= "" and sentmap[p] and not seen[p] and not badname and useful then
