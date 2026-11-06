@@ -296,6 +296,23 @@ jobs:
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+
+          # 正文取自 CHANGELOG.md 的对应小节（.github/scripts/release_notes.sh），
+          # 不再让 GitHub 自己 --generate-notes 拼提交标题：那样每个版本要么只有
+          # 一句 "Full Changelog"，要么把内部提交噪声搬给用户看。
+          BODY=$(mktemp)
+          if ! sh .github/scripts/release_notes.sh "$TAG" > "$BODY"; then
+            echo "::error::CHANGELOG.md 里找不到 $TAG 对应的小节，Release 正文无从生成。" >&2
+            echo "请先在 CHANGELOG.md 里补上 '## ${TAG#v}（<日期>）…' 一节，再重新打 tag。" >&2
+            exit 1
+          fi
+          echo "----- Release 正文（取自 CHANGELOG.md）-----"
+          cat "$BODY"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "$BODY"
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file "$BODY"
+          fi
           gh release upload "$TAG" dist/*.ipk dist/*.run dist/SHA256SUMS --clobber
           gh release view "$TAG"
