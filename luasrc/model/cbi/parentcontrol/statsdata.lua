@@ -440,20 +440,9 @@ function M.collect(raw)
 		return n
 	end
 	-- key → 日期 → 名称行号 → 分钟。
-	-- D1-v2（第 2 轮）：名称分钟的**唯一来源**是采样侧写的 n 行（今天 `diagntoday`、
-	-- 历史 `diagdayname`）。**不再**对「目标分钟 × appmap」求和 —— 旧做法在同一名称
-	-- 名下多个目标同时活跃时会把该行计 N 倍（复审实测：2 个目标各 60 分 ⇒ 行 120，
-	-- 而设备当天共 30 分），对用户是误导性数字。口径见 design §7.2：同一分钟内同一
-	-- 名称的多个目标都活跃也只 +1，故名称分钟不超 1440。
-	-- M-1（round66 裁决）：**不保证** Σ名称分钟 ≥ 条目分钟 —— 条目侧按合计字节过阈、
-	-- 名称侧按单目标过阈，合计过阈不蕴含任一目标过阈（见 design §7.2）。
-	-- round73（口径变更）：名称分钟只统计本条目设备名单内的设备（未覆盖设备的命中只留在
-	-- 「N 台未覆盖设备命中」提醒里）。设备名单为空、或名单覆盖全部在线设备的条目**不装诊断
-	-- 链**，因此根本没有名称分钟可算（页面显示「-」）。本文件只
-	-- 消费采样侧已算好的 n 行，口径全部落在 shell 侧（不改归约逻辑）。
-	-- 名称分钟是近似值：实现是「本条目打到该目标的总流量」减「最近一次构建时列出的未覆盖
-	-- 设备的流量」，快照之后新出现的未覆盖设备最多漏进一个采样周期。
-	-- 缺这两行（老 shell / 升级前的日文件）⇒ 该天名称列**无值**，模板印 `-`（不是 0，D7/L5）。
+	-- 名称分钟 = 本设备/条目额度按封锁名称的分类（与额度同一概念）：采样侧仅在
+	-- 额度 +1 的那一 tick 写一条 n 行。今天 `diagntoday`、历史 `diagdayname`。
+	-- 读入后若与台账不一致，按比例缩放到额度（或无 n 时整笔进未归类），见下方校正。
 	local kdayname = {}
 	local function bump(key, dt, nr, v)
 		local perf = kdayname[key]
@@ -481,6 +470,52 @@ function M.collect(raw)
 	if today then
 		for key, bynr in pairs(d.diag_n_today or {}) do
 			for nr, v in pairs(bynr) do bump(key, today, fold_nr(key, nr), v) end
+		end
+	end
+	-- 名称行必须与当天额度同一笔账：Σ名称（含未归类）== 台账条目分钟。
+	-- 旧口径名称可能虚高或缺失 —— 有额度时按比例缩放到额度；名称全无则整笔进「未归类」；
+	-- 绝不能把有额度的天显示成名称全 `-`（柱状图有量、展开却空白）。
+	for key, perf in pairs(kdayname) do
+		for dt, per in pairs(perf) do
+			local ns, ent = 0, (ledger[dt] and ledger[dt][key]) or 0
+			for _, v in pairs(per) do ns = ns + (tonumber(v) or 0) end
+			if ent <= 0 then
+				perf[dt] = nil
+			elseif ns <= 0 then
+				perf[dt] = { [0] = ent }
+			elseif ns ~= ent then
+				local scaled, used, best_nr, best_v = {}, 0, nil, -1
+				for nr, v in pairs(per) do
+					v = tonumber(v) or 0
+					local s = math.floor(v * ent / ns + 0.5)
+					if s > 0 then
+						scaled[nr] = s
+						used = used + s
+						if s > best_v or (s == best_v and (best_nr == nil or nr < best_nr)) then
+							best_v, best_nr = s, nr
+						end
+					end
+				end
+				local diff = ent - used
+				if diff ~= 0 and best_nr ~= nil then
+					scaled[best_nr] = scaled[best_nr] + diff
+					if scaled[best_nr] <= 0 then scaled[best_nr] = nil end
+				elseif diff > 0 then
+					scaled[0] = (scaled[0] or 0) + diff
+				end
+				perf[dt] = scaled
+			end
+		end
+	end
+	-- 台账有额度、但整天没有任何 n 行：仍要能展开看到用量 → 记入未归类。
+	for dt, perkey in pairs(ledger) do
+		for key, ent in pairs(perkey) do
+			ent = tonumber(ent) or 0
+			if ent > 0 then
+				local perf = kdayname[key]
+				if not perf then perf = {}; kdayname[key] = perf end
+				if not perf[dt] then perf[dt] = { [0] = ent } end
+			end
 		end
 	end
 	for _, dr in ipairs(ddrows) do
