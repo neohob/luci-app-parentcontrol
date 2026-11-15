@@ -1355,7 +1355,7 @@ diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _M
 
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _map_u _ex _exb _buf _d_unc _d_all _fired _win_nr _win_d
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _map_u _ex _exb _buf _d_unc _d_all _fired _win_nr _win_d _dns_tg _dns_d _dns_nr
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
@@ -1399,7 +1399,7 @@ sample_diag_counters() { # $1=阈值（字节）
 	for _key in $(pc_active_keys); do _m=${_key%%_*}; _i=${_key#*_}
 		[ "$_m" = "weburl" ] || continue; $ipt -t mangle -n -L "PCAD_$_key" >/dev/null 2>&1 || continue
 		_fired=0; [ -f "$STATE_DIR/fired.$_key" ] && _fired=1
-		_win_nr=0; _win_d=0
+		_win_nr=0; _win_d=0; _dns_tg=; _dns_d=0
 		_n=0; diag_targets "$_m" "$_i" > "$_tf"
 		# D1-v2：.map 每 key 只读一次（不进 per-target 循环），拼成 `|target<TAB>nr|…` 供查。
 		# 缺 .map（老 shell / 没跑过 refresh_ips）⇒ 空串 ⇒ 所有目标归 nr=0（未归类，D7 回退）。
@@ -1448,14 +1448,23 @@ sample_diag_counters() { # $1=阈值（字节）
 			# 顺序固定（R73-M3）：t 行先按**扣减前**的 _d_all 判（整条目命中该目标就记），
 			# 名称归属只在额度已 fired 时用扣减后的 _d 挑赢家。
 			[ "$_d_all" -gt 0 ] && [ "$_d_all" -ge "$_thr" ] && diag_bump_t "$_key" "$_tg"
-			if [ "$_fired" = 1 ] && [ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ] && [ "$_d" -gt "$_win_d" ]; then
+			if [ "$_fired" = 1 ] && [ "$_d" -gt 0 ] && [ "$_d" -ge "$_thr" ]; then
 				_nr=0; _rest=${_req#*"|$_tg$TAB"}; [ "$_rest" = "$_req" ] || _nr=${_rest%%"|"*}
 				case "$_nr" in ''|*[!0-9]*) _nr=0 ;; esac
-				_win_d=$_d; _win_nr=$_nr
+				[ "$_d" -gt "$_win_d" ] && { _win_d=$_d; _win_nr=$_nr; }
+				# DNS 归属只认 IP/CIDR 目标（明文串不是应答 IP）；过阈 IP 里流量最大者供 dns_unique_nr。
+				case "$_tg" in
+				[0-9]*.[0-9]*.[0-9]*.[0-9]*/*|[0-9]*.[0-9]*.[0-9]*.[0-9]*|*:*/*|*:*)
+					[ "$_d" -gt "$_dns_d" ] && { _dns_d=$_d; _dns_tg=$_tg; }
+					;;
+				esac
 			fi
 		done < "$_tf"
-		# 额度本 tick 已记 1 分钟 ⇒ 把这一分钟归到赢家名称（无赢家则未归类）。
+		# 额度本 tick 已记 1 分钟 ⇒ 归到赢家名称。ADR-1：DNS 唯一归属优先；多名称冲突强制 nr=0；无 DNS 证据回退 .map/诊断赢家。
 		if [ "$_fired" = 1 ]; then
+			_dns_nr=
+			[ -n "$_dns_tg" ] && _dns_nr=$(dns_unique_nr "$_key" "$_dns_tg")
+			case "$_dns_nr" in '') ;; *) _win_nr=$_dns_nr ;; esac
 			diag_bump_n "$_key" "$_win_nr"
 			rm -f "$STATE_DIR/fired.$_key"
 		fi
@@ -2063,6 +2072,9 @@ PC_DNSMAP_MAX=${PC_DNSMAP_MAX:-2000}   # dnsmap 总行数上限（超出按 coun
 PC_PTR_MAX=${PC_PTR_MAX:-8}            # 每次 sweep 最多查几个目标（控 DNS 压力）
 PC_PTR_MIN_AGE=${PC_PTR_MIN_AGE:-10}   # sweep 最小间隔（分钟）
 PC_DNS_IFACE=${PC_DNS_IFACE:-br-lan}   # 被动 DNS 采集接口
+# DNS→封锁名称归属窗口（ADR-3 / pc-dns-attr）：无应答 TTL 时默认 600s；有 TTL 时 min(TTL, 1800)。
+PC_DNS_ATTR_WIN=${PC_DNS_ATTR_WIN:-600}
+PC_DNS_ATTR_CAP=${PC_DNS_ATTR_CAP:-1800}
 # 采集器登记表：**不能放 $STATE_DIR**（停用分支 rm -rf 那里 ⇒ round50 现场 tcpdump 成孤儿）。
 PC_RUN_DIR=${PC_RUN_DIR:-/var/run/parentcontrol-dns}
 # 进程命令行的读取根：**测试缝**。产品路径恒为 /proc（`grep -rn PC_PROC root/ luasrc/ htdocs/`
@@ -2251,6 +2263,90 @@ rev_dns_names() { # $1=target
 	}
 	END { for (k in c) printf "%d\t%s\n", c[k], k }
 	' "$USAGE_DIR/dnsmap" 2>/dev/null | sort -rn | head -n 10
+}
+
+# DNS→封锁名称唯一归属（pc-dns-attr / ADR-1）：
+#   $1=entry_key  $2=ip_or_cidr
+#   窗口内该目标恰好命中本条目 1 个封锁名称 → 打印 nr(≥1)；
+#   ≥2 个名称 → 打印 0（冲突，强制未归类）；
+#   无证据 → 打印空（调用方回退 .map / 诊断赢家）。
+dns_unique_nr() {
+	local _key="$1" _tg="$2" _idx _apps _now _win _ttl _ar
+	case "$_key" in weburl_*) _idx=${_key#weburl_} ;; *) return 0 ;; esac
+	[ -n "$_tg" ] && [ -f "$USAGE_DIR/dnsmap" ] || return 0
+	_apps=$(pc_uget "@weburl[$_idx].apps" 2>/dev/null)
+	[ -n "$_apps" ] || return 0
+	_now=$(date +%s)
+	_ttl=${PC_DNS_ATTR_TTL-}
+	case "$_ttl" in
+	''|*[!0-9]*) _win=$PC_DNS_ATTR_WIN ;;
+	*) _win=$_ttl; [ "$_win" -gt "$PC_DNS_ATTR_CAP" ] && _win=$PC_DNS_ATTR_CAP ;;
+	esac
+	_ar=$(pc_apps_rows "$_apps" | awk -F'\t' '{ printf "%d %s\n", NR, $2 }')
+	[ -n "$_ar" ] || return 0
+	# ENVIRON 只见已 export 的变量；用完即清，避免泄漏进子进程环境。
+	export PC_DNS_ATTR_APPS="$_ar"
+	awk -F'\t' -v cd="$_tg" -v now="$_now" -v win="$_win" '
+	function v4(s, a, i) {
+		if (split(s, a, ".") != 4) return -1
+		for (i = 1; i <= 4; i++) if (a[i] !~ /^[0-9]+$/ || a[i] + 0 > 255) return -1
+		return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4]
+	}
+	function h4(s, a, o, i, x) {
+		o = ""; split(s, a, ":")
+		for (i = 1; i <= 4; i++) {
+			x = a[i]; if (x == "") x = "0"
+			sub(/^0+/, "", x); if (x == "") x = "0"
+			o = o ":" x
+		}
+		return o
+	}
+	function hit(nm, d, ln, ld) {
+		nm = tolower(nm); d = tolower(d)
+		if (nm == d) return 1
+		ln = length(nm); ld = length(d)
+		return (ln > ld + 1 && substr(nm, ln - ld, ld + 1) == ("." d))
+	}
+	BEGIN {
+		n = split(ENVIRON["PC_DNS_ATTR_APPS"], L, "\n")
+		for (i = 1; i <= n; i++) {
+			if (L[i] == "") continue
+			nr = int(L[i]); sub(/^[0-9]+[ ]+/, "", L[i])
+			m = split(L[i], w, / +/)
+			for (j = 1; j <= m; j++) if (w[j] != "" && !(w[j] in dom)) dom[w[j]] = nr
+		}
+		if (cd ~ /:/) {
+			v6 = 1; n = split(cd, p, "/")
+			if (n != 2 || p[2] != "64") exit 0
+			want = h4(p[1])
+		} else {
+			n = split(cd, p, "/")
+			if (n == 1) { p[1] = cd; p[2] = 32 }
+			len = p[2] + 0; base = v4(p[1])
+			if (base < 0 || len < 0 || len > 32) exit 0
+			sz = (len == 0) ? 0 : 2 ^ (32 - len)
+		}
+	}
+	NF >= 4 && ($4 + 0) >= now - win {
+		a = $1
+		if (v6) {
+			if (a !~ /:/) next
+			if (h4(a) != want) next
+		} else {
+			if (a ~ /:/) next
+			z = v4(a); if (z < 0) next
+			if (len != 0 && int(z / sz) != int(base / sz)) next
+		}
+		nm = $2
+		for (d in dom) if (hit(nm, d)) { nrs[dom[d]] = 1; break }
+	}
+	END {
+		c = 0; u = 0
+		for (r in nrs) { c++; u = r }
+		if (c == 1) print u + 0
+		else if (c >= 2) print 0
+	}' "$USAGE_DIR/dnsmap" 2>/dev/null
+	unset PC_DNS_ATTR_APPS
 }
 
 # 给某个目标拼线索串：先 PTR，再按 dnsmap count 降序；同名字去重；最多 3 个；用 ';' 连接。
@@ -2699,9 +2795,12 @@ stats_tsv_inner() {
 				done < "$_amf"
 			fi
 		done
-		# 历史（最近 30 天）。第 8 轮起 $USAGE_DIR 下多了 diag/ 子目录（诊断明细），
-		# 它不是用量文件，不能进 hist 统计。
-		for _f in $(ls -1 "$USAGE_DIR" 2>/dev/null | grep -v '^diag$' | tail -30); do
+		# 历史（最近 30 天）。只认 8 位日期文件名（YYYYMMDD）。
+		# $USAGE_DIR 里还有 diag/、ptrmap、dnsmap、dnsmap.new.* 等 —— 绝不能进 hist：
+		# 真机曾把 dnsmap 当「一天」扫进 histkey，TSV 胀到近万行，统计页口径被噪音淹没。
+		# 与 gone 收集器同一 glob（find -name '????????'），按名排序后取最近 30 个。
+		for _f in $(find "$USAGE_DIR" -maxdepth 1 -type f -name '????????' 2>/dev/null | sort | tail -30); do
+			_f=${_f##*/}
 			_t=$(awk '{s+=$2} END{printf "%d", s+0}' "$USAGE_DIR/$_f" 2>/dev/null)
 			printf 'hist\t%s\t%s\n' "$_f" "$_t"
 			awk -v d="$_f" '{s[$1]+=$2} END{for(k in s) printf "histkey\t%s\t%s\t%d\n", d, k, s[k]}' "$USAGE_DIR/$_f" 2>/dev/null

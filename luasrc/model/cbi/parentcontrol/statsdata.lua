@@ -209,7 +209,8 @@ function M.collect(raw)
 		end
 	end
 
-	-- 3) 最近 30 天窗口（补零），基于 meta.date 往前推
+	-- 3) 最近 30 天窗口（补零），基于 meta.date 往前推。
+	-- 顺序固定为「今日 → 往前 29 天」：设备明细矩阵第一列是当天；柱状图在视图里反向画（左旧右新）。
 	local dates = {}
 	local cur = meta.date and meta.date:gsub("-", "") or nil
 	if cur then
@@ -218,7 +219,6 @@ function M.collect(raw)
 			cur = prev_day(cur)
 		end
 	end
-	table.sort(dates)
 
 	-- shell 侧只按行数截取重置日志，30 天窗口由这里定义：
 	-- 窗口外的重置不参与任何统计，也不出现在「重置记录」里。
