@@ -1355,12 +1355,18 @@ diag_map_get() { _MV=${1#*"|$2|"}; [ "$_MV" = "$1" ] && { _MV=0; return 0; }; _M
 
 # 每分钟采样：目标维（PCAD → PCDT）与客户端维（PCDT → PCDC）各按同一阈值判一次。
 sample_diag_counters() { # $1=阈值（字节）
-	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _map_c _map_t _b _r _NL _pak _dead _req _nr _rest _map_u _ex _exb _buf _d_unc _d_all _fired _win_nr _win_d _dns_tg _dns_d _dns_nr
+	# Part B（pc-dns-cpu）：热路径不再把 diag.map 拼进 _map_c/_map_t/_map_u 大串、也不再循环内
+	# diag_map_get 全串扫描；改为把 c|/t|/u| 写成 `_dc_/_dt_/_du_` 赋值文件后 `.` 载入，
+	# 循环内 eval 取变量 = $O(1)$。diag_map_get 函数体保留（W149）；awk 汇总格式不变（W148）。
+	# 键名来自 iptables 链名（产品侧为 [A-Za-z0-9_]；`.` 赋值不能含 `-`），值为 awk 数字。
+	# R1-M1：变量名带 PC_DIAG_GEN 世代前缀，同进程缩表重入时「未命中」不吃上一轮陈旧非零。
+	local _thr _key _m _i _n _v _bf _d _mac _tg _dump _tf _hosts _ip _hn _k _map _ln _b _r _NL _pak _dead _req _nr _rest _ex _exb _buf _d_unc _d_all _fired _win_nr _win_d _dns_tg _dns_d _dns_nr _a _vn
 	[ -n "$ipt" ] || return 0
 	# 没装诊断链（未启用 / 无未覆盖客户端）就不采样
 	$ipt -t mangle -n -L "$TAGD" >/dev/null 2>&1 || return 0
 	_thr=$1; mkdir -p "$STATE_DIR" "$USAGE_DIR/diag"
 	_dump="$STATE_DIR/diag.dump.$$"; _tf="$STATE_DIR/diag.tg.$$"; _map="$STATE_DIR/diag.map.$$"
+	PC_DIAG_GEN=$(( ${PC_DIAG_GEN:-0} + 1 ))
 	{ $ipt -t mangle -nvx -L 2>/dev/null; $ipt6 -t mangle -nvx -L 2>/dev/null; } > "$_dump"
 	# A83-1：单遍化的唯一一次 awk（默认 FS，容忍行首空格计数列）。c|<链>|<目标>|<和> 按 (链,目标)
 	# 累加；t|<目标>|<和> 按目标跨全部链累加（不得加 ^PC 过滤，否则非 PC* 链跳向 PCDC_* 时与旧算法分叉）。
@@ -1380,15 +1386,27 @@ sample_diag_counters() { # $1=阈值（字节）
 		/^Chain / { ch = $2; next }
 		$1 ~ /^[0-9]+$/ { s[ch "|" $3] += $2; t[$3] += $2; if (ch ~ /^PCDT_/ && ($0 ~ /--mac-source/ || $0 ~ / MAC /)) u[ch] += $2 }
 		END { for (k in s) print "c|" k "|" s[k]; for (k in t) print "t|" k "|" t[k]; for (k in u) print "u|" k "|" u[k] }' "$_dump" > "$_map"
-	# A83-2：三表一次 read 循环读进变量并 `|` 串成 `…k|v|`（不得用 $(cat)，会多一个 fork）。
-	_map_c=; _map_t=; _map_u=
+	# Part B：一次 read 写成可 `.` 的赋值文件（整段 while 单次重定向，避免逐行 open）。
+	# 零大串拼接、零循环内 ${1#*…} 扫描；`.` / eval 为 ash 内建，不增稳态 fork。
 	while IFS= read -r _ln; do
 		case "$_ln" in
-		t*) _map_t="$_map_t$_ln|" ;;
-		c*) _map_c="$_map_c$_ln|" ;;
-		u*) _map_u="$_map_u$_ln|" ;;
+		c\|*)
+			_rest=${_ln#c|}; _a=${_rest%%|*}; _rest=${_rest#*|}
+			_tg=${_rest%%|*}; _v=${_rest#*|}
+			printf '_dc_%s_%s_%s=%s\n' "$PC_DIAG_GEN" "$_a" "$_tg" "$_v"
+			;;
+		t\|*)
+			_rest=${_ln#t|}; _a=${_rest%%|*}; _v=${_rest#*|}
+			printf '_dt_%s_%s=%s\n' "$PC_DIAG_GEN" "$_a" "$_v"
+			;;
+		u\|*)
+			_rest=${_ln#u|}; _a=${_rest%%|*}; _v=${_rest#*|}
+			printf '_du_%s_%s=%s\n' "$PC_DIAG_GEN" "$_a" "$_v"
+			;;
 		esac
-	done < "$_map"
+	done < "$_map" > "$_map.vars"
+	# 空 map 时仍允许 `.`（空文件）
+	. "$_map.vars"
 	_NL='
 '
 	# 名称分钟（用户原需求）：挂在「已记录设备」下、按你指定的封锁名称分类的**额度分钟**。
@@ -1415,8 +1433,9 @@ sample_diag_counters() { # $1=阈值（字节）
 			# R70-L1（round71）：纵深防御 —— 目标串若含 `|` 或 TAB，拼进 _req 会伪造表项，
 			# 直接不记账。放在 _n 自增之后：链序号必须与 _diag_emit_rules 的枚举顺序对齐。
 			case "$_tg" in *"|"*|*"$TAB"*) continue ;; esac
-			# 目标侧查 `c|` 表（键带链名，A83-1b）；行首空格计数列 ⇒ 按「首字段纯数字」识别规则行。
-			diag_map_get "$_map_c" "PCAD_$_key|PCDT_${_key}_$_n"; _v=$_MV
+			# 目标侧查 `c|` 表（键带链名，A83-1b）；变量表 $O(1)$，未命中按 0。
+			_vn="_dc_${PC_DIAG_GEN}_PCAD_${_key}_PCDT_${_key}_$_n"
+			eval "_v=\${$_vn-}"; case "$_v" in ''|*[!0-9]*) _v=0 ;; esac
 			_bf="$STATE_DIR/dbase.${_key}.t$_n"
 			# A83-3：基线纯 shell（取代 $(diag_delta …)）；缺失/非法按 0；回零按 _v 计；无论是否命中都写回。
 			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
@@ -1432,7 +1451,8 @@ sample_diag_counters() { # $1=阈值（字节）
 			# 条目设备名单为空、或名单已覆盖全部在线设备 ⇒ diag_clients 返空 ⇒ 该条目不装
 			# 诊断链（PCAD_/PCDT_ 一条都没有）⇒ 本循环不会跑到；即名称分钟只在该条目存在
 			# 「未覆盖设备」时才产生，空名单条目名称分钟恒 0（页面显示「-」）。
-			diag_map_get "$_map_u" "PCDT_${_key}_$_n"; _ex=$_MV
+			_vn="_du_${PC_DIAG_GEN}_PCDT_${_key}_$_n"
+			eval "_ex=\${$_vn-}"; case "$_ex" in ''|*[!0-9]*) _ex=0 ;; esac
 			_buf="$STATE_DIR/dbase.${_key}.u$_n"
 			if [ -f "$_buf" ]; then
 				_exb=0; IFS= read -r _exb < "$_buf" 2>/dev/null
@@ -1469,7 +1489,8 @@ sample_diag_counters() { # $1=阈值（字节）
 			rm -f "$STATE_DIR/fired.$_key"
 		fi
 		_n=0; for _mac in $(diag_clients "$_m" "$_i"); do _n=$((_n + 1))
-			diag_map_get "$_map_t" "PCDC_${_key}_$_n"; _v=$_MV
+			_vn="_dt_${PC_DIAG_GEN}_PCDC_${_key}_$_n"
+			eval "_v=\${$_vn-}"; case "$_v" in ''|*[!0-9]*) _v=0 ;; esac
 			_bf="$STATE_DIR/dbase.${_key}.c$_n"
 			_b=0; [ -f "$_bf" ] && IFS= read -r _b < "$_bf" 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
 			if [ "$_v" -ge "$_b" ]; then _d=$((_v - _b)); else _d=$_v; fi; printf '%s\n' "$_v" > "$_bf"
@@ -1479,7 +1500,8 @@ sample_diag_counters() { # $1=阈值（字节）
 			diag_bump_c "$_key" "$_mac" "$_ip" "$_hn"
 		done
 	done
-	rm -f "$_dump" "$_tf" "$_map"
+	# Part B：清理 dump / 目标表 / map / 变量赋值文件
+	rm -f "$_dump" "$_tf" "$_map" "$_map.vars"
 	# 条目被删/禁用后清掉它的诊断基线（与 base.* 同思路）
 	# A110（design §11.25.2 / F-1）：`pc_active_keys` 提到循环外 —— 原先每个 dbase.* 各起
 	# 1 个 `pc_active_keys` 子 shell + 1 个 `grep -qx` ⇒ N 个文件 = 2N fork。真机 49 个文件
@@ -2069,6 +2091,10 @@ pc_ptr_query() { # $1=IPv4（无掩码） → 打印 PTR 主机名（失败给�
 PC_PTR_TTL=${PC_PTR_TTL:-86400}        # ptrmap 行有效期（秒）
 PC_DNS_TTL=${PC_DNS_TTL:-604800}       # dnsmap 行有效期（秒，7 天）
 PC_DNSMAP_MAX=${PC_DNSMAP_MAX:-2000}   # dnsmap 总行数上限（超出按 count 小者淘汰）
+PC_DNS_FLUSH_N=${PC_DNS_FLUSH_N:-200}  # stage 累计行触发 merge（可 env 覆盖；原硬编码 50）
+PC_DNS_FLUSH_SEC=${PC_DNS_FLUSH_SEC:-30} # 距上次 merge 最少秒数；与行阈值先到先刷
+# R1-L1：export 以便 start-stop-daemon 子进程 / 纯赋值启动也能看见（VAR=cmd 前缀本就可进子进程）。
+export PC_DNS_FLUSH_N PC_DNS_FLUSH_SEC
 PC_PTR_MAX=${PC_PTR_MAX:-8}            # 每次 sweep 最多查几个目标（控 DNS 压力）
 PC_PTR_MIN_AGE=${PC_PTR_MIN_AGE:-10}   # sweep 最小间隔（分钟）
 PC_DNS_IFACE=${PC_DNS_IFACE:-br-lan}   # 被动 DNS 采集接口
@@ -2371,43 +2397,62 @@ rev_dns_parse() { # stdin=tcpdump 文本 → stdout "<ip>\t<name>"
 }
 
 # 把 stage 的 <ip>\t<name> 并进 dnsmap：累加 count、刷新 lastts、丢 >7 天、超限按 count 淘汰。原子写。
+# pc-dns-cpu：awk 只聚合；排序/截断走外置 sort+head（O(n log n)，告别插入排序）。
+# R1-M2：聚合 awk 先落盘；失败不 mv（dash/ash 无 pipefail，管道末级会掩盖上游非 0 ⇒ 空文件清表）。
+# R2-M1：sort 分段落盘；失败 / agg 非空而结果空 → 不 mv。
+# R2-M2：任一段失败 return 非 0，worker「merge && : > stage」不得误清待合并行。
 rev_dns_merge() { # $1=stage 文件
-	local _stage="$1" _now
+	local _stage="$1" _now _tab _tmp _agg _srt
 	_now=$(date +%s)
 	[ -f "$_stage" ] || return 0
 	mkdir -p "$USAGE_DIR" 2>/dev/null
 	# awk 的第一个输入文件不存在会直接报错退出（连 stage 也不处理），所以先给个空文件。
 	[ -f "$USAGE_DIR/dnsmap" ] || : > "$USAGE_DIR/dnsmap" 2>/dev/null
-	awk -F'\t' -v now="$_now" -v ttl="$PC_DNS_TTL" -v max="$PC_DNSMAP_MAX" '
-	FILENAME == ARGV[1] {
-		if (NF >= 4 && ($4 + 0) > now - ttl) c[$1 SUBSEP $2] += ($3 + 0)
-		next
-	}
-	NF >= 2 && $1 != "" && $2 != "" { c[$1 SUBSEP $2] += 1 }
-	END {
-		n = 0
-		for (k in c) {
-			n++
-			sp = index(k, SUBSEP)
-			ipa[n] = substr(k, 1, sp - 1); nma[n] = substr(k, sp + 1); ca[n] = c[k]
+	_tab=$(printf '\t')
+	_tmp="$USAGE_DIR/dnsmap.new.$$"
+	_agg="$USAGE_DIR/dnsmap.agg.$$"
+	_srt="$USAGE_DIR/dnsmap.srt.$$"
+	if ! awk -F'\t' -v now="$_now" -v ttl="$PC_DNS_TTL" '
+		FILENAME == ARGV[1] {
+			if (NF >= 4 && ($4 + 0) > now - ttl) c[$1 SUBSEP $2] += ($3 + 0)
+			next
 		}
-		for (i = 2; i <= n; i++) {
-			for (j = i; j > 1 && ca[j] > ca[j - 1]; j--) {
-				ts = ca[j]; ca[j] = ca[j - 1]; ca[j - 1] = ts
-				ts = ipa[j]; ipa[j] = ipa[j - 1]; ipa[j - 1] = ts
-				ts = nma[j]; nma[j] = nma[j - 1]; nma[j - 1] = ts
+		NF >= 2 && $1 != "" && $2 != "" { c[$1 SUBSEP $2] += 1 }
+		END {
+			for (k in c) {
+				sp = index(k, SUBSEP)
+				printf "%s\t%s\t%d\n", substr(k, 1, sp - 1), substr(k, sp + 1), c[k]
 			}
-		}
-		lim = (n > max) ? max : n
-		for (i = 1; i <= lim; i++) printf "%s\t%s\t%d\t%d\n", ipa[i], nma[i], ca[i], now
-	}' "$USAGE_DIR/dnsmap" "$_stage" > "$USAGE_DIR/dnsmap.new.$$" 2>/dev/null \
-		&& mv -f "$USAGE_DIR/dnsmap.new.$$" "$USAGE_DIR/dnsmap" 2>/dev/null
-	rm -f "$USAGE_DIR/dnsmap.new.$$" 2>/dev/null
+		}' "$USAGE_DIR/dnsmap" "$_stage" > "$_agg" 2>/dev/null; then
+		rm -f "$_agg" "$_tmp" "$_srt" 2>/dev/null
+		return 1
+	fi
+	if ! sort -t "$_tab" -k3,3nr "$_agg" > "$_srt" 2>/dev/null; then
+		rm -f "$_agg" "$_tmp" "$_srt" 2>/dev/null
+		return 1
+	fi
+	if ! head -n "$PC_DNSMAP_MAX" "$_srt" \
+		| awk -F'\t' -v now="$_now" 'NF >= 3 { printf "%s\t%s\t%s\t%d\n", $1, $2, $3, now }' \
+		> "$_tmp" 2>/dev/null; then
+		rm -f "$_agg" "$_tmp" "$_srt" 2>/dev/null
+		return 1
+	fi
+	# agg 有行而结果空 ⇒ 截断/格式异常，拒绝覆盖（空 agg 写空 dnsmap 合法：全过期）。
+	if [ -s "$_agg" ] && [ ! -s "$_tmp" ]; then
+		rm -f "$_agg" "$_tmp" "$_srt" 2>/dev/null
+		return 1
+	fi
+	if ! mv -f "$_tmp" "$USAGE_DIR/dnsmap" 2>/dev/null; then
+		rm -f "$_agg" "$_tmp" "$_srt" 2>/dev/null
+		return 1
+	fi
+	rm -f "$_tmp" "$_agg" "$_srt" 2>/dev/null
 	return 0
 }
 
 # 被动 DNS 采集 worker 的脚本文本（dns_watch 写到 STATE_DIR 再后台执行）：tcpdump →
-# `_dns_awk_text` 的同一份程序体 → 每 50 行 rev_dns_merge 落盘。**snaplen 必须是 0**（-s 120 会截断应答）。
+# `_dns_awk_text` 的同一份程序体 → 行阈值/时间双闸刷盘（PC_DNS_FLUSH_N / PC_DNS_FLUSH_SEC）。
+# **snaplen 必须是 0**（-s 120 会截断应答）。INT/TERM/EOF 经 EXIT trap 必刷剩余 stage。
 _dns_worker_text() {
 	cat <<'DNSW'
 #!/bin/sh
@@ -2431,23 +2476,40 @@ command -v tcpdump >/dev/null 2>&1 || exit 0
 dw_in="$dw_run/fifo.$$.in"; dw_out="$dw_run/fifo.$$.out"
 rm -f "$dw_in" "$dw_out"
 mkfifo "$dw_in" "$dw_out" 2>/dev/null || exit 1
-trap 'rm -f "$dw_in" "$dw_out"' EXIT
-trap 'rm -f "$dw_in" "$dw_out"; exit 0' INT TERM
+# EXIT 必刷剩余 stage（INT/TERM/管道 EOF 共用）；fifo 清理一并放这。
+trap 'rev_dns_merge "$dw_stage"; rm -f "$dw_in" "$dw_out"' EXIT
+trap 'exit 0' INT TERM
 tcpdump -i "$dw_iface" -nn -l -s 0 "udp port 53" 2>/dev/null > "$dw_in" &
 dw_tp=$!
 awk -f "$dw_awk" < "$dw_in" > "$dw_out" 2>/dev/null &
 dw_aw=$!
 printf '%s %s\n' "$dw_tp" "$dw_aw" > "$dw_run/pids"
+dw_flush_n=${PC_DNS_FLUSH_N:-200}
+dw_flush_sec=${PC_DNS_FLUSH_SEC:-30}
+case "$dw_flush_n" in ''|*[!0-9]*) dw_flush_n=200 ;; esac
+case "$dw_flush_sec" in ''|*[!0-9]*) dw_flush_sec=30 ;; esac
 dw_n=0
+dw_last=$(date +%s)
+dw_now=$dw_last
+# R1-M3：时间闸用缓存秒；每 dw_date_every 行才 fork 一次 date（行闸为主，避免每 DNS 行 date）。
+dw_date_every=32
+dw_date_i=0
 while IFS= read -r dw_line; do
 	printf '%s\n' "$dw_line" >> "$dw_stage"
 	dw_n=$((dw_n + 1))
-	if [ "$dw_n" -ge 50 ]; then
+	dw_date_i=$((dw_date_i + 1))
+	if [ "$dw_date_i" -ge "$dw_date_every" ]; then
+		dw_now=$(date +%s)
+		dw_date_i=0
+	fi
+	if [ "$dw_n" -ge "$dw_flush_n" ] || [ $((dw_now - dw_last)) -ge "$dw_flush_sec" ]; then
 		rev_dns_merge "$dw_stage" && : > "$dw_stage"
 		dw_n=0
+		dw_last=$dw_now
+		dw_date_i=0
 	fi
 done < "$dw_out"
-rev_dns_merge "$dw_stage"
+# EOF：EXIT trap 刷剩余 stage
 DNSW
 }
 

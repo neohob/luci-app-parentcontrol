@@ -6,6 +6,20 @@
 倒序排列。安装包在 [Releases](https://github.com/neohob/luci-app-parentcontrol/releases) 下载。
 
 
+## 1.8.17（2026-11-25）被动 DNS 与诊断采样 CPU 优化：路由器不再被 merge/tick 各吃满一核
+
+**改动**（自 1.8.16 起；封锁/额度/名称归属语义不变）：
+
+1. **`rev_dns_merge`**：去掉 awk $O(n^2)$ 插入排序，改为聚合后外置 `sort` + 截断（满表合并从数秒级降到数十毫秒量级）；失败分段落盘，避免管道失败清空 dnsmap。
+2. **`dns.worker` 刷盘节流**：默认累计 **200** 行或间隔 **30** 秒再合并（原硬编码 50 行）；退出时仍刷完 stage；时间闸不再每行 `date` fork。
+3. **`sample_diag_counters`**：不再把 ~46KB 诊断表拼进超大 shell 串再循环 `diag_map_get` 扫描；改为赋值文件 `$O(1)$ 查表。真机整分 tick 诊断段由约 **12s / ~23% 单核** 降到约 **1s / 峰值约 5%**。
+4. 环境变量：`PC_DNS_FLUSH_N` / `PC_DNS_FLUSH_SEC`（可覆盖默认刷盘策略）。
+
+**说明**：
+
+- 被动 DNS / 诊断记账口径（`t`/`c`/`n`、未覆盖扣减、DNS 唯一归属）不变。
+- 升级后若 `dns_watch` 未自动起来，执行一次 `/etc/init.d/parentcontrol dns_watch`（或等 cron tick / 服务重启）。
+
 ## 1.8.16（2026-11-15）名称归属优先用路由 DNS：唯一域名→IP 自动归类，撞 CDN 进未归类
 
 **改动**（自 1.8.15 起；额度模型不变，未归类仍占额度）：
