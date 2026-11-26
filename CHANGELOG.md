@@ -6,6 +6,12 @@
 倒序排列。安装包在 [Releases](https://github.com/neohob/luci-app-parentcontrol/releases) 下载。
 
 
+## 1.8.18（2026-11-26）升级 / restart 后自动拉起被动 DNS 采集
+
+**修复**（自 1.8.17 起）：
+
+1. **`start()` 末尾调用 `dns_watch_ensure`**：opkg / LuCI 的 `restart` = `stop`（会停掉采集）+ `start`。此前 `start` 只重建防火墙规则，被动 DNS 要等到下一分钟的 `tick` 才自愈，看起来像「升级后 dns_watch 没起来、要人手敲」。现在启用态下 **restart 当场拉回** 采集器，无需手动。
+
 ## 1.8.17（2026-11-25）被动 DNS 与诊断采样 CPU 优化：路由器不再被 merge/tick 各吃满一核
 
 **改动**（自 1.8.16 起；封锁/额度/名称归属语义不变）：
@@ -18,7 +24,7 @@
 **说明**：
 
 - 被动 DNS / 诊断记账口径（`t`/`c`/`n`、未覆盖扣减、DNS 唯一归属）不变。
-- 升级后若 `dns_watch` 未自动起来，执行一次 `/etc/init.d/parentcontrol dns_watch`（或等 cron tick / 服务重启）。
+- （1.8.17 曾写「升级后可能要手动 dns_watch」——那是 `start()` 未拉采集器的缺口，已在 **1.8.18** 修掉。）
 
 ## 1.8.16（2026-11-15）名称归属优先用路由 DNS：唯一域名→IP 自动归类，撞 CDN 进未归类
 

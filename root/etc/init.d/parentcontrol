@@ -3156,6 +3156,9 @@ start() {
 	refresh_ips
 	build_all
 	cron_sync 1
+	# opkg/LuCI 的 restart = stop（dns_watch_stop）+ start。若这里不拉回采集器，
+	# 被动 DNS 要等到下一分钟 tick 的 dns_watch_ensure 才活 —— 升级后「没起来」的假缺口。
+	dns_watch_ensure
 	prune_usage
 	clean_log
 	rm -f "$LOCK" 2>/dev/null
